@@ -1,0 +1,29 @@
+# Runtime assets (kept locally, never committed)
+/.cache/
+/.venv-realtime-o45/
+
+# Android and web dependencies
+/apps/android/node_modules/
+/apps/android/dist/
+/apps/android/.android-sdk/
+/apps/android/src-tauri/target/
+/apps/android/src-tauri/gen/schemas/
+/apps/android/src-tauri/gen/android/.gradle/
+/apps/android/src-tauri/gen/android/build/
+/apps/android/src-tauri/gen/android/app/build/
+/apps/android/src-tauri/gen/android/local.properties
+
+# Service state
+/deploy/realtime-o45/data/
+/deploy/realtime-o45/logs/
+/deploy/realtime-o45/run/
+
+# Build artifacts
+*.apk
+*.aab
+
+# Local/editor files
+.DS_Store
+.idea/
+.vscode/
+*.log

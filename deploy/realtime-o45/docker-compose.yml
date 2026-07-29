@@ -1,0 +1,77 @@
+name: minicpm-o45-realtime
+
+services:
+  gateway:
+    build:
+      context: ${REALTIME_SOURCE_DIR:?run setup.sh first}
+      dockerfile: docker/Dockerfile.gateway
+    image: minicpm-o45-gateway:local
+    container_name: minicpm-o45-gateway
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8006"
+      - "--internal-port"
+      - "8007"
+      - "--internal-host"
+      - "0.0.0.0"
+      - "--http"
+    ports:
+      - "${GATEWAY_HOST_PORT:-8600}:8006"
+    expose:
+      - "8007"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8006/docs"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  worker:
+    build:
+      context: ${REALTIME_SOURCE_DIR:?run setup.sh first}
+      dockerfile: docker/Dockerfile.worker-backend
+    image: minicpm-o45-worker:local
+    container_name: minicpm-o45-worker-gpu1
+    environment:
+      GPU_ID: "0"
+      BACKEND_PORT: "22500"
+      WORKER_PORT: "22400"
+      MODEL_PATH: /models/MiniCPM-o-4_5
+      GATEWAY_REGISTRY_URL: "http://gateway:8007/internal/workers"
+      WORKER_ID: "worker-gpu-${GPU_DEVICE_ID:-1}"
+      WORKER_ENDPOINT: "worker:22400"
+      WORKER_GPU_GROUP: "gpu-${GPU_DEVICE_ID:-1}"
+    volumes:
+      - ${MODEL_HOST_PATH:?set MODEL_HOST_PATH}:/models/MiniCPM-o-4_5:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-1}"]
+              capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:22400/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
