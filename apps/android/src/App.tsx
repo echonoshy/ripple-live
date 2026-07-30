@@ -1,18 +1,17 @@
 import {
   ArrowLeft,
-  Camera,
   CameraRotate,
   GearSix,
+  HandPalm,
   Microphone,
   MicrophoneSlash,
   PhoneDisconnect,
-  SpeakerHigh,
   VideoCamera,
-  Waveform,
   X,
 } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
+import appIcon from '../src-tauri/icons/icon.png'
 import { LiveMedia } from './media/LiveMedia'
 import {
   RealtimeSession,
@@ -63,6 +62,7 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sessionRef = useRef<RealtimeSession | null>(null)
   const mediaRef = useRef<LiveMedia | null>(null)
+  const visualizerRef = useRef<HTMLDivElement>(null)
 
   const isActive = [
     'connecting',
@@ -132,6 +132,10 @@ export default function App() {
         onReady: async () => {
           await media.start((audio, frame) => {
             void session.sendInput(audio, frame)
+          }, () => {
+            if (session.interrupt()) media.clearOutput()
+          }, (level) => {
+            visualizerRef.current?.style.setProperty('--audio-level', String(level))
           })
         },
       })
@@ -210,8 +214,12 @@ export default function App() {
       {screen === 'home' && (
         <section className="home-screen">
           <header className="home-header">
-            <div className="brand-mark" aria-hidden="true">
-              <Waveform weight="bold" />
+            <div className="brand-lockup">
+              <img src={appIcon} alt="" />
+              <div>
+                <strong>Ripple Live</strong>
+                <span>实时多模态助手</span>
+              </div>
             </div>
             <button
               className="icon-button"
@@ -223,44 +231,40 @@ export default function App() {
             </button>
           </header>
 
-          <div className="home-copy">
-            <p className="product-name">Ripple Live</p>
-            <h1>现在，就开始对话</h1>
-            <p>直接说话，或者打开摄像头。模型会边听、边看、边回答。</p>
+          <div className="ready-state">
+            <div className="ready-signal" aria-hidden="true">
+              {[0, 1, 2, 3, 4, 5, 6].map((bar) => (
+                <span key={bar} />
+              ))}
+            </div>
+            <p>READY</p>
+            <h1>准备通话</h1>
+            <span>选择语音或视频，直接开始交流。</span>
           </div>
 
-          <div className="mode-actions">
+          <div className="launch-actions">
             <button
-              className="mode-button audio-mode"
+              className="launch-button primary-launch"
               type="button"
               onClick={() => openCall('audio')}
             >
-              <span className="mode-icon">
-                <Microphone weight="fill" />
-              </span>
+              <Microphone weight="fill" />
               <span>
-                <strong>语音通话</strong>
-                <small>端到端实时语音</small>
+                <strong>开始语音通话</strong>
+                <small>实时聆听与回答</small>
               </span>
             </button>
             <button
-              className="mode-button video-mode"
+              className="launch-button secondary-launch"
               type="button"
               onClick={() => openCall('video')}
             >
-              <span className="mode-icon">
-                <VideoCamera weight="fill" />
-              </span>
+              <VideoCamera weight="fill" />
               <span>
-                <strong>视频通话</strong>
-                <small>让模型听见并看见</small>
+                <strong>打开视频通话</strong>
+                <small>共享镜头中的画面</small>
               </span>
             </button>
-          </div>
-
-          <div className="server-line">
-            <span className="server-indicator" aria-hidden="true" />
-            <span>{server}</span>
           </div>
         </section>
       )}
@@ -312,14 +316,9 @@ export default function App() {
           <div className="camera-scrim" />
 
           <header className="call-header">
-            <button
-              className="icon-button call-icon"
-              type="button"
-              aria-label="退出通话"
-              onClick={() => void leaveCall()}
-            >
-              <ArrowLeft />
-            </button>
+            <span className="call-mode">
+              {mode === 'video' ? '视频通话' : '语音通话'}
+            </span>
             <div className={`call-status ${statusClass}`}>
               <span aria-hidden="true" />
               <strong>{stateLabels[sessionState]}</strong>
@@ -339,31 +338,40 @@ export default function App() {
             )}
           </header>
 
-          <div className="conversation">
+          <div className={`conversation ${statusClass}`}>
             {mode === 'audio' && (
-              <div className={`voice-orb ${statusClass}`}>
-                <div className="orb-core">
-                  {sessionState === 'speaking' ? (
-                    <SpeakerHigh weight="fill" />
-                  ) : (
-                    <Waveform weight="bold" />
-                  )}
-                </div>
-                <span className="orb-ring ring-one" />
-                <span className="orb-ring ring-two" />
+              <div
+                ref={visualizerRef}
+                className={`voice-visualizer ${statusClass}`}
+                aria-hidden="true"
+              >
+                {[0.45, 0.7, 1, 0.62, 0.88, 0.56, 0.38].map((scale, index) => (
+                  <span
+                    key={index}
+                    style={{ height: `${24 + scale * 88}px` }}
+                  />
+                ))}
               </div>
             )}
 
             <div className="transcript" aria-live="polite">
-              {userText && <p className="user-caption">{userText}</p>}
-              <p className="assistant-caption">
-                {assistantText ||
-                  (sessionState === 'listening'
-                    ? '我在听'
-                    : sessionState === 'speaking'
-                      ? '正在组织回答'
-                      : '正在建立实时连接')}
-              </p>
+              {userText && (
+                <div className="utterance user-utterance">
+                  <span>你</span>
+                  <p>{userText}</p>
+                </div>
+              )}
+              <div className="utterance assistant-utterance">
+                <span>Ripple</span>
+                <p>
+                  {assistantText ||
+                    (sessionState === 'listening'
+                      ? '我在听'
+                      : sessionState === 'speaking'
+                        ? '正在回答'
+                        : '正在建立实时连接')}
+                </p>
+              </div>
               {errorMessage && (
                 <div className="error-message">
                   <X weight="bold" />
@@ -374,30 +382,43 @@ export default function App() {
           </div>
 
           <footer className="call-controls">
-            <button
-              className={`control-button ${muted ? 'is-active' : ''}`}
-              type="button"
-              aria-label={muted ? '取消静音' : '静音'}
-              onClick={toggleMute}
-            >
-              {muted ? <MicrophoneSlash /> : <Microphone />}
-            </button>
-            <button
-              className="end-button"
-              type="button"
-              aria-label="结束通话"
-              onClick={() => void leaveCall()}
-            >
-              <PhoneDisconnect weight="fill" />
-            </button>
-            <button
-              className="control-button"
-              type="button"
-              aria-label="强制模型聆听"
-              onClick={() => sessionRef.current?.forceListen()}
-            >
-              {mode === 'video' ? <Camera /> : <Waveform />}
-            </button>
+            <div className="control-item">
+              <button
+                className={`control-button ${muted ? 'is-active' : ''}`}
+                type="button"
+                aria-label={muted ? '取消静音' : '静音'}
+                onClick={toggleMute}
+              >
+                {muted ? <MicrophoneSlash /> : <Microphone />}
+              </button>
+              <span>{muted ? '取消静音' : '静音'}</span>
+            </div>
+            <div className="control-item">
+              <button
+                className="end-button"
+                type="button"
+                aria-label="结束通话"
+                onClick={() => void leaveCall()}
+              >
+                <PhoneDisconnect weight="fill" />
+              </button>
+              <span>结束</span>
+            </div>
+            <div className="control-item">
+              <button
+                className="control-button"
+                type="button"
+                aria-label="打断回答"
+                onClick={() => {
+                  if (sessionRef.current?.forceListen()) {
+                    mediaRef.current?.clearOutput()
+                  }
+                }}
+              >
+                <HandPalm weight="fill" />
+              </button>
+              <span>打断</span>
+            </div>
           </footer>
         </section>
       )}

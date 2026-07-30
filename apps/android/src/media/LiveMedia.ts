@@ -1,3 +1,5 @@
+import { MicVAD } from '@ricky0123/vad-web'
+
 type LiveMediaOptions = {
   video: HTMLVideoElement
   canvas: HTMLCanvasElement
@@ -9,6 +11,11 @@ type AudioChunkMessage = {
   type: 'audio-chunk'
   samples: Float32Array
   sampleRate: number
+}
+
+type AudioLevelMessage = {
+  type: 'audio-level'
+  level: number
 }
 
 function resampleTo16k(samples: Float32Array, sourceRate: number) {
@@ -41,9 +48,11 @@ export class LiveMedia {
   private captureNode: AudioWorkletNode | null = null
   private sourceNode: MediaStreamAudioSourceNode | null = null
   private silentGain: GainNode | null = null
+  private vad: MicVAD | null = null
   private muted = false
   private running = false
   private nextPlaybackTime = 0
+  private playbackSources = new Set<AudioBufferSourceNode>()
   private facingMode: 'user' | 'environment'
 
   constructor(options: LiveMediaOptions) {
@@ -53,6 +62,8 @@ export class LiveMedia {
 
   async start(
     onChunk: (audio: Float32Array, frame: string | null) => void,
+    onSpeechStart: () => void,
+    onLevel: (level: number) => void,
   ) {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('当前设备不支持麦克风或摄像头采集')
@@ -89,9 +100,13 @@ export class LiveMedia {
     this.running = true
 
     this.captureNode.port.onmessage = (
-      event: MessageEvent<AudioChunkMessage>,
+      event: MessageEvent<AudioChunkMessage | AudioLevelMessage>,
     ) => {
-      if (!this.running || event.data.type !== 'audio-chunk') return
+      if (!this.running) return
+      if (event.data.type === 'audio-level') {
+        onLevel(this.muted ? 0 : Math.min(1, event.data.level * 8))
+        return
+      }
       const resampled = resampleTo16k(
         event.data.samples,
         event.data.sampleRate,
@@ -100,6 +115,34 @@ export class LiveMedia {
         ? new Float32Array(resampled.length)
         : resampled
       onChunk(audio, this.captureFrame())
+    }
+
+    try {
+      this.vad = await MicVAD.new({
+        model: 'v5',
+        baseAssetPath: '/vad/',
+        onnxWASMBasePath: '/vad/ort/',
+        getStream: async () => {
+          if (!this.audioStream) throw new Error('麦克风流尚未启动')
+          return this.audioStream
+        },
+        pauseStream: async () => {},
+        resumeStream: async (stream) => stream,
+        positiveSpeechThreshold: 0.6,
+        negativeSpeechThreshold: 0.35,
+        redemptionMs: 320,
+        minSpeechMs: 96,
+        preSpeechPadMs: 0,
+        ortConfig: (ort) => {
+          ort.env.wasm.numThreads = 1
+        },
+        onSpeechRealStart: () => {
+          if (this.running && !this.muted) onSpeechStart()
+        },
+      })
+    } catch (error) {
+      console.warn('Silero VAD 初始化失败，自动打断已禁用', error)
+      this.vad = null
     }
   }
 
@@ -127,13 +170,35 @@ export class LiveMedia {
     const source = context.createBufferSource()
     source.buffer = buffer
     source.connect(context.destination)
+    this.playbackSources.add(source)
+    source.onended = () => {
+      this.playbackSources.delete(source)
+      source.disconnect()
+    }
     const startAt = Math.max(this.nextPlaybackTime, context.currentTime + 0.03)
     source.start(startAt)
     this.nextPlaybackTime = startAt + buffer.duration
   }
 
+  clearOutput() {
+    for (const source of this.playbackSources) {
+      try {
+        source.stop()
+      } catch {
+        // A source that already ended is harmless.
+      }
+      source.disconnect()
+    }
+    this.playbackSources.clear()
+    this.nextPlaybackTime = 0
+  }
+
   stop() {
     this.running = false
+    const vad = this.vad
+    this.vad = null
+    void vad?.destroy().catch(() => {})
+    this.clearOutput()
     this.captureNode?.disconnect()
     this.sourceNode?.disconnect()
     this.silentGain?.disconnect()
@@ -146,7 +211,6 @@ export class LiveMedia {
     this.captureContext = null
     void this.playbackContext?.close()
     this.playbackContext = null
-    this.nextPlaybackTime = 0
     this.stopCamera()
   }
 

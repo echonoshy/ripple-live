@@ -133,6 +133,8 @@ export class RealtimeSession {
   private assistantText = ''
   private userText = ''
   private forceListenNext = false
+  private outputActive = false
+  private interruptPending = false
 
   constructor(options: SessionOptions) {
     this.options = options
@@ -255,6 +257,8 @@ export class RealtimeSession {
 
   private handleDelta(event: RealtimeEvent) {
     if (event.kind === 'listen') {
+      this.outputActive = false
+      this.interruptPending = false
       this.userText = event.text?.trim() ?? ''
       if (this.userText) this.options.onUserText(this.userText)
       this.assistantText = ''
@@ -263,6 +267,8 @@ export class RealtimeSession {
     }
 
     if (event.kind === 'text' && event.text) {
+      if (this.interruptPending) return
+      this.outputActive = true
       this.assistantText += event.text
       this.options.onAssistantText(this.assistantText)
       this.options.onState('speaking')
@@ -270,6 +276,8 @@ export class RealtimeSession {
     }
 
     if (event.kind === 'audio' && event.audio) {
+      if (this.interruptPending) return
+      this.outputActive = true
       this.options.onAudio(base64ToFloat32(event.audio))
       this.options.onState('speaking')
     }
@@ -310,9 +318,18 @@ export class RealtimeSession {
     }
   }
 
+  interrupt() {
+    if (!this.outputActive || this.interruptPending) return false
+    return this.forceListen()
+  }
+
   forceListen() {
+    const shouldClearOutput = this.outputActive
+    this.outputActive = false
+    this.interruptPending = true
     this.forceListenNext = true
     this.options.onState('listening')
+    return shouldClearOutput
   }
 
   async close() {
