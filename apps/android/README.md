@@ -16,7 +16,7 @@ The app supports:
 The default endpoint is:
 
 ```text
-ws://140.143.229.103:8700/v1/agent/realtime
+ws://YOUR_SERVER_IP:8700/v1/agent/realtime
 ```
 
 Every time the user starts a call, the client creates a fresh UUID and sends it
