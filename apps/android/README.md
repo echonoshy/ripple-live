@@ -9,7 +9,8 @@ The app supports:
 - server-side structured tool calls and visible tool status;
 - response interruption when the user starts speaking;
 - 24 kHz float32 response playback;
-- a stable local context ID so server-side history survives reconnection;
+- a new session ID for every voice or video call so separate calls never share
+  conversation history;
 - a configurable plain-WebSocket server address.
 
 The default endpoint is:
@@ -17,6 +18,10 @@ The default endpoint is:
 ```text
 ws://140.143.229.103:8700/v1/agent/realtime
 ```
+
+Every time the user starts a call, the client creates a fresh UUID and sends it
+as the WebSocket `session_id`. Reconnecting by starting another call therefore
+creates an empty conversation instead of restoring the previous call.
 
 ## Build
 

@@ -73,15 +73,6 @@ function normalizeServer(server: string) {
     .replace(/\/+$/, '')
 }
 
-function getContextId() {
-  const storageKey = 'ripple-context-id'
-  const existing = localStorage.getItem(storageKey)
-  if (existing) return existing
-  const created = crypto.randomUUID()
-  localStorage.setItem(storageKey, created)
-  return created
-}
-
 async function connectTauriWebSocket(
   url: string,
   onMessage: (message: TauriMessage) => void,
@@ -129,6 +120,7 @@ async function connectTauriWebSocket(
 
 export class RealtimeSession {
   private readonly options: SessionOptions
+  private readonly sessionId = crypto.randomUUID()
   private transport: Transport | null = null
   private ready = false
   private closed = false
@@ -143,8 +135,12 @@ export class RealtimeSession {
   }
 
   async connect() {
-    const contextId = encodeURIComponent(getContextId())
-    const url = `ws://${normalizeServer(this.options.server)}/v1/agent/realtime?mode=${this.options.mode}&session_id=${contextId}`
+    const sessionId = encodeURIComponent(this.sessionId)
+    const url = `ws://${normalizeServer(this.options.server)}/v1/agent/realtime?mode=${this.options.mode}&session_id=${sessionId}`
+    console.info('[Ripple Live] connecting session', {
+      sessionId: this.sessionId,
+      mode: this.options.mode,
+    })
     this.options.onState('connecting')
 
     if (isTauri()) {
@@ -216,8 +212,14 @@ export class RealtimeSession {
 
     switch (event.type) {
       case 'session.created':
+        console.info('[Ripple Live] session created', {
+          sessionId: event.session_id ?? this.sessionId,
+        })
         break
       case 'session.ready':
+        console.info('[Ripple Live] session ready', {
+          sessionId: event.session_id ?? this.sessionId,
+        })
         this.ready = true
         this.options.onState('listening')
         void this.options.onReady().catch((error: unknown) => {
@@ -282,6 +284,11 @@ export class RealtimeSession {
         this.options.onState('listening')
         break
       case 'error':
+        console.error('[Ripple Live] session error', {
+          sessionId: this.sessionId,
+          responseId: event.response_id,
+          message: event.message,
+        })
         this.options.onError(event.message ?? 'Agent 服务返回错误')
         break
     }
@@ -366,6 +373,9 @@ export class RealtimeSession {
         // Native disconnect can fail when the peer has already closed.
       }
     }
+    console.info('[Ripple Live] session closed', {
+      sessionId: this.sessionId,
+    })
     this.options.onState('ended')
   }
 }
