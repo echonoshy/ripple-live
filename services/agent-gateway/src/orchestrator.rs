@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
@@ -70,7 +70,33 @@ impl AgentOrchestrator {
         transcript_override: Option<String>,
         response_id: &str,
     ) -> anyhow::Result<()> {
+        let turn_started = Instant::now();
+        let input_kind = if transcript_override.is_some() {
+            "text"
+        } else {
+            "audio"
+        };
+        info!(
+            %session_id,
+            %response_id,
+            input = input_kind,
+            audio_samples = audio.len(),
+            frames = frames.len(),
+            "turn started"
+        );
+        self.record_flow_event(
+            session_id,
+            "server.turn.started",
+            json!({
+                "response_id": response_id,
+                "input": input_kind,
+                "audio_samples": audio.len(),
+                "frames": frames.len()
+            }),
+        )
+        .await;
         emit_response(send, response_id, json!({"type": "response.created"})).await?;
+        let transcription_started = Instant::now();
         let transcript = match transcript_override
             .as_deref()
             .map(str::trim)
@@ -83,6 +109,26 @@ impl AgentOrchestrator {
         if transcript.trim().is_empty() {
             anyhow::bail!("ASR 未识别出文本");
         }
+        let transcription_ms = transcription_started.elapsed().as_millis();
+        info!(
+            %session_id,
+            %response_id,
+            source = input_kind,
+            text_chars = transcript.chars().count(),
+            elapsed_ms = transcription_ms,
+            "input transcript ready"
+        );
+        self.record_flow_event(
+            session_id,
+            "server.transcript.completed",
+            json!({
+                "response_id": response_id,
+                "source": input_kind,
+                "text_chars": transcript.chars().count(),
+                "elapsed_ms": transcription_ms
+            }),
+        )
+        .await;
 
         emit(
             send,
@@ -136,6 +182,8 @@ impl AgentOrchestrator {
             speech_receiver,
             audio_chunk_size,
             self.settings.sample_rate_out,
+            self.context.clone(),
+            session_id.to_owned(),
         );
         let generation = async move {
             let available_tools = self.tools.schemas();
@@ -150,6 +198,18 @@ impl AgentOrchestrator {
                 } else {
                     json!("auto")
                 };
+                let agent_started = Instant::now();
+                info!(%session_id, %response_id, round, "agent generation started");
+                self.record_flow_event(
+                    session_id,
+                    "server.agent.started",
+                    json!({
+                        "response_id": response_id,
+                        "round": round,
+                        "tool_choice": tool_choice
+                    }),
+                )
+                .await;
                 let mut stream = self
                     .adapters
                     .complete_stream(&messages, &available_tools, tool_choice)
@@ -180,6 +240,28 @@ impl AgentOrchestrator {
                     merge_tool_call_deltas(&mut tool_calls, &chunk);
                 }
                 let calls = tool_calls.into_values().collect::<Vec<_>>();
+                let agent_ms = agent_started.elapsed().as_millis();
+                info!(
+                    %session_id,
+                    %response_id,
+                    round,
+                    elapsed_ms = agent_ms,
+                    text_chars = content.chars().count(),
+                    tool_calls = calls.len(),
+                    "agent generation completed"
+                );
+                self.record_flow_event(
+                    session_id,
+                    "server.agent.completed",
+                    json!({
+                        "response_id": response_id,
+                        "round": round,
+                        "elapsed_ms": agent_ms,
+                        "text_chars": content.chars().count(),
+                        "tool_calls": calls.len()
+                    }),
+                )
+                .await;
                 let raw_message = streamed_raw_message(&content, &calls);
                 messages.push(raw_message);
                 if calls.is_empty() {
@@ -196,6 +278,23 @@ impl AgentOrchestrator {
                     anyhow::bail!("模型同时返回了朗读文本和工具调用");
                 }
                 for call in calls {
+                    info!(
+                        %session_id,
+                        %response_id,
+                        call_id = %call.id,
+                        tool = %call.name,
+                        "tool execution started"
+                    );
+                    self.record_flow_event(
+                        session_id,
+                        "server.tool.started",
+                        json!({
+                            "response_id": response_id,
+                            "call_id": call.id,
+                            "name": call.name
+                        }),
+                    )
+                    .await;
                     emit_response(
                         send,
                         response_id,
@@ -216,12 +315,21 @@ impl AgentOrchestrator {
                             session_id,
                             "tool.result",
                             &json!({
+                                "response_id": response_id,
+                                "call_id": call.id,
                                 "name": call.name,
                                 "arguments": call.arguments,
                                 "result": result
                             }),
                         )
                         .await?;
+                    info!(
+                        %session_id,
+                        %response_id,
+                        call_id = %call.id,
+                        tool = %call.name,
+                        "tool execution completed"
+                    );
                     emit_response(
                         send,
                         response_id,
@@ -248,6 +356,24 @@ impl AgentOrchestrator {
         self.context
             .add_turn(session_id, "assistant", &final_text, None)
             .await?;
+        let total_ms = turn_started.elapsed().as_millis();
+        info!(
+            %session_id,
+            %response_id,
+            elapsed_ms = total_ms,
+            text_chars = final_text.chars().count(),
+            "turn completed"
+        );
+        self.record_flow_event(
+            session_id,
+            "server.turn.completed",
+            json!({
+                "response_id": response_id,
+                "elapsed_ms": total_ms,
+                "text_chars": final_text.chars().count()
+            }),
+        )
+        .await;
         emit_response(
             send,
             response_id,
@@ -270,12 +396,37 @@ async fn stream_speech(
     mut sentences: mpsc::Receiver<String>,
     audio_chunk_size: usize,
     sample_rate: u32,
+    context: ContextStore,
+    session_id: String,
 ) -> anyhow::Result<()> {
+    let mut segment_index = 0usize;
     while let Some(sentence) = sentences.recv().await {
+        let segment_started = Instant::now();
+        info!(
+            %session_id,
+            %response_id,
+            segment_index,
+            text_chars = sentence.chars().count(),
+            "tts segment started"
+        );
+        record_flow_event(
+            &context,
+            &session_id,
+            "server.tts.started",
+            json!({
+                "response_id": response_id,
+                "segment_index": segment_index,
+                "text_chars": sentence.chars().count()
+            }),
+        )
+        .await;
         let mut stream = adapters.synthesize_stream(&sentence).await?;
         let mut buffered = Vec::new();
+        let mut audio_samples = 0usize;
         while let Some(output) = stream.next().await {
-            buffered.extend(output?);
+            let output = output?;
+            audio_samples += output.len();
+            buffered.extend(output);
             while buffered.len() >= audio_chunk_size {
                 let remainder = buffered.split_off(audio_chunk_size);
                 let chunk = std::mem::replace(&mut buffered, remainder);
@@ -285,8 +436,36 @@ async fn stream_speech(
         if !buffered.is_empty() {
             emit_audio(&send, &response_id, &buffered, sample_rate).await?;
         }
+        let elapsed_ms = segment_started.elapsed().as_millis();
+        info!(
+            %session_id,
+            %response_id,
+            segment_index,
+            elapsed_ms,
+            audio_samples,
+            "tts segment completed"
+        );
+        record_flow_event(
+            &context,
+            &session_id,
+            "server.tts.completed",
+            json!({
+                "response_id": response_id,
+                "segment_index": segment_index,
+                "elapsed_ms": elapsed_ms,
+                "audio_samples": audio_samples
+            }),
+        )
+        .await;
+        segment_index += 1;
     }
     Ok(())
+}
+
+async fn record_flow_event(context: &ContextStore, session_id: &str, kind: &str, payload: Value) {
+    if let Err(error) = context.record_event(session_id, kind, &payload).await {
+        warn!(%session_id, %kind, %error, "failed to record speech event");
+    }
 }
 
 fn merge_tool_call_deltas(output: &mut BTreeMap<usize, crate::adapters::ToolCall>, chunk: &Value) {

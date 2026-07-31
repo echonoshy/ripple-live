@@ -48,6 +48,7 @@ impl ContextStore {
                 content TEXT NOT NULL, created_at REAL NOT NULL
             )",
             "CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, id)",
+            "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, id)",
             "CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id, id)",
         ] {
             sqlx::query(statement).execute(&self.pool).await?;
@@ -75,15 +76,23 @@ impl ContextStore {
         kind: &str,
         payload: &Value,
     ) -> anyhow::Result<()> {
+        let now = unix_time();
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO events(session_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
         )
         .bind(session_id)
         .bind(kind)
         .bind(serde_json::to_string(payload)?)
-        .bind(unix_time())
-        .execute(&self.pool)
+        .bind(now)
+        .execute(&mut *transaction)
         .await?;
+        sqlx::query("UPDATE sessions SET updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(session_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
         Ok(())
     }
 

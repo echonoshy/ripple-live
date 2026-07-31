@@ -115,6 +115,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         error!(%session_id, %error, "failed to initialize session");
         return;
     }
+    info!(%session_id, "session connected");
+    record_event_best_effort(
+        &state.context,
+        &session_id,
+        "server.session.connected",
+        &json!({}),
+    )
+    .await;
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (event_sender, mut event_receiver) = mpsc::channel::<Value>(64);
     let writer = tokio::spawn(async move {
@@ -206,11 +214,22 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
 
         let result = match event.kind.as_str() {
             "session.start" => {
-                send_event(
+                let result = send_event(
                     &event_sender,
                     json!({"type": "session.ready", "session_id": session_id}),
                 )
-                .await
+                .await;
+                if result.is_ok() {
+                    info!(%session_id, "session ready");
+                    record_event_best_effort(
+                        &state.context,
+                        &session_id,
+                        "server.session.ready",
+                        &json!({"mode": event.extra.get("mode")}),
+                    )
+                    .await;
+                }
+                result
             }
             "input.audio.append" => {
                 let result = append_audio(
@@ -256,41 +275,118 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 }
             }
             "input.speech_started" => {
-                cancel_response(&mut active_response, &event_sender).await;
+                cancel_response(
+                    &mut active_response,
+                    &event_sender,
+                    &state.context,
+                    &session_id,
+                    "speech_started",
+                )
+                .await;
                 speech_active = true;
                 keep_pre_roll(&mut audio, state.settings.sample_rate_in as usize / 2);
+                info!(%session_id, pre_roll_samples = audio.len(), "speech started");
+                record_event_best_effort(
+                    &state.context,
+                    &session_id,
+                    "server.input.speech_started",
+                    &json!({"pre_roll_samples": audio.len()}),
+                )
+                .await;
                 send_event(&event_sender, json!({"type": "input.speech_started"})).await
             }
             "input.commit" => {
-                cancel_response(&mut active_response, &event_sender).await;
+                cancel_response(
+                    &mut active_response,
+                    &event_sender,
+                    &state.context,
+                    &session_id,
+                    "new_audio_commit",
+                )
+                .await;
                 speech_active = false;
                 let captured_audio = std::mem::take(&mut audio);
-                let captured_frames = frames.drain(..).collect();
+                let captured_frames: Vec<_> = frames.drain(..).collect();
+                let response_id = Uuid::new_v4().to_string();
+                info!(
+                    %session_id,
+                    %response_id,
+                    audio_samples = captured_audio.len(),
+                    frames = captured_frames.len(),
+                    "audio input committed"
+                );
+                record_event_best_effort(
+                    &state.context,
+                    &session_id,
+                    "server.input.committed",
+                    &json!({
+                        "response_id": response_id,
+                        "input": "audio",
+                        "audio_samples": captured_audio.len(),
+                        "audio_ms": captured_audio.len() * 1_000 / state.settings.sample_rate_in as usize,
+                        "frames": captured_frames.len()
+                    }),
+                )
+                .await;
                 active_response = Some(spawn_turn(
                     state.orchestrator.clone(),
+                    state.context.clone(),
                     session_id.clone(),
                     event_sender.clone(),
                     captured_audio,
                     captured_frames,
                     None,
+                    response_id,
                 ));
                 Ok(())
             }
             "input.text.commit" => {
-                cancel_response(&mut active_response, &event_sender).await;
+                cancel_response(
+                    &mut active_response,
+                    &event_sender,
+                    &state.context,
+                    &session_id,
+                    "new_text_commit",
+                )
+                .await;
                 speech_active = false;
+                let captured_frames: Vec<_> = frames.drain(..).collect();
+                let text = event.text.unwrap_or_default();
+                let response_id = Uuid::new_v4().to_string();
+                info!(%session_id, %response_id, text_chars = text.chars().count(), frames = captured_frames.len(), "text input committed");
+                record_event_best_effort(
+                    &state.context,
+                    &session_id,
+                    "server.input.committed",
+                    &json!({
+                        "response_id": response_id,
+                        "input": "text",
+                        "text_chars": text.chars().count(),
+                        "frames": captured_frames.len()
+                    }),
+                )
+                .await;
                 active_response = Some(spawn_turn(
                     state.orchestrator.clone(),
+                    state.context.clone(),
                     session_id.clone(),
                     event_sender.clone(),
                     Vec::new(),
-                    frames.drain(..).collect(),
-                    Some(event.text.unwrap_or_default()),
+                    captured_frames,
+                    Some(text),
+                    response_id,
                 ));
                 Ok(())
             }
             "response.cancel" => {
-                cancel_response(&mut active_response, &event_sender).await;
+                cancel_response(
+                    &mut active_response,
+                    &event_sender,
+                    &state.context,
+                    &session_id,
+                    "client_request",
+                )
+                .await;
                 Ok(())
             }
             "session.close" => break,
@@ -304,9 +400,22 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         }
     }
 
-    if let Some(handle) = active_response.take() {
-        handle.handle.abort();
-    }
+    cancel_response(
+        &mut active_response,
+        &event_sender,
+        &state.context,
+        &session_id,
+        "session_disconnected",
+    )
+    .await;
+    info!(%session_id, "session disconnected");
+    record_event_best_effort(
+        &state.context,
+        &session_id,
+        "server.session.disconnected",
+        &json!({}),
+    )
+    .await;
     drop(event_sender);
     let _ = writer.await;
 }
@@ -340,13 +449,14 @@ fn keep_pre_roll(audio: &mut Vec<f32>, limit: usize) {
 
 fn spawn_turn(
     orchestrator: AgentOrchestrator,
+    context: ContextStore,
     session_id: String,
     sender: mpsc::Sender<Value>,
     audio: Vec<f32>,
     frames: Vec<VideoFrame>,
     transcript: Option<String>,
+    response_id: String,
 ) -> ActiveResponse {
-    let response_id = Uuid::new_v4().to_string();
     let task_response_id = response_id.clone();
     let handle = tokio::spawn(async move {
         if let Err(error) = orchestrator
@@ -361,6 +471,16 @@ fn spawn_turn(
             .await
         {
             error!(%session_id, %error, "turn failed");
+            record_event_best_effort(
+                &context,
+                &session_id,
+                "server.turn.failed",
+                &json!({
+                    "response_id": task_response_id,
+                    "error": error.to_string()
+                }),
+            )
+            .await;
             let _ = send_event(
                 &sender,
                 json!({
@@ -378,11 +498,25 @@ fn spawn_turn(
     }
 }
 
-async fn cancel_response(active: &mut Option<ActiveResponse>, sender: &mpsc::Sender<Value>) {
+async fn cancel_response(
+    active: &mut Option<ActiveResponse>,
+    sender: &mpsc::Sender<Value>,
+    context: &ContextStore,
+    session_id: &str,
+    reason: &str,
+) {
     if let Some(response) = active.take()
         && !response.handle.is_finished()
     {
         response.handle.abort();
+        info!(%session_id, response_id = %response.id, %reason, "response cancelled");
+        record_event_best_effort(
+            context,
+            session_id,
+            "server.response.cancelled",
+            &json!({"response_id": response.id, "reason": reason}),
+        )
+        .await;
         let _ = send_event(
             sender,
             json!({
@@ -391,6 +525,17 @@ async fn cancel_response(active: &mut Option<ActiveResponse>, sender: &mpsc::Sen
             }),
         )
         .await;
+    }
+}
+
+async fn record_event_best_effort(
+    context: &ContextStore,
+    session_id: &str,
+    kind: &str,
+    payload: &Value,
+) {
+    if let Err(error) = context.record_event(session_id, kind, payload).await {
+        warn!(%session_id, %kind, %error, "failed to record server event");
     }
 }
 
