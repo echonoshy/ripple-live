@@ -28,13 +28,18 @@ fi
   numpy \
   websockets
 
-if [[ ! -x "$REPO_ROOT/.venv-vllm-omni/bin/python" ]]; then
-  "$UV_BIN" venv "$REPO_ROOT/.venv-vllm-omni" --python 3.12 --seed
+if [[ ! -x "$REPO_ROOT/.venv-vllm-omni-024/bin/python" ]]; then
+  "$UV_BIN" venv "$REPO_ROOT/.venv-vllm-omni-024" --python 3.12 --seed
 fi
-"$UV_BIN" pip install --python "$REPO_ROOT/.venv-vllm-omni/bin/python" \
+"$UV_BIN" pip install --python "$REPO_ROOT/.venv-vllm-omni-024/bin/python" \
   --torch-backend=cu128 \
-  "vllm==0.16.0" \
-  "vllm-omni==0.16.0" \
+  "vllm-omni==0.24.0" \
   "prometheus-fastapi-instrumentator==8.1.0"
+# The default 0.24 wheel targets CUDA 13. Use the official CUDA 12.9 wheel,
+# which is compatible with the server's CUDA 12.8 driver/toolkit stack.
+"$UV_BIN" pip install --python "$REPO_ROOT/.venv-vllm-omni-024/bin/python" \
+  --no-deps \
+  --reinstall \
+  "https://github.com/vllm-project/vllm/releases/download/v0.24.0/vllm-0.24.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl"
 
 echo "Rust gateway and uv-managed model environments installed."

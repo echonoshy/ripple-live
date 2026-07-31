@@ -22,6 +22,10 @@ ASR_GPU="${ASR_GPU:-2}"
 AGENT_GPU="${AGENT_GPU:-3}"
 TTS_OMNI_GPU="${TTS_OMNI_GPU:-7}"
 TTS_OMNI_MODEL="${TTS_OMNI_MODEL:-Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+TTS_OMNI_RUNTIME="${TTS_OMNI_RUNTIME:-$REPO_ROOT/.venv-vllm-omni-024}"
+TTS_CUDA_HOME="${TTS_CUDA_HOME:-/usr/local/cuda-12.8}"
+TTS_OMNI_SITE="$TTS_OMNI_RUNTIME/lib/python3.12/site-packages"
+TTS_OMNI_LIBRARY_PATH="$TTS_CUDA_HOME/targets/x86_64-linux/lib:$TTS_OMNI_SITE/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 GATEWAY_DATA_DIR="${RIPPLE_DATA_DIR:-$REPO_ROOT/.cache/agent-gateway}"
 if [[ "$GATEWAY_DATA_DIR" != /* ]]; then
   GATEWAY_DATA_DIR="$REPO_ROOT/$GATEWAY_DATA_DIR"
@@ -111,15 +115,17 @@ start_process agent env CUDA_VISIBLE_DEVICES="$AGENT_GPU" \
 
 start_process tts-omni env \
   CUDA_VISIBLE_DEVICES="$TTS_OMNI_GPU" \
-  "$REPO_ROOT/.venv-vllm-omni/bin/vllm-omni" serve \
+  LD_LIBRARY_PATH="$TTS_OMNI_LIBRARY_PATH" \
+  PATH="$TTS_OMNI_RUNTIME/bin:$PATH" \
+  "$TTS_OMNI_RUNTIME/bin/vllm-omni" serve \
   "$MODEL_ROOT/$TTS_OMNI_MODEL" \
   --omni \
   --host 127.0.0.1 \
   --port 8723 \
   --served-model-name "$TTS_OMNI_MODEL" \
-  --stage-configs-path "$SCRIPT_DIR/qwen3-tts-batch.yaml" \
+  --deploy-config "$SCRIPT_DIR/qwen3-tts-batch.yaml" \
   --trust-remote-code \
-  --disable-log-requests
+  --no-enable-log-requests
 
 warm_tts
 

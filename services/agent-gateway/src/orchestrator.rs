@@ -22,6 +22,10 @@ const SYSTEM_PROMPT: &str = "你是 Ripple Live，一个运行在用户自有服
 只有用户明确要求记住某件事时才调用 remember；需要历史记忆时调用 recall。
 工具失败时如实说明。不要在朗读内容中输出工具调用 JSON。";
 
+const MIN_SPEECH_CHUNK_CHARS: usize = 40;
+const SOFT_SPEECH_CHUNK_CHARS: usize = 60;
+const MAX_SPEECH_CHUNK_CHARS: usize = 80;
+
 #[derive(Clone)]
 pub struct AgentOrchestrator {
     settings: Arc<Settings>,
@@ -530,9 +534,11 @@ impl SpeechSegmenter {
         for character in delta.chars() {
             self.pending.push(character);
             let length = self.pending.chars().count();
-            let sentence_end = matches!(character, '。' | '！' | '？' | '!' | '?' | '；' | ';');
-            let clause_end = length >= 12 && matches!(character, '，' | ',' | '：' | ':');
-            if (sentence_end || clause_end || length >= 36)
+            let sentence_end = length >= MIN_SPEECH_CHUNK_CHARS
+                && matches!(character, '。' | '！' | '？' | '!' | '?' | '；' | ';');
+            let clause_end =
+                length >= SOFT_SPEECH_CHUNK_CHARS && matches!(character, '，' | ',' | '：' | ':');
+            if (sentence_end || clause_end || length >= MAX_SPEECH_CHUNK_CHARS)
                 && let Some(phrase) = self.take_pending()
             {
                 ready.push(phrase);
@@ -643,12 +649,27 @@ mod tests {
     fn segments_streaming_text_at_natural_boundaries() {
         let mut segmenter = SpeechSegmenter::new();
         assert!(segmenter.push("先说结论，").is_empty());
+        assert!(segmenter.push("这项优化可以明显降低延迟，").is_empty());
+        assert!(segmenter.push("并保持自然。").is_empty());
         assert_eq!(
-            segmenter.push("这项优化可以明显降低延迟，"),
-            vec!["先说结论，这项优化可以明显降低延迟，"]
+            segmenter.finish(),
+            vec!["先说结论，这项优化可以明显降低延迟，并保持自然。"]
         );
-        assert_eq!(segmenter.push("并保持自然。"), vec!["并保持自然。"]);
-        assert!(segmenter.finish().is_empty());
+    }
+
+    #[test]
+    fn segments_long_streaming_text_between_forty_and_eighty_characters() {
+        let mut at_sentence = SpeechSegmenter::new();
+        let sentence = format!("{}。", "连".repeat(MIN_SPEECH_CHUNK_CHARS - 1));
+        assert_eq!(at_sentence.push(&sentence), vec![sentence]);
+
+        let mut at_clause = SpeechSegmenter::new();
+        let clause = format!("{}，", "连".repeat(SOFT_SPEECH_CHUNK_CHARS - 1));
+        assert_eq!(at_clause.push(&clause), vec![clause]);
+
+        let mut at_limit = SpeechSegmenter::new();
+        let bounded = "连".repeat(MAX_SPEECH_CHUNK_CHARS);
+        assert_eq!(at_limit.push(&bounded), vec![bounded]);
     }
 
     #[test]

@@ -48,8 +48,9 @@ while vLLM compiles kernels and captures CUDA graphs; later starts reuse the
 compile cache.
 
 The only TTS unit is `ripple-agent-tts-omni`, serving the 1.7B CustomVoice
-checkpoint. The deployment no longer installs or starts the serial
-Transformers wrapper or the smaller 0.6B TTS model.
+checkpoint through vLLM-Omni 0.24. The deployment uses the official CUDA 12.9
+vLLM wheel against the server's CUDA 12.8 toolkit, and no longer installs or
+starts the serial Transformers wrapper or the smaller 0.6B TTS model.
 
 After all four health checks report ready, run the real model smoke test. It
 sends an image through the multimodal request, requires the VL model to issue a
@@ -83,18 +84,23 @@ Services bind as follows:
 | 8723 | `127.0.0.1` | vLLM-Omni Qwen3-TTS speech API |
 
 Each inference service uses exactly one physical GPU. Qwen3-TTS uses a
-two-stage Talker/Code2Wav pipeline with a maximum batch size of four in
-`qwen3-tts-batch.yaml`. ASR and Qwen3-VL retain vLLM continuous batching.
+two-stage Talker/Code2Wav pipeline in `qwen3-tts-batch.yaml`. The Talker keeps
+continuous batching enabled, while CustomVoice Code2Wav uses one sequence for
+the best first-audio latency. The codec emits an initial one-frame chunk, then
+uses 25-frame chunks with 72 frames of decoder context so adjacent streaming
+chunks retain more consistent timbre. ASR and Qwen3-VL retain vLLM continuous
+batching.
 
 Run a repeatable TTS concurrency benchmark with:
 
 ```bash
-uv run --with httpx deploy/agent-stack/tts-benchmark.py --concurrency 4
+uv run --with httpx deploy/agent-stack/tts-benchmark.py --stream --concurrency 4
 ```
 
-On the RTX 5880 validation, the 1.7B model delivered a 1.61 second median
-first-audio latency at four-way concurrency and 4.80 generated
-audio-seconds/second.
+On the RTX 5880 validation, the 1.7B model delivered 108 ms median first-audio
+latency at four-way concurrency, a 0.24 real-time factor, and 14.08 generated
+audio-seconds/second. End-to-end Agent first audio also includes VL generation
+and sentence accumulation; the smoke test measured 1.26 seconds.
 
 ## Tool extension
 
@@ -117,6 +123,22 @@ persists a complete event log, recent conversational turns, and explicit
 memories in `.cache/agent-gateway/context.sqlite3`. A later Redis/PostgreSQL or
 vector-memory implementation can replace this class without changing the
 Android protocol or model adapters.
+
+The Android client creates a new session UUID whenever a voice or video call is
+started. Server-side events record the session lifecycle and each response's
+input commit, transcript, context load, Agent rounds, TTS segments, completion,
+cancellation, or failure. Inspect the latest flow with:
+
+```bash
+sqlite3 .cache/agent-gateway/context.sqlite3 \
+  "SELECT datetime(created_at, 'unixepoch', 'localtime'), session_id, kind, payload FROM events ORDER BY id DESC LIMIT 100;"
+```
+
+Gateway logs carry the same `session_id` and, for per-turn work, `response_id`:
+
+```bash
+tail -f deploy/agent-stack/logs/gateway.log
+```
 
 ## Development without models
 

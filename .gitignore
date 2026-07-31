@@ -4,6 +4,7 @@
 /.venv-qwen-tts/
 /.venv-qwen-vllm/
 /.venv-vllm-omni/
+/.venv-vllm-omni-024/
 /services/agent-gateway/target/
 __pycache__/
 *.py[cod]
