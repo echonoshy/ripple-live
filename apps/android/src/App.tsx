@@ -224,7 +224,7 @@ export default function App() {
               <img src={appIcon} alt="" />
               <div>
                 <strong>Ripple Live</strong>
-                <span>实时多模态助手</span>
+                <span>私人实时 Agent</span>
               </div>
             </div>
             <button
@@ -238,14 +238,12 @@ export default function App() {
           </header>
 
           <div className="ready-state">
-            <div className="ready-signal" aria-hidden="true">
-              {[0, 1, 2, 3, 4, 5, 6].map((bar) => (
-                <span key={bar} />
-              ))}
+            <div className="ready-mark" aria-hidden="true">
+              <img src={appIcon} alt="" />
             </div>
-            <p>READY</p>
-            <h1>准备通话</h1>
-            <span>选择语音或视频，直接开始交流。</span>
+            <p><span aria-hidden="true" /> 准备就绪</p>
+            <h1>今天想聊什么？</h1>
+            <span>我可以听、看，也可以帮你使用工具。</span>
           </div>
 
           <div className="launch-actions">
@@ -257,7 +255,7 @@ export default function App() {
               <Microphone weight="fill" />
               <span>
                 <strong>开始语音通话</strong>
-                <small>实时聆听与回答</small>
+                <small>语音模式</small>
               </span>
             </button>
             <button
@@ -268,7 +266,7 @@ export default function App() {
               <VideoCamera weight="fill" />
               <span>
                 <strong>打开视频通话</strong>
-                <small>共享镜头中的画面</small>
+                <small>视频模式</small>
               </span>
             </button>
           </div>
