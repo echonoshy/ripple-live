@@ -64,6 +64,30 @@ start_process() {
   fi
 }
 
+warm_tts() {
+  local health_url="http://127.0.0.1:8723/health"
+  local speech_url="http://127.0.0.1:8723/v1/audio/speech"
+  local payload
+  payload="$(printf '{"model":"%s","input":"语音服务预热完成。","voice":"serena","language":"Chinese","response_format":"pcm","stream":true,"stream_format":"audio"}' "$TTS_OMNI_MODEL")"
+
+  for _ in $(seq 1 180); do
+    if curl --fail --silent --max-time 2 "$health_url" >/dev/null; then
+      if curl --fail --silent --show-error --max-time 60 \
+        --header "Content-Type: application/json" \
+        --data-binary "$payload" \
+        "$speech_url" >/dev/null; then
+        echo "tts warm-up complete"
+      else
+        echo "warning: tts warm-up request failed" >&2
+      fi
+      return
+    fi
+    sleep 1
+  done
+
+  echo "warning: tts did not become healthy in time; skipping warm-up" >&2
+}
+
 start_process asr env CUDA_VISIBLE_DEVICES="$ASR_GPU" \
   "$REPO_ROOT/.venv-qwen-vllm/bin/qwen-asr-serve" \
   "$MODEL_ROOT/Qwen3-ASR-0.6B" \
@@ -96,6 +120,8 @@ start_process tts-omni env \
   --stage-configs-path "$SCRIPT_DIR/qwen3-tts-batch.yaml" \
   --trust-remote-code \
   --disable-log-requests
+
+warm_tts
 
 start_process gateway env \
   RIPPLE_DATA_DIR="$GATEWAY_DATA_DIR" \

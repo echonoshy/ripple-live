@@ -23,6 +23,7 @@ pub struct AgentReply {
 }
 
 pub type AudioStream = Pin<Box<dyn Stream<Item = anyhow::Result<Vec<f32>>> + Send>>;
+pub type AgentStream = Pin<Box<dyn Stream<Item = anyhow::Result<Value>> + Send>>;
 
 #[derive(Clone)]
 pub struct ModelAdapters {
@@ -137,6 +138,60 @@ impl ModelAdapters {
         })
     }
 
+    pub async fn complete_stream(
+        &self,
+        messages: &[Value],
+        tools: &[Value],
+        tool_choice: Value,
+    ) -> anyhow::Result<AgentStream> {
+        if self.settings.agent_backend == "mock" {
+            let content = "本地 Agent 网关已经收到你的输入。";
+            return Ok(Box::pin(futures_util::stream::iter([
+                Ok(json!({"choices": [{"delta": {"role": "assistant", "content": content}}]})),
+                Ok(json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})),
+            ])));
+        }
+        let response = self
+            .client
+            .post(&self.settings.agent_url)
+            .bearer_auth(&self.settings.agent_api_key)
+            .json(&json!({
+                "model": self.settings.agent_model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "temperature": self.settings.agent_temperature,
+                "max_tokens": self.settings.agent_max_tokens,
+                "stream": true
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let mut upstream = response.bytes_stream();
+        let stream = async_stream::try_stream! {
+            let mut buffer = Vec::<u8>::new();
+            while let Some(chunk) = upstream.next().await {
+                buffer.extend_from_slice(&chunk?);
+                while let Some(boundary) = find_sse_boundary(&buffer) {
+                    let event = buffer.drain(..boundary).collect::<Vec<_>>();
+                    buffer.drain(..sse_separator_len(&buffer));
+                    let event = String::from_utf8(event)?;
+                    for line in event.lines() {
+                        let Some(data) = line.strip_prefix("data:") else {
+                            continue;
+                        };
+                        let data = data.trim();
+                        if data.is_empty() || data == "[DONE]" {
+                            continue;
+                        }
+                        yield serde_json::from_str::<Value>(data)?;
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(stream))
+    }
+
     pub async fn synthesize_stream(&self, text: &str) -> anyhow::Result<AudioStream> {
         if self.settings.tts_backend == "mock" {
             return Ok(Box::pin(futures_util::stream::iter([Ok(mock_tone(
@@ -186,6 +241,21 @@ impl ModelAdapters {
             future::ready(Some(converted))
         });
         Ok(Box::pin(stream))
+    }
+}
+
+fn find_sse_boundary(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .or_else(|| buffer.windows(4).position(|window| window == b"\r\n\r\n"))
+}
+
+fn sse_separator_len(buffer: &[u8]) -> usize {
+    if buffer.starts_with(b"\r\n\r\n") {
+        4
+    } else {
+        2
     }
 }
 

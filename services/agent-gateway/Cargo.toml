@@ -6,6 +6,7 @@ description = "Rust multimodal voice agent gateway for Ripple Live"
 
 [dependencies]
 anyhow = "1.0"
+async-stream = "0.3"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = "0.4"
