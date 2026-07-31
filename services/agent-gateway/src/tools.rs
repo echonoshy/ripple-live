@@ -1,13 +1,16 @@
-use std::sync::OnceLock;
+use std::{path::Path, sync::OnceLock};
 
 use chrono::SecondsFormat;
 use chrono_tz::Tz;
 use regex::Regex;
 use serde_json::{Value, json};
 
-use crate::context::ContextStore;
+use crate::{
+    capabilities::{CliRunner, SkillRegistry},
+    context::ContextStore,
+};
 
-pub fn schemas() -> Vec<Value> {
+fn builtin_schemas() -> Vec<Value> {
     vec![
         json!({
             "type": "function",
@@ -107,11 +110,40 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
 #[derive(Clone)]
 pub struct ToolExecutor {
     context: ContextStore,
+    registry: SkillRegistry,
+    cli: CliRunner,
 }
 
 impl ToolExecutor {
-    pub fn new(context: ContextStore) -> Self {
-        Self { context }
+    pub fn new(
+        context: ContextStore,
+        skills_dir: &Path,
+        max_output_bytes: usize,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            context,
+            registry: SkillRegistry::load(skills_dir)?,
+            cli: CliRunner::new(max_output_bytes),
+        })
+    }
+
+    pub fn schemas(&self) -> Vec<Value> {
+        let mut schemas = builtin_schemas();
+        schemas.extend(self.registry.schemas());
+        schemas
+    }
+
+    pub fn external_tool_count(&self) -> usize {
+        self.registry.len()
+    }
+
+    pub fn select_forced_tool(&self, transcript: &str) -> Option<String> {
+        if let Some(name) = explicit_tool_name(transcript)
+            && (is_builtin_tool(name) || self.registry.get(name).is_some())
+        {
+            return Some(name.to_owned());
+        }
+        select_forced_tool(transcript).map(str::to_owned)
     }
 
     pub async fn execute(&self, session_id: &str, name: &str, arguments: &str) -> Value {
@@ -164,9 +196,30 @@ impl ToolExecutor {
                 let memories = self.context.recall(session_id, query, 5).await?;
                 Ok(json!({"ok": true, "memories": memories}))
             }
-            _ => Ok(json!({"ok": false, "error": format!("未知工具: {name}")})),
+            _ => match self.registry.get(name) {
+                Some(tool) => self.cli.execute(tool, &payload).await,
+                None => Ok(json!({"ok": false, "error": format!("未知工具: {name}")})),
+            },
         }
     }
+}
+
+fn explicit_tool_name(transcript: &str) -> Option<&str> {
+    static EXPLICIT: OnceLock<Regex> = OnceLock::new();
+    EXPLICIT
+        .get_or_init(|| {
+            Regex::new(r#"(?i)(?:调用|使用)\s*[`'"]?([a-z_][a-z0-9_]*)[`'"]?\s*工具"#).unwrap()
+        })
+        .captures(transcript)
+        .and_then(|capture| capture.get(1))
+        .map(|item| item.as_str())
+}
+
+fn is_builtin_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "get_current_time" | "calculate" | "remember" | "recall"
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

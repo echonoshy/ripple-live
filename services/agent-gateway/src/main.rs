@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let settings = Arc::new(Settings::from_env()?);
     let context = ContextStore::open(&settings.database_path()).await?;
     let adapters = ModelAdapters::new((*settings).clone())?;
-    let orchestrator = AgentOrchestrator::new(Arc::clone(&settings), context.clone(), adapters);
+    let orchestrator = AgentOrchestrator::new(Arc::clone(&settings), context.clone(), adapters)?;
     let state = AppState {
         settings: Arc::clone(&settings),
         context,
@@ -92,7 +92,8 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
             "asr": state.settings.asr_backend,
             "agent": state.settings.agent_backend,
             "tts": state.settings.tts_backend
-        }
+        },
+        "external_tools": state.orchestrator.external_tool_count()
     }))
 }
 

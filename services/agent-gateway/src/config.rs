@@ -25,7 +25,10 @@ pub struct Settings {
     pub max_audio_seconds: usize,
     pub max_frames: usize,
     pub max_recent_turns: i64,
+    pub context_max_chars: usize,
     pub max_tool_rounds: usize,
+    pub skills_dir: PathBuf,
+    pub cli_max_output_bytes: usize,
     pub request_timeout: Duration,
 }
 
@@ -74,7 +77,10 @@ impl Settings {
             max_audio_seconds: parsed("MAX_AUDIO_SECONDS", 90),
             max_frames: parsed("MAX_FRAMES", 3),
             max_recent_turns: parsed("MAX_RECENT_TURNS", 8),
+            context_max_chars: parsed("CONTEXT_MAX_CHARS", 12_000),
             max_tool_rounds: parsed("MAX_TOOL_ROUNDS", 6),
+            skills_dir: PathBuf::from(value("SKILLS_DIR", "skills")),
+            cli_max_output_bytes: parsed("CLI_MAX_OUTPUT_BYTES", 256 * 1024),
             request_timeout: Duration::from_secs(parsed("REQUEST_TIMEOUT_SECONDS", 180)),
         })
     }

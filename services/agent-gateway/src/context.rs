@@ -146,6 +146,24 @@ impl ContextStore {
         Ok(result.last_insert_rowid())
     }
 
+    pub async fn recent_memories(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT content FROM memories WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+        )
+        .bind(session_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.get::<String, _>("content"))
+            .collect())
+    }
+
     pub async fn recall(
         &self,
         session_id: &str,

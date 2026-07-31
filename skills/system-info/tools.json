@@ -1,0 +1,18 @@
+{
+  "tools": [
+    {
+      "name": "system_info",
+      "description": "读取网关服务器当前的操作系统、内核版本、主机名和 CPU 架构。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "command": ["python3", "scripts/system_info.py"],
+      "timeout_ms": 3000,
+      "env": [],
+      "confirmation": "never"
+    }
+  ]
+}

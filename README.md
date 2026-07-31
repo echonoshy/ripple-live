@@ -21,6 +21,16 @@ The gateway owns conversation turns and the tool loop. Tool calls are parsed
 from the model's structured response, executed by the server, recorded, and
 returned to the model before the final spoken answer is generated.
 
+## Skills and CLI tools
+
+The gateway discovers external tools from `skills/*/SKILL.md` and
+`skills/*/tools.json` at startup. Skill metadata is exposed to the model while
+the command is executed as a JSON-in/JSON-out child process with a clean
+environment, timeout, output limit, and cancellation on turn interruption.
+
+`skills/system-info` is a minimal read-only example. Add another directory
+with the same layout to register a tool without changing gateway source code.
+
 ## Repository layout
 
 ```text

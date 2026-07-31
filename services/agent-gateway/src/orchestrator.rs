@@ -4,14 +4,16 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+use tracing::{info, warn};
 
 use crate::{
     adapters::{ModelAdapters, build_multimodal_user_message, tool_result_message},
     audio::encode_le_f32,
     config::Settings,
     context::ContextStore,
+    context_compiler::ContextCompiler,
     protocol::VideoFrame,
-    tools::{ToolExecutor, schemas, select_forced_tool},
+    tools::ToolExecutor,
 };
 
 const SYSTEM_PROMPT: &str = "你是 Ripple Live，一个运行在用户自有服务器上的中文多模态语音 Agent。
@@ -24,18 +26,39 @@ const SYSTEM_PROMPT: &str = "你是 Ripple Live，一个运行在用户自有服
 pub struct AgentOrchestrator {
     settings: Arc<Settings>,
     context: ContextStore,
+    context_compiler: ContextCompiler,
     adapters: ModelAdapters,
     tools: ToolExecutor,
 }
 
 impl AgentOrchestrator {
-    pub fn new(settings: Arc<Settings>, context: ContextStore, adapters: ModelAdapters) -> Self {
-        Self {
+    pub fn new(
+        settings: Arc<Settings>,
+        context: ContextStore,
+        adapters: ModelAdapters,
+    ) -> anyhow::Result<Self> {
+        let context_compiler = ContextCompiler::new(
+            context.clone(),
+            settings.max_recent_turns,
+            settings.context_max_chars,
+        );
+        let tools = ToolExecutor::new(
+            context.clone(),
+            &settings.skills_dir,
+            settings.cli_max_output_bytes,
+        )?;
+        info!(external_tools = tools.external_tool_count(), skills_dir = %settings.skills_dir.display(), "skills loaded");
+        Ok(Self {
             settings,
-            tools: ToolExecutor::new(context.clone()),
+            tools,
             context,
+            context_compiler,
             adapters,
-        }
+        })
+    }
+
+    pub fn external_tool_count(&self) -> usize {
+        self.tools.external_tool_count()
     }
 
     pub async fn run_turn(
@@ -75,13 +98,31 @@ impl AgentOrchestrator {
             )
             .await?;
 
-        let mut history = self
-            .context
-            .recent_messages(session_id, self.settings.max_recent_turns)
-            .await?;
-        history.pop();
+        let mut compiled = self.context_compiler.compile(session_id).await?;
+        compiled.messages.pop();
+        let history_messages = compiled.history_messages.saturating_sub(1);
+        info!(
+            %session_id,
+            %response_id,
+            history_messages,
+            memories = compiled.memories,
+            estimated_chars = compiled.estimated_chars,
+            "context loaded"
+        );
+        self.record_flow_event(
+            session_id,
+            "server.context.loaded",
+            json!({
+                "response_id": response_id,
+                "history_messages": history_messages,
+                "memories": compiled.memories,
+                "estimated_chars": compiled.estimated_chars,
+                "frames": frames.len()
+            }),
+        )
+        .await;
         let mut messages = vec![json!({"role": "system", "content": SYSTEM_PROMPT})];
-        messages.extend(history);
+        messages.extend(compiled.messages);
         messages.push(build_multimodal_user_message(&transcript, &frames));
 
         let audio_chunk_size =
@@ -97,12 +138,13 @@ impl AgentOrchestrator {
             self.settings.sample_rate_out,
         );
         let generation = async move {
-            let available_tools = schemas();
-            let forced_tool = select_forced_tool(&transcript);
+            let available_tools = self.tools.schemas();
+            let forced_tool = self.tools.select_forced_tool(&transcript);
             let mut final_text = String::new();
             for round in 0..self.settings.max_tool_rounds {
                 let tool_choice = if round == 0 {
                     forced_tool
+                        .as_deref()
                         .map(|name| json!({"type": "function", "function": {"name": name}}))
                         .unwrap_or_else(|| json!("auto"))
                 } else {
@@ -212,6 +254,12 @@ impl AgentOrchestrator {
             json!({"type": "response.done", "text": final_text}),
         )
         .await
+    }
+
+    async fn record_flow_event(&self, session_id: &str, kind: &str, payload: Value) {
+        if let Err(error) = self.context.record_event(session_id, kind, &payload).await {
+            warn!(%session_id, %kind, %error, "failed to record turn event");
+        }
     }
 }
 

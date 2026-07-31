@@ -1,7 +1,9 @@
 pub mod adapters;
 pub mod audio;
+pub mod capabilities;
 pub mod config;
 pub mod context;
+pub mod context_compiler;
 pub mod orchestrator;
 pub mod protocol;
 pub mod tools;
