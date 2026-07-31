@@ -19,18 +19,18 @@ import {
   type SessionState,
 } from './realtime/RealtimeSession'
 
-const DEFAULT_SERVER = '140.143.229.103:8600'
+const DEFAULT_SERVER = '140.143.229.103:8700'
 
 type Screen = 'home' | 'call' | 'settings'
 
 const stateLabels: Record<SessionState, string> = {
   idle: '准备就绪',
   connecting: '正在连接',
-  queued: '正在排队',
   preparing: '正在准备模型',
   listening: '正在聆听',
+  thinking: '正在思考',
+  using_tool: '正在使用工具',
   speaking: '正在回答',
-  paused: '已暂停',
   ended: '通话已结束',
   error: '连接异常',
 }
@@ -45,13 +45,14 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>('home')
   const [mode, setMode] = useState<RealtimeMode>('audio')
   const [serverDraft, setServerDraft] = useState(
-    () => localStorage.getItem('minicpm-server') ?? DEFAULT_SERVER,
+    () => localStorage.getItem('ripple-agent-server') ?? DEFAULT_SERVER,
   )
   const [server, setServer] = useState(serverDraft)
   const [sessionState, setSessionState] = useState<SessionState>('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const [assistantText, setAssistantText] = useState('')
   const [userText, setUserText] = useState('')
+  const [toolStatus, setToolStatus] = useState('')
   const [muted, setMuted] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [cameraFacing, setCameraFacing] = useState<'user' | 'environment'>(
@@ -66,11 +67,11 @@ export default function App() {
 
   const isActive = [
     'connecting',
-    'queued',
     'preparing',
     'listening',
+    'thinking',
+    'using_tool',
     'speaking',
-    'paused',
   ].includes(sessionState)
 
   useEffect(() => {
@@ -108,6 +109,7 @@ export default function App() {
       setErrorMessage('')
       setAssistantText('')
       setUserText('')
+      setToolStatus('')
       setElapsed(0)
       setMuted(false)
       setSessionState('connecting')
@@ -128,12 +130,16 @@ export default function App() {
         },
         onAssistantText: setAssistantText,
         onUserText: setUserText,
+        onTool: setToolStatus,
         onAudio: (audio) => media.enqueueOutput(audio),
         onReady: async () => {
           await media.start((audio, frame) => {
             void session.sendInput(audio, frame)
           }, () => {
-            if (session.interrupt()) media.clearOutput()
+            media.clearOutput()
+            void session.speechStarted()
+          }, () => {
+            void session.commitInput()
           }, (level) => {
             visualizerRef.current?.style.setProperty('--audio-level', String(level))
           })
@@ -193,7 +199,7 @@ export default function App() {
       .replace(/\/+$/, '')
     setServer(normalized || DEFAULT_SERVER)
     setServerDraft(normalized || DEFAULT_SERVER)
-    localStorage.setItem('minicpm-server', normalized || DEFAULT_SERVER)
+    localStorage.setItem('ripple-agent-server', normalized || DEFAULT_SERVER)
     setScreen('home')
   }
 
@@ -293,7 +299,7 @@ export default function App() {
               autoCapitalize="none"
               autoCorrect="off"
               onChange={(event) => setServerDraft(event.target.value)}
-              placeholder="140.143.229.103:8600"
+              placeholder="140.143.229.103:8700"
             />
             <p>使用明文 WebSocket 连接。只需填写 IP 和端口。</p>
             <button className="primary-button" type="button" onClick={saveSettings}>
@@ -367,6 +373,10 @@ export default function App() {
                   {assistantText ||
                     (sessionState === 'listening'
                       ? '我在听'
+                      : sessionState === 'thinking'
+                        ? '正在理解你的问题'
+                        : sessionState === 'using_tool'
+                          ? toolStatus || '正在使用工具'
                       : sessionState === 'speaking'
                         ? '正在回答'
                         : '正在建立实时连接')}

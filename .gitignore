@@ -1,6 +1,12 @@
 # Runtime assets (kept locally, never committed)
 /.cache/
 /.venv-realtime-o45/
+/.venv-qwen-tts/
+/.venv-qwen-vllm/
+/.venv-vllm-omni/
+/services/agent-gateway/target/
+__pycache__/
+*.py[cod]
 
 # Android and web dependencies
 /apps/android/node_modules/
@@ -14,9 +20,10 @@
 /apps/android/src-tauri/gen/android/local.properties
 
 # Service state
-/deploy/realtime-o45/data/
-/deploy/realtime-o45/logs/
-/deploy/realtime-o45/run/
+/deploy/agent-stack/data/
+/deploy/agent-stack/logs/
+/deploy/agent-stack/run/
+/deploy/agent-stack/samples/
 
 # Build artifacts
 *.apk

@@ -54,6 +54,10 @@ export class LiveMedia {
   private nextPlaybackTime = 0
   private playbackSources = new Set<AudioBufferSourceNode>()
   private facingMode: 'user' | 'environment'
+  private lastFrameAt = 0
+  private fallbackVad = false
+  private fallbackSpeaking = false
+  private fallbackSilenceChunks = 0
 
   constructor(options: LiveMediaOptions) {
     this.options = options
@@ -63,6 +67,7 @@ export class LiveMedia {
   async start(
     onChunk: (audio: Float32Array, frame: string | null) => void,
     onSpeechStart: () => void,
+    onSpeechEnd: () => void,
     onLevel: (level: number) => void,
   ) {
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -114,6 +119,24 @@ export class LiveMedia {
       const audio = this.muted
         ? new Float32Array(resampled.length)
         : resampled
+      if (this.fallbackVad && !this.muted) {
+        let squareSum = 0
+        for (const sample of audio) squareSum += sample * sample
+        const rms = Math.sqrt(squareSum / Math.max(1, audio.length))
+        if (!this.fallbackSpeaking && rms >= 0.02) {
+          this.fallbackSpeaking = true
+          this.fallbackSilenceChunks = 0
+          onSpeechStart()
+        } else if (this.fallbackSpeaking) {
+          this.fallbackSilenceChunks =
+            rms < 0.012 ? this.fallbackSilenceChunks + 1 : 0
+          if (this.fallbackSilenceChunks >= 6) {
+            this.fallbackSpeaking = false
+            this.fallbackSilenceChunks = 0
+            onSpeechEnd()
+          }
+        }
+      }
       onChunk(audio, this.captureFrame())
     }
 
@@ -139,10 +162,14 @@ export class LiveMedia {
         onSpeechRealStart: () => {
           if (this.running && !this.muted) onSpeechStart()
         },
+        onSpeechEnd: () => {
+          if (this.running && !this.muted) onSpeechEnd()
+        },
       })
     } catch (error) {
-      console.warn('Silero VAD 初始化失败，自动打断已禁用', error)
+      console.warn('Silero VAD 初始化失败，已切换到本地能量检测', error)
       this.vad = null
+      this.fallbackVad = true
     }
   }
 
@@ -195,6 +222,9 @@ export class LiveMedia {
 
   stop() {
     this.running = false
+    this.fallbackVad = false
+    this.fallbackSpeaking = false
+    this.fallbackSilenceChunks = 0
     const vad = this.vad
     this.vad = null
     void vad?.destroy().catch(() => {})
@@ -237,6 +267,8 @@ export class LiveMedia {
   }
 
   private captureFrame() {
+    const now = performance.now()
+    if (now - this.lastFrameAt < 1000) return null
     if (
       !this.options.withVideo ||
       !this.options.video.videoWidth ||
@@ -254,6 +286,7 @@ export class LiveMedia {
     const context = this.options.canvas.getContext('2d')
     if (!context) return null
     context.drawImage(this.options.video, 0, 0, width, height)
+    this.lastFrameAt = now
     return this.options.canvas.toDataURL('image/jpeg', 0.7).split(',')[1] ?? null
   }
 }

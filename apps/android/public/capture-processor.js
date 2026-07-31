@@ -29,7 +29,7 @@ class SecondChunkProcessor extends AudioWorkletProcessor {
       this.levelSampleCount = 0
     }
 
-    if (this.length >= sampleRate) {
+    if (this.length >= sampleRate / 10) {
       const chunk = new Float32Array(this.length)
       let offset = 0
       for (const buffer of this.buffers) {

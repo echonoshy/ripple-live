@@ -5,25 +5,25 @@ export type RealtimeMode = 'audio' | 'video'
 export type SessionState =
   | 'idle'
   | 'connecting'
-  | 'queued'
   | 'preparing'
   | 'listening'
+  | 'thinking'
+  | 'using_tool'
   | 'speaking'
-  | 'paused'
   | 'ended'
   | 'error'
 
 type RealtimeEvent = {
   type: string
-  kind?: 'listen' | 'text' | 'audio'
+  session_id?: string
   text?: string
+  delta?: string
   audio?: string
-  position?: number
-  reason?: string
-  error?: {
-    message?: string
-    code?: string
-  }
+  sample_rate?: number
+  message?: string
+  name?: string
+  result?: unknown
+  response_id?: string
 }
 
 type Transport = {
@@ -38,6 +38,7 @@ type SessionOptions = {
   onError: (message: string) => void
   onAssistantText: (text: string) => void
   onUserText: (text: string) => void
+  onTool: (label: string) => void
   onAudio: (audio: Float32Array) => void
   onReady: () => Promise<void>
 }
@@ -62,12 +63,7 @@ function base64ToFloat32(encoded: string) {
   for (let index = 0; index < binary.length; index += 1) {
     bytes[index] = binary.charCodeAt(index)
   }
-  const aligned = bytes.byteOffset % 4 === 0 ? bytes : bytes.slice()
-  return new Float32Array(
-    aligned.buffer,
-    aligned.byteOffset,
-    Math.floor(aligned.byteLength / 4),
-  ).slice()
+  return new Float32Array(bytes.buffer).slice()
 }
 
 function normalizeServer(server: string) {
@@ -75,6 +71,15 @@ function normalizeServer(server: string) {
     .trim()
     .replace(/^wss?:\/\//, '')
     .replace(/\/+$/, '')
+}
+
+function getContextId() {
+  const storageKey = 'ripple-context-id'
+  const existing = localStorage.getItem(storageKey)
+  if (existing) return existing
+  const created = crypto.randomUUID()
+  localStorage.setItem(storageKey, created)
+  return created
 }
 
 async function connectTauriWebSocket(
@@ -99,24 +104,22 @@ async function connectTauriWebSocket(
     },
   })
 
-  const transport: Transport = {
-    send: (message) =>
-      invoke('plugin:websocket|send', {
-        id,
-        message: { type: 'Text', data: message },
-      }),
-    close: () =>
-      invoke('plugin:websocket|send', {
-        id,
-        message: {
-          type: 'Close',
-          data: { code: 1000, reason: 'Disconnected by client' },
-        },
-      }),
-  }
-
   return {
-    transport,
+    transport: {
+      send: (message) =>
+        invoke('plugin:websocket|send', {
+          id,
+          message: { type: 'Text', data: message },
+        }),
+      close: () =>
+        invoke('plugin:websocket|send', {
+          id,
+          message: {
+            type: 'Close',
+            data: { code: 1000, reason: 'Disconnected by client' },
+          },
+        }),
+    },
     activate: () => {
       ready = true
       pending.splice(0).forEach(onMessage)
@@ -127,21 +130,21 @@ async function connectTauriWebSocket(
 export class RealtimeSession {
   private readonly options: SessionOptions
   private transport: Transport | null = null
-  private initialized = false
   private ready = false
   private closed = false
   private assistantText = ''
-  private userText = ''
-  private forceListenNext = false
   private outputActive = false
   private interruptPending = false
+  private currentResponseId: string | null = null
+  private sendQueue: Promise<void> = Promise.resolve()
 
   constructor(options: SessionOptions) {
     this.options = options
   }
 
   async connect() {
-    const url = `ws://${normalizeServer(this.options.server)}/v1/realtime?mode=${this.options.mode}`
+    const contextId = encodeURIComponent(getContextId())
+    const url = `ws://${normalizeServer(this.options.server)}/v1/agent/realtime?mode=${this.options.mode}&session_id=${contextId}`
     this.options.onState('connecting')
 
     if (isTauri()) {
@@ -151,6 +154,7 @@ export class RealtimeSession {
       )
       this.transport = connection.transport
       connection.activate()
+      await this.startSession()
       return
     }
 
@@ -161,7 +165,7 @@ export class RealtimeSession {
           send: async (message) => socket.send(message),
           close: async () => socket.close(1000, 'user_stop'),
         }
-        resolve()
+        void this.startSession().then(resolve).catch(reject)
       }
       socket.onmessage = (event) => this.handleText(String(event.data))
       socket.onerror = () => reject(new Error(`无法连接 ${url}`))
@@ -173,6 +177,23 @@ export class RealtimeSession {
         }
       }
     })
+  }
+
+  private async startSession() {
+    if (!this.transport) return
+    this.options.onState('preparing')
+    await this.sendEvent({
+        type: 'session.start',
+        mode: this.options.mode,
+    })
+  }
+
+  private sendEvent(event: Record<string, unknown>) {
+    this.sendQueue = this.sendQueue.then(async () => {
+      if (!this.transport || this.closed) return
+      await this.transport.send(JSON.stringify(event))
+    })
+    return this.sendQueue
   }
 
   private handleTauriMessage(message: TauriMessage) {
@@ -194,14 +215,9 @@ export class RealtimeSession {
     }
 
     switch (event.type) {
-      case 'session.queued':
-      case 'session.queue_update':
-        this.options.onState('queued')
-        break
-      case 'session.queue_done':
-        void this.initialize()
-        break
       case 'session.created':
+        break
+      case 'session.ready':
         this.ready = true
         this.options.onState('listening')
         void this.options.onReady().catch((error: unknown) => {
@@ -210,126 +226,128 @@ export class RealtimeSession {
           this.options.onError(message)
         })
         break
-      case 'response.output.delta':
-        this.handleDelta(event)
-        break
-      case 'session.paused':
-        this.options.onState('paused')
-        break
-      case 'session.resumed':
+      case 'input.speech_started':
         this.options.onState('listening')
         break
-      case 'session.error':
+      case 'input.transcript.final':
+        this.options.onUserText(event.text?.trim() ?? '')
+        break
+      case 'response.created':
+        this.currentResponseId = event.response_id ?? null
+        this.assistantText = ''
+        this.outputActive = false
+        this.interruptPending = false
+        this.options.onTool('')
+        this.options.onState('thinking')
+        break
+      case 'response.tool.started':
+        if (!this.isCurrentResponse(event)) return
+        this.options.onTool(event.name ? `正在调用 ${event.name}` : '正在调用工具')
+        this.options.onState('using_tool')
+        break
+      case 'response.tool.completed':
+        if (!this.isCurrentResponse(event)) return
+        this.options.onTool(event.name ? `${event.name} 已完成` : '工具调用已完成')
+        this.options.onState('thinking')
+        break
+      case 'response.text.delta':
+        if (!this.isCurrentResponse(event)) return
+        if (this.interruptPending || !event.delta) return
+        this.outputActive = true
+        this.assistantText += event.delta
+        this.options.onAssistantText(this.assistantText)
+        this.options.onState('speaking')
+        break
+      case 'response.audio.delta':
+        if (!this.isCurrentResponse(event)) return
+        if (this.interruptPending || !event.audio) return
+        this.outputActive = true
+        this.options.onAudio(base64ToFloat32(event.audio))
+        this.options.onState('speaking')
+        break
+      case 'response.done':
+        if (!this.isCurrentResponse(event)) return
+        this.currentResponseId = null
+        this.outputActive = false
+        this.interruptPending = false
+        this.options.onTool('')
+        this.options.onState('listening')
+        break
+      case 'response.cancelled':
+        if (!this.isCurrentResponse(event)) return
+        this.currentResponseId = null
+        this.outputActive = false
+        this.interruptPending = false
+        this.options.onTool('')
+        this.options.onState('listening')
+        break
       case 'error':
-        this.options.onError(
-          event.reason ??
-            event.error?.message ??
-            event.error?.code ??
-            '实时服务返回错误',
-        )
-        break
-      case 'session.closed':
-        this.closed = true
-        this.options.onState('ended')
+        this.options.onError(event.message ?? 'Agent 服务返回错误')
         break
     }
   }
 
-  private async initialize() {
-    if (this.initialized || !this.transport) return
-    this.initialized = true
-    this.options.onState('preparing')
-    await this.transport.send(
-      JSON.stringify({
-        type: 'session.init',
-        payload: {
-          system_prompt:
-            this.options.mode === 'video'
-              ? '你是一个实时视频语音助手。持续观察画面并听取用户说话，用自然简洁的中文口语回答。'
-              : '你是一个实时语音助手。认真听取用户说话，用自然简洁的中文口语回答。',
-          config: {
-            length_penalty: 1.1,
-          },
-        },
-      }),
-    )
+  private isCurrentResponse(event: RealtimeEvent) {
+    return !event.response_id || event.response_id === this.currentResponseId
   }
 
-  private handleDelta(event: RealtimeEvent) {
-    if (event.kind === 'listen') {
-      this.outputActive = false
-      this.interruptPending = false
-      this.userText = event.text?.trim() ?? ''
-      if (this.userText) this.options.onUserText(this.userText)
-      this.assistantText = ''
-      this.options.onState('listening')
-      return
-    }
-
-    if (event.kind === 'text' && event.text) {
-      if (this.interruptPending) return
-      this.outputActive = true
-      this.assistantText += event.text
-      this.options.onAssistantText(this.assistantText)
-      this.options.onState('speaking')
-      return
-    }
-
-    if (event.kind === 'audio' && event.audio) {
-      if (this.interruptPending) return
-      this.outputActive = true
-      this.options.onAudio(base64ToFloat32(event.audio))
-      this.options.onState('speaking')
-    }
+  async speechStarted() {
+    if (!this.transport || !this.ready || this.closed) return
+    const hadOutput = this.outputActive
+    this.outputActive = false
+    this.currentResponseId = null
+    this.interruptPending = hadOutput
+    this.assistantText = ''
+    this.options.onAssistantText('')
+    this.options.onTool('')
+    this.options.onState('listening')
+    await this.sendEvent({ type: 'input.speech_started' })
   }
 
   async sendInput(audio: Float32Array, frame: string | null) {
     if (!this.transport || !this.ready || this.closed) return
-
-    const input: Record<string, unknown> = {
-      audio: float32ToBase64(audio),
-      force_listen: this.forceListenNext,
-    }
-    this.forceListenNext = false
-
-    if (this.options.mode === 'video' && frame) {
-      input.video_frames = [frame]
-      input.max_slice_nums = 1
-    }
-
     try {
-      await this.transport.send(
-        JSON.stringify({
-          type: 'input.append',
-          input,
-        }),
-      )
+      await this.sendEvent({
+        type: 'input.audio.append',
+        audio: float32ToBase64(audio),
+        sample_rate: 16000,
+      })
+      if (this.options.mode === 'video' && frame) {
+        await this.sendEvent({
+          type: 'input.video.frame',
+          image: frame,
+          mime_type: 'image/jpeg',
+          captured_at: Date.now(),
+        })
+      }
     } catch (error) {
       this.ready = false
       this.closed = true
-      const message =
-        error instanceof Error ? error.message : '实时音视频发送失败'
-      this.options.onError(message)
+      this.options.onError(
+        error instanceof Error ? error.message : '实时音视频发送失败',
+      )
       try {
         await this.transport.close()
       } catch {
-        // The socket may already be gone; the session is closed either way.
+        // The socket may already be gone.
       }
     }
   }
 
-  interrupt() {
-    if (!this.outputActive || this.interruptPending) return false
-    return this.forceListen()
+  async commitInput() {
+    if (!this.transport || !this.ready || this.closed) return
+    await this.sendEvent({ type: 'input.commit' })
   }
 
   forceListen() {
-    const shouldClearOutput = this.outputActive
+    if (!this.transport || this.closed) return false
     this.outputActive = false
+    this.currentResponseId = null
     this.interruptPending = true
-    this.forceListenNext = true
+    this.options.onTool('')
     this.options.onState('listening')
-    return shouldClearOutput
+    void this.sendEvent({ type: 'response.cancel' })
+    return true
   }
 
   async close() {
@@ -337,14 +355,10 @@ export class RealtimeSession {
     this.closed = true
     if (this.transport) {
       try {
-        await this.transport.send(
-          JSON.stringify({
-            type: 'session.close',
-            reason: 'user_stop',
-          }),
-        )
+        await this.sendQueue.catch(() => {})
+        await this.transport.send(JSON.stringify({ type: 'session.close' }))
       } catch {
-        // A disconnected socket still counts as a successfully closed session.
+        // A disconnected socket still counts as closed.
       }
       try {
         await this.transport.close()

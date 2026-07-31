@@ -1,20 +1,21 @@
 # Ripple Live Android
 
-Tauri 2 + Rust Android client for the MiniCPM-o 4.5 realtime service.
+Tauri 2 + React client for the self-hosted Ripple multimodal Agent.
 
 The app supports:
 
-- full-duplex voice conversation;
-- camera + voice conversation;
-- 16 kHz mono float32 microphone streaming;
+- VAD-delimited voice turns with 16 kHz mono float32 transport;
+- camera frames sampled at one frame per second during a video turn;
+- server-side structured tool calls and visible tool status;
+- response interruption when the user starts speaking;
 - 24 kHz float32 response playback;
+- a stable local context ID so server-side history survives reconnection;
 - a configurable plain-WebSocket server address.
 
-The default server is `140.143.229.103:8600`. The two API endpoints are:
+The default endpoint is:
 
 ```text
-ws://140.143.229.103:8600/v1/realtime?mode=audio
-ws://140.143.229.103:8600/v1/realtime?mode=video
+ws://140.143.229.103:8700/v1/agent/realtime
 ```
 
 ## Build
@@ -59,7 +60,7 @@ camera permission at runtime.
 
 ## Security note
 
-This initial deployment intentionally permits cleartext `ws://`. Audio, camera
-frames, prompts, and model responses are not encrypted, and the public service
-does not include authentication. Move to `wss://` and add access control before
-using it with sensitive content or exposing it broadly.
+This initial deployment permits cleartext `ws://`. Audio, camera frames,
+transcripts, tool arguments, and model responses are not encrypted. Move to
+`wss://` and add access control before using sensitive content or exposing the
+service broadly.
