@@ -672,25 +672,31 @@ export default function App() {
 
           <div className="launch-actions">
             <button
-              className="launch-button primary-launch"
+              className="launch-button call-entry"
               type="button"
+              aria-label="开始语音通话"
               onClick={() => openCall('audio')}
             >
-              <Microphone weight="fill" />
+              <span className="call-entry-icon" aria-hidden="true">
+                <Microphone weight="fill" />
+              </span>
               <span>
-                <strong>开始语音通话</strong>
-                <small>语音模式</small>
+                <strong>语音通话</strong>
+                <small>只听声音</small>
               </span>
             </button>
             <button
-              className="launch-button secondary-launch"
+              className="launch-button call-entry"
               type="button"
+              aria-label="开始视频通话"
               onClick={() => openCall('video')}
             >
-              <VideoCamera weight="fill" />
+              <span className="call-entry-icon" aria-hidden="true">
+                <VideoCamera weight="fill" />
+              </span>
               <span>
-                <strong>打开视频通话</strong>
-                <small>视频模式</small>
+                <strong>视频通话</strong>
+                <small>看见现场</small>
               </span>
             </button>
           </div>

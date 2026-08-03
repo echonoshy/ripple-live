@@ -78,3 +78,35 @@ test('mobile package has the supplied icon and iOS media permissions', () => {
     assert.match(plist, /Ripple Live 使用麦克风进行实时语音通话。/)
   }
 })
+
+test('mobile home gives voice and video equal Kiro-inspired entries', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
+
+  assert.match(appSource, /<strong>语音通话<\/strong>/)
+  assert.match(appSource, /<small>只听声音<\/small>/)
+  assert.match(appSource, /<strong>视频通话<\/strong>/)
+  assert.match(appSource, /<small>看见现场<\/small>/)
+  assert.equal(
+    (appSource.match(/className="launch-button call-entry"/g) ?? []).length,
+    2,
+  )
+  assert.match(
+    cssSource,
+    /\.launch-actions\s*{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s,
+  )
+  assert.match(cssSource, /animation:\s*ripple-ready-pulse 3\.5s/)
+  assert.match(cssSource, /@media \(prefers-reduced-motion: reduce\)/)
+  for (const color of [
+    '#100e15',
+    '#191621',
+    '#211d2a',
+    '#35303e',
+    '#f4f1f7',
+    '#a97bff',
+  ]) {
+    assert.match(cssSource, new RegExp(color))
+  }
+  assert.match(cssSource, /@media \(max-width: 359px\)/)
+  assert.match(cssSource, /\.launch-button\s*{[^}]*min-width:\s*44px/s)
+})

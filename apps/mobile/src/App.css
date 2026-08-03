@@ -1,15 +1,21 @@
 :root {
-  --surface: #17141d;
-  --surface-deep: #100e14;
-  --surface-raised: #211c28;
-  --surface-strong: #2b2434;
-  --ink: #f5f2f7;
-  --ink-muted: #a59ead;
-  --ink-faint: #77717f;
-  --line: rgba(245, 242, 247, 0.09);
-  --accent: #9b6cff;
-  --accent-strong: #ad86ff;
-  --accent-soft: #302047;
+  --canvas: #100e15;
+  --raised: #191621;
+  --strong: #211d2a;
+  --hairline: #35303e;
+  --primary-ink: #f4f1f7;
+  --ripple-violet: #a97bff;
+  --surface: var(--canvas);
+  --surface-deep: var(--canvas);
+  --surface-raised: var(--raised);
+  --surface-strong: var(--strong);
+  --ink: var(--primary-ink);
+  --ink-muted: rgba(244, 241, 247, 0.62);
+  --ink-faint: rgba(244, 241, 247, 0.42);
+  --line: var(--hairline);
+  --accent: var(--ripple-violet);
+  --accent-strong: var(--ripple-violet);
+  --accent-soft: rgba(169, 123, 255, 0.16);
   --danger: #e85d67;
 }
 
@@ -34,11 +40,15 @@ button {
 
 .home-screen,
 .settings-screen,
-.history-screen,
 .auth-screen,
 .call-screen {
   min-height: 100dvh;
   width: min(100%, 520px);
+  margin: 0 auto;
+}
+
+.history-screen {
+  width: min(100%, 720px);
   margin: 0 auto;
 }
 
@@ -159,13 +169,19 @@ button {
   width: clamp(148px, 42vw, 184px);
   aspect-ratio: 1;
   margin-bottom: 34px;
-  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 42px;
-  background: #1b1721;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 24px 64px rgba(7, 5, 10, 0.24);
+  background: var(--surface-raised);
+}
+
+.ready-mark::before {
+  content: "";
+  position: absolute;
+  inset: -12px;
+  border: 1px solid rgba(169, 123, 255, 0.32);
+  border-radius: inherit;
+  pointer-events: none;
+  animation: ripple-ready-pulse 3.5s ease-in-out infinite;
 }
 
 .ready-mark::after {
@@ -181,6 +197,7 @@ button {
   display: block;
   width: 100%;
   height: 100%;
+  border-radius: inherit;
   object-fit: cover;
 }
 
@@ -199,7 +216,7 @@ button {
   height: 7px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 0 4px rgba(155, 108, 255, 0.1);
+  outline: 4px solid rgba(169, 123, 255, 0.1);
 }
 
 .ready-state h1 {
@@ -220,24 +237,52 @@ button {
 
 .launch-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 80px;
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .launch-button {
-  display: grid;
-  align-items: center;
   width: 100%;
-  min-height: 76px;
+  min-width: 44px;
+  min-height: 112px;
   border-radius: 22px;
   transition:
-    transform 160ms ease,
-    background 160ms ease,
-    border-color 160ms ease;
+    transform 180ms ease,
+    background 180ms ease,
+    border-color 180ms ease;
 }
 
-.launch-button > svg {
-  font-size: 24px;
+.call-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  background: var(--surface-raised);
+  color: var(--ink);
+  text-align: left;
+}
+
+.call-entry:hover {
+  border-color: rgba(169, 123, 255, 0.55);
+  background: var(--surface-strong);
+}
+
+.call-entry-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-strong);
+  color: var(--accent);
+}
+
+.call-entry-icon > svg {
+  font-size: 22px;
 }
 
 .launch-button strong,
@@ -246,7 +291,7 @@ button {
 }
 
 .launch-button strong {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 750;
 }
 
@@ -254,30 +299,6 @@ button {
   margin-top: 4px;
   font-size: 11px;
   opacity: 0.68;
-}
-
-.primary-launch {
-  grid-template-columns: 38px 1fr;
-  gap: 10px;
-  padding: 12px 18px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: var(--accent);
-  color: #17111f;
-  text-align: left;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
-}
-
-.secondary-launch {
-  grid-template-columns: 1fr;
-  place-items: center;
-  padding: 0;
-  border: 1px solid var(--line);
-  background: var(--surface-raised);
-  color: var(--ink);
-}
-
-.secondary-launch span {
-  display: none;
 }
 
 .settings-screen {
@@ -1218,6 +1239,60 @@ button {
   }
   to {
     transform: scaleY(0.92);
+  }
+}
+
+@keyframes ripple-ready-pulse {
+  0%,
+  100% {
+    opacity: 0.32;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.04);
+  }
+}
+
+@media (max-width: 359px) {
+  .home-screen {
+    padding-inline: 16px;
+  }
+
+  .brand-lockup {
+    gap: 8px;
+  }
+
+  .brand-lockup img {
+    width: 38px;
+    height: 38px;
+  }
+
+  .brand-lockup span {
+    display: none;
+  }
+
+  .header-actions {
+    gap: 5px;
+  }
+
+  .launch-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .call-entry {
+    min-height: 104px;
+    padding: 13px;
+  }
+
+  .call-entry-icon {
+    width: 38px;
+    height: 38px;
+  }
+
+  .call-entry-icon > svg {
+    font-size: 20px;
   }
 }
 
