@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -109,4 +109,39 @@ test('mobile home gives voice and video equal Kiro-inspired entries', () => {
   }
   assert.match(cssSource, /@media \(max-width: 359px\)/)
   assert.match(cssSource, /\.launch-button\s*{[^}]*min-width:\s*44px/s)
+})
+
+test('mobile libraries expose accessible shared management controls', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
+
+  for (const file of [
+    'LibraryToolbar.tsx',
+    'LibrarySection.tsx',
+    'LibraryActions.tsx',
+  ]) {
+    assert.equal(
+      existsSync(path.join(appRoot, 'src/components', file)),
+      true,
+      `${file} should exist`,
+    )
+  }
+
+  assert.match(appSource, /aria-label="搜索聊天历史"/)
+  assert.match(appSource, /aria-label="搜索视觉记忆"/)
+  assert.match(appSource, /删除后无法恢复/)
+  assert.match(appSource, /groupLibraryItems/)
+  assert.match(appSource, /setDebouncedHistoryQuery\(historyQuery\), 250/)
+  assert.match(appSource, /setDebouncedMemoryQuery\(memoryQuery\), 250/)
+  assert.match(appSource, /closest\('\.library-item-actions, input, textarea'\)/)
+  assert.match(appSource, /没有找到相关对话/)
+  assert.match(appSource, /已归档的对话会保留，但不会出现在最近记录中/)
+  assert.doesNotMatch(appSource, /historyItems\.map\(\(item\)/)
+  assert.match(appSource, /memory-library-grid/)
+  assert.match(appSource, /没有找到相关记忆/)
+  assert.match(
+    cssSource,
+    /grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/,
+  )
+  assert.match(cssSource, /@media \(prefers-reduced-motion: reduce\)/)
 })

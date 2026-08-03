@@ -11,6 +11,7 @@ import {
   Microphone,
   MicrophoneSlash,
   PhoneDisconnect,
+  PushPin,
   SignOut,
   NotePencil,
   Trash,
@@ -23,13 +24,16 @@ import './App.css'
 import appIcon from '../src-tauri/icons/icon.png'
 import {
   assetBlob,
+  batchConversations,
+  batchMemories,
   conversationMessages,
+  conversationMutation,
   conversations,
   currentUser,
-  deleteMemory,
   login,
   logout as logoutApi,
   memories,
+  memoryMutation,
   register,
   updateMemory,
   type AuthUser,
@@ -38,6 +42,17 @@ import {
   type MemoryArtifact,
   type VisualMemory,
 } from './api'
+import { LibraryActions } from './components/LibraryActions'
+import { LibrarySection } from './components/LibrarySection'
+import { LibraryToolbar } from './components/LibraryToolbar'
+import {
+  groupLibraryItems,
+  libraryOptionsForView,
+  matchesLibraryQuery,
+  type LibraryAction,
+  type LibraryItem,
+  type LibraryView,
+} from './library'
 import { LiveMedia } from './media/LiveMedia'
 import {
   RealtimeSession,
@@ -164,12 +179,26 @@ export default function App() {
   const [historyMessages, setHistoryMessages] = useState<ConversationMessage[]>([])
   const [historyBusy, setHistoryBusy] = useState(false)
   const [historyError, setHistoryError] = useState('')
+  const [historyQuery, setHistoryQuery] = useState('')
+  const [debouncedHistoryQuery, setDebouncedHistoryQuery] = useState('')
+  const [historyScope, setHistoryScope] = useState<LibraryView>('all')
+  const [historySelection, setHistorySelection] = useState<Set<string>>(new Set())
   const [selectedConversation, setSelectedConversation] = useState<ConversationSummary | null>(null)
   const [memoryItems, setMemoryItems] = useState<VisualMemory[]>([])
   const [memoryBusy, setMemoryBusy] = useState(false)
   const [memoryError, setMemoryError] = useState('')
+  const [memoryQuery, setMemoryQuery] = useState('')
+  const [debouncedMemoryQuery, setDebouncedMemoryQuery] = useState('')
+  const [memoryScope, setMemoryScope] = useState<LibraryView>('all')
+  const [memorySelection, setMemorySelection] = useState<Set<string>>(new Set())
+  const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null)
   const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null)
   const [memoryDraft, setMemoryDraft] = useState('')
+  const [revealedItem, setRevealedItem] = useState<string | null>(null)
+  const [deleteRequest, setDeleteRequest] = useState<{
+    kind: 'history' | 'memory'
+    ids: string[]
+  } | null>(null)
   const [liveArtifacts, setLiveArtifacts] = useState<ResponseArtifact[]>([])
 
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -177,6 +206,19 @@ export default function App() {
   const sessionRef = useRef<RealtimeSession | null>(null)
   const mediaRef = useRef<LiveMedia | null>(null)
   const visualizerRef = useRef<HTMLDivElement>(null)
+  const longPressTimerRef = useRef<number | null>(null)
+  const pointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
+  const suppressClickRef = useRef(false)
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedHistoryQuery(historyQuery), 250)
+    return () => window.clearTimeout(timer)
+  }, [historyQuery])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedMemoryQuery(memoryQuery), 250)
+    return () => window.clearTimeout(timer)
+  }, [memoryQuery])
 
   useEffect(() => {
     let active = true
@@ -208,7 +250,11 @@ export default function App() {
     let active = true
     setHistoryBusy(true)
     setHistoryError('')
-    void conversations(server, accessToken)
+    void conversations(
+      server,
+      accessToken,
+      libraryOptionsForView(historyScope, debouncedHistoryQuery, 100),
+    )
       .then((items) => {
         if (active) setHistoryItems(items)
       })
@@ -223,7 +269,7 @@ export default function App() {
     return () => {
       active = false
     }
-  }, [accessToken, screen, server])
+  }, [accessToken, debouncedHistoryQuery, historyScope, screen, server])
 
   useEffect(() => {
     if (screen !== 'conversation' || !accessToken || !selectedConversation) return
@@ -253,7 +299,11 @@ export default function App() {
     let active = true
     setMemoryBusy(true)
     setMemoryError('')
-    void memories(server, accessToken)
+    void memories(
+      server,
+      accessToken,
+      libraryOptionsForView(memoryScope, debouncedMemoryQuery, 100),
+    )
       .then((items) => {
         if (active) setMemoryItems(items)
       })
@@ -268,7 +318,7 @@ export default function App() {
     return () => {
       active = false
     }
-  }, [accessToken, screen, server])
+  }, [accessToken, debouncedMemoryQuery, memoryScope, screen, server])
 
   const isActive = [
     'connecting',
@@ -477,13 +527,195 @@ export default function App() {
     }
   }
 
-  const removeMemory = async (memoryId: string) => {
+  const historyLibraryItems = useMemo(
+    () =>
+      historyItems
+        .map((item): LibraryItem => ({
+          id: item.id,
+          title: item.title || '未命名对话',
+          searchableText: `${item.title} ${item.preview}`,
+          timestamp: item.updated_at,
+          isPinned: item.is_pinned,
+          archivedAt: item.archived_at,
+        }))
+        .filter((item) => matchesLibraryQuery(item, historyQuery)),
+    [historyItems, historyQuery],
+  )
+  const memoryLibraryItems = useMemo(
+    () =>
+      memoryItems
+        .map((item): LibraryItem => ({
+          id: item.id,
+          title: item.user_note || '未命名记忆',
+          searchableText: `${item.user_note} ${item.visual_summary}`,
+          timestamp: item.captured_at ?? item.created_at,
+          isPinned: item.is_pinned,
+          archivedAt: item.archived_at,
+        }))
+        .filter((item) => matchesLibraryQuery(item, memoryQuery)),
+    [memoryItems, memoryQuery],
+  )
+  const historyGroups = useMemo(
+    () => groupLibraryItems(historyLibraryItems, new Date(), historyScope),
+    [historyLibraryItems, historyScope],
+  )
+  const memoryGroups = useMemo(
+    () => groupLibraryItems(memoryLibraryItems, new Date(), memoryScope),
+    [memoryLibraryItems, memoryScope],
+  )
+  const selectedMemory = selectedMemoryId
+    ? memoryItems.find((item) => item.id === selectedMemoryId) ?? null
+    : null
+
+  const toggleSelection = (
+    setter: React.Dispatch<React.SetStateAction<Set<string>>>,
+    id: string,
+  ) => {
+    setter((selected) => {
+      const next = new Set(selected)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+  }
+
+  const beginLibraryGesture = (
+    event: React.PointerEvent<HTMLElement>,
+    id: string,
+    select: () => void,
+  ) => {
+    if ((event.target as HTMLElement).closest('.library-item-actions, input, textarea')) return
+    cancelLongPress()
+    pointerStartRef.current = { id, x: event.clientX, y: event.clientY }
+    suppressClickRef.current = false
+    longPressTimerRef.current = window.setTimeout(() => {
+      suppressClickRef.current = true
+      select()
+      longPressTimerRef.current = null
+    }, 500)
+  }
+
+  const moveLibraryGesture = (event: React.PointerEvent<HTMLElement>) => {
+    const start = pointerStartRef.current
+    if (!start) return
+    if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) {
+      cancelLongPress()
+    }
+  }
+
+  const endLibraryGesture = (event: React.PointerEvent<HTMLElement>) => {
+    const start = pointerStartRef.current
+    cancelLongPress()
+    pointerStartRef.current = null
+    if (!start) return
+    const horizontalDistance = event.clientX - start.x
+    if (horizontalDistance < -44) {
+      suppressClickRef.current = true
+      setRevealedItem(start.id)
+    } else if (horizontalDistance > 32) {
+      suppressClickRef.current = true
+      setRevealedItem(null)
+    }
+  }
+
+  const optimisticHistoryAction = async (ids: string[], action: LibraryAction) => {
+    if (action === 'delete') {
+      setDeleteRequest({ kind: 'history', ids })
+      return
+    }
+    const previous = historyItems
+    const selected = new Set(ids)
+    const archivedAt = Date.now() / 1000
+    setHistoryItems((items) =>
+      items.map((item) => {
+        if (!selected.has(item.id)) return item
+        if (action === 'pin') return { ...item, is_pinned: true }
+        if (action === 'unpin') return { ...item, is_pinned: false }
+        return { ...item, archived_at: action === 'archive' ? archivedAt : null }
+      }),
+    )
+    setHistoryError('')
+    try {
+      if (ids.length === 1) {
+        await conversationMutation(server, accessToken, ids[0], action)
+      } else {
+        await batchConversations(server, accessToken, ids, action)
+      }
+      setHistorySelection(new Set())
+      setRevealedItem(null)
+    } catch (error) {
+      setHistoryItems(previous)
+      setHistoryError(error instanceof Error ? error.message : '操作失败，请重试')
+    }
+  }
+
+  const optimisticMemoryAction = async (ids: string[], action: LibraryAction) => {
+    if (action === 'delete') {
+      setDeleteRequest({ kind: 'memory', ids })
+      return
+    }
+    const previous = memoryItems
+    const selected = new Set(ids)
+    const archivedAt = Date.now() / 1000
+    setMemoryItems((items) =>
+      items.map((item) => {
+        if (!selected.has(item.id)) return item
+        if (action === 'pin') return { ...item, is_pinned: true }
+        if (action === 'unpin') return { ...item, is_pinned: false }
+        return { ...item, archived_at: action === 'archive' ? archivedAt : null }
+      }),
+    )
     setMemoryError('')
     try {
-      await deleteMemory(server, accessToken, memoryId)
-      setMemoryItems((items) => items.filter((item) => item.id !== memoryId))
+      if (ids.length === 1) {
+        await memoryMutation(server, accessToken, ids[0], action)
+      } else {
+        await batchMemories(server, accessToken, ids, action)
+      }
+      setMemorySelection(new Set())
+      setRevealedItem(null)
     } catch (error) {
-      setMemoryError(error instanceof Error ? error.message : '无法删除记忆')
+      setMemoryItems(previous)
+      setMemoryError(error instanceof Error ? error.message : '操作失败，请重试')
+    }
+  }
+
+  const confirmDelete = async () => {
+    if (!deleteRequest) return
+    const { kind, ids } = deleteRequest
+    const setError = kind === 'history' ? setHistoryError : setMemoryError
+    setError('')
+    try {
+      if (kind === 'history') {
+        if (ids.length === 1) {
+          await conversationMutation(server, accessToken, ids[0], 'delete')
+        } else {
+          await batchConversations(server, accessToken, ids, 'delete')
+        }
+        setHistoryItems((items) => items.filter((item) => !ids.includes(item.id)))
+        setHistorySelection(new Set())
+      } else {
+        if (ids.length === 1) {
+          await memoryMutation(server, accessToken, ids[0], 'delete')
+        } else {
+          await batchMemories(server, accessToken, ids, 'delete')
+        }
+        setMemoryItems((items) => items.filter((item) => !ids.includes(item.id)))
+        setMemorySelection(new Set())
+        if (selectedMemoryId && ids.includes(selectedMemoryId)) setSelectedMemoryId(null)
+      }
+      setRevealedItem(null)
+      setDeleteRequest(null)
+    } catch (error) {
+      setError(error instanceof Error ? error.message : '删除失败，请重试')
+      setDeleteRequest(null)
     }
   }
 
@@ -720,7 +952,26 @@ export default function App() {
 
           <div className="history-heading">
             <p>{user.email}</p>
-            <h2>最近聊过的内容</h2>
+            <h2>对话资料库</h2>
+          </div>
+
+          <div aria-label="搜索聊天历史">
+            <LibraryToolbar
+              kind="聊天历史"
+              query={historyQuery}
+              scope={historyScope}
+              selectionCount={historySelection.size}
+              onQueryChange={setHistoryQuery}
+              onScopeChange={(scope) => {
+                setHistoryScope(scope)
+                setHistorySelection(new Set())
+                setRevealedItem(null)
+              }}
+              onBatchAction={(action) =>
+                void optimisticHistoryAction([...historySelection], action)
+              }
+              onCancelSelection={() => setHistorySelection(new Set())}
+            />
           </div>
 
           {historyBusy && (
@@ -731,33 +982,88 @@ export default function App() {
             </div>
           )}
           {historyError && <div className="history-error">{historyError}</div>}
-          {!historyBusy && !historyError && historyItems.length === 0 && (
+          {!historyBusy && !historyError && historyGroups.length === 0 && (
             <div className="history-empty">
               <ChatCircleDots />
-              <h2>还没有聊天记录</h2>
-              <p>完成第一次语音或视频对话后，文本内容会出现在这里。</p>
-              <button type="button" onClick={() => openCall('audio')}>
-                开始语音通话
-              </button>
+              <h2>{historyQuery ? '没有找到相关对话' : historyScope === 'archived' ? '还没有归档对话' : historyScope === 'pinned' ? '还没有标记对话' : '还没有聊天记录'}</h2>
+              <p>
+                {historyScope === 'archived'
+                  ? '已归档的对话会保留，但不会出现在最近记录中。'
+                  : historyQuery
+                    ? '试试更短的关键词，或清除搜索条件。'
+                    : '完成第一次语音或视频对话后，文本内容会出现在这里。'}
+              </p>
+              {historyQuery ? (
+                <button type="button" onClick={() => setHistoryQuery('')}>清除搜索</button>
+              ) : historyScope === 'all' ? (
+                <button type="button" onClick={() => openCall('audio')}>开始语音通话</button>
+              ) : null}
             </div>
           )}
-          {!historyBusy && historyItems.length > 0 && (
-            <div className="history-list">
-              {historyItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    setSelectedConversation(item)
-                    setScreen('conversation')
-                  }}
-                >
-                  <div>
-                    <strong>{item.title || '未命名对话'}</strong>
-                    <time>{formatHistoryTime(item.updated_at)}</time>
+          {!historyBusy && historyGroups.length > 0 && (
+            <div className="library-groups history-list">
+              {historyGroups.map((group) => (
+                <LibrarySection key={group.label} label={group.label} count={group.items.length}>
+                  <div className="library-section-items">
+                    {group.items.map((libraryItem) => {
+                      const item = historyItems.find((candidate) => candidate.id === libraryItem.id)
+                      if (!item) return null
+                      const selected = historySelection.has(item.id)
+                      return (
+                        <article
+                          key={item.id}
+                          className={`library-swipe-shell ${revealedItem === item.id ? 'is-revealed' : ''}`}
+                          onPointerDown={(event) =>
+                            beginLibraryGesture(event, item.id, () =>
+                              toggleSelection(setHistorySelection, item.id),
+                            )
+                          }
+                          onPointerMove={moveLibraryGesture}
+                          onPointerUp={endLibraryGesture}
+                          onPointerCancel={() => {
+                            cancelLongPress()
+                            pointerStartRef.current = null
+                          }}
+                        >
+                          <button
+                            className="history-row library-item-surface"
+                            type="button"
+                            aria-pressed={selected}
+                            onClick={() => {
+                              if (suppressClickRef.current) {
+                                suppressClickRef.current = false
+                                return
+                              }
+                              if (historySelection.size > 0) {
+                                toggleSelection(setHistorySelection, item.id)
+                                return
+                              }
+                              setSelectedConversation(item)
+                              setScreen('conversation')
+                            }}
+                          >
+                            {historySelection.size > 0 && (
+                              <span className={`selection-check ${selected ? 'is-selected' : ''}`} aria-hidden="true" />
+                            )}
+                            <span className="library-row-copy">
+                              <span className="library-row-title">
+                                <strong>{item.title || '未命名对话'}</strong>
+                                {item.is_pinned && <PushPin weight="fill" aria-label="已标记" />}
+                                <time>{formatHistoryTime(item.updated_at)}</time>
+                              </span>
+                              <span className="library-row-preview">{item.preview || '这次对话还没有文本内容'}</span>
+                            </span>
+                          </button>
+                          <LibraryActions
+                            pinned={item.is_pinned}
+                            archived={item.archived_at !== null}
+                            onAction={(action) => void optimisticHistoryAction([item.id], action)}
+                          />
+                        </article>
+                      )
+                    })}
                   </div>
-                  <p>{item.preview || '这次对话还没有文本内容'}</p>
-                </button>
+                </LibrarySection>
               ))}
             </div>
           )}
@@ -781,7 +1087,26 @@ export default function App() {
 
           <div className="history-heading">
             <p>{user.email}</p>
-            <h2>我帮你记住的内容</h2>
+            <h2>视觉资料库</h2>
+          </div>
+
+          <div aria-label="搜索视觉记忆">
+            <LibraryToolbar
+              kind="视觉记忆"
+              query={memoryQuery}
+              scope={memoryScope}
+              selectionCount={memorySelection.size}
+              onQueryChange={setMemoryQuery}
+              onScopeChange={(scope) => {
+                setMemoryScope(scope)
+                setMemorySelection(new Set())
+                setRevealedItem(null)
+              }}
+              onBatchAction={(action) =>
+                void optimisticMemoryAction([...memorySelection], action)
+              }
+              onCancelSelection={() => setMemorySelection(new Set())}
+            />
           </div>
 
           {memoryBusy && (
@@ -792,95 +1117,120 @@ export default function App() {
             </div>
           )}
           {memoryError && <div className="history-error">{memoryError}</div>}
-          {!memoryBusy && !memoryError && memoryItems.length === 0 && (
+          {!memoryBusy && !memoryError && memoryGroups.length === 0 && (
             <div className="history-empty">
               <ImagesSquare />
-              <h2>还没有保存记忆</h2>
-              <p>视频通话时说“帮我记住这个”，我会保存当时的内容和画面。</p>
-              <button type="button" onClick={() => openCall('video')}>
-                打开视频通话
-              </button>
+              <h2>{memoryQuery ? '没有找到相关记忆' : memoryScope === 'archived' ? '还没有归档记忆' : memoryScope === 'pinned' ? '还没有标记记忆' : '还没有保存记忆'}</h2>
+              <p>{memoryQuery ? '试试搜索物品、地点或备注里的关键词。' : '视频通话时说“帮我记住这个”，我会保存当时的内容和画面。'}</p>
+              {memoryQuery ? (
+                <button type="button" onClick={() => setMemoryQuery('')}>清除搜索</button>
+              ) : memoryScope === 'all' ? (
+                <button type="button" onClick={() => openCall('video')}>打开视频通话</button>
+              ) : null}
             </div>
           )}
-          {!memoryBusy && memoryItems.length > 0 && (
-            <div className="memory-list">
-              {memoryItems.map((memory) => (
-                <article key={memory.id} className="memory-card">
-                  {memory.cover ? (
-                    <AuthenticatedImage
-                      server={server}
-                      token={accessToken}
-                      artifact={memory.cover}
-                      className="memory-cover"
-                    />
-                  ) : (
-                    <div className="memory-cover memory-text-cover">
-                      <ImagesSquare />
-                      <span>文字记忆</span>
-                    </div>
-                  )}
-                  <div className="memory-card-body">
-                    <time>{formatHistoryTime(memory.created_at)}</time>
-                    {editingMemoryId === memory.id ? (
-                      <textarea
-                        value={memoryDraft}
-                        maxLength={2000}
-                        autoFocus
-                        onChange={(event) => setMemoryDraft(event.target.value)}
-                      />
-                    ) : (
-                      <h2>{memory.user_note}</h2>
-                    )}
-                    {memory.visual_summary && (
-                      <p>{memory.visual_summary}</p>
-                    )}
-                    <div className="memory-actions">
-                      {editingMemoryId === memory.id ? (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => void saveMemoryEdit(memory.id)}
-                          >
-                            保存
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingMemoryId(null)
-                              setMemoryDraft('')
-                            }}
-                          >
-                            取消
-                          </button>
-                        </>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingMemoryId(memory.id)
-                            setMemoryDraft(memory.user_note)
+          {!memoryBusy && memoryGroups.length > 0 && (
+            <div className="library-groups memory-list">
+              {memoryGroups.map((group) => (
+                <LibrarySection key={group.label} label={group.label} count={group.items.length}>
+                  <div className="memory-library-grid">
+                    {group.items.map((libraryItem) => {
+                      const memory = memoryItems.find((candidate) => candidate.id === libraryItem.id)
+                      if (!memory) return null
+                      const selected = memorySelection.has(memory.id)
+                      return (
+                        <article
+                          key={memory.id}
+                          className={`memory-card library-swipe-shell ${revealedItem === memory.id ? 'is-revealed' : ''}`}
+                          onPointerDown={(event) =>
+                            beginLibraryGesture(event, memory.id, () =>
+                              toggleSelection(setMemorySelection, memory.id),
+                            )
+                          }
+                          onPointerMove={moveLibraryGesture}
+                          onPointerUp={endLibraryGesture}
+                          onPointerCancel={() => {
+                            cancelLongPress()
+                            pointerStartRef.current = null
                           }}
                         >
-                          <NotePencil />
-                          修改
-                        </button>
-                      )}
-                      <button
-                        className="danger-action"
-                        type="button"
-                        onClick={() => {
-                          if (window.confirm('确定删除这条记忆和关联画面吗？')) {
-                            void removeMemory(memory.id)
-                          }
-                        }}
-                      >
-                        <Trash />
-                        删除
-                      </button>
-                    </div>
+                          <button
+                            className="memory-card-hit library-item-surface"
+                            type="button"
+                            aria-pressed={selected}
+                            onClick={() => {
+                              if (suppressClickRef.current) {
+                                suppressClickRef.current = false
+                                return
+                              }
+                              if (memorySelection.size > 0) {
+                                toggleSelection(setMemorySelection, memory.id)
+                                return
+                              }
+                              setSelectedMemoryId(memory.id)
+                            }}
+                          >
+                            {memory.cover ? (
+                              <AuthenticatedImage server={server} token={accessToken} artifact={memory.cover} className="memory-cover" />
+                            ) : (
+                              <span className="memory-cover memory-text-cover"><ImagesSquare /><span>文字记忆</span></span>
+                            )}
+                            {memorySelection.size > 0 && (
+                              <span className={`selection-check card-check ${selected ? 'is-selected' : ''}`} aria-hidden="true" />
+                            )}
+                            {memory.is_pinned && <PushPin className="memory-pin" weight="fill" aria-label="已标记" />}
+                            <span className="memory-card-body">
+                              <strong>{memory.user_note || '未命名记忆'}</strong>
+                              <time>{formatHistoryTime(memory.captured_at ?? memory.created_at)}</time>
+                            </span>
+                          </button>
+                          <LibraryActions
+                            pinned={memory.is_pinned}
+                            archived={memory.archived_at !== null}
+                            onAction={(action) => void optimisticMemoryAction([memory.id], action)}
+                          />
+                        </article>
+                      )
+                    })}
                   </div>
-                </article>
+                </LibrarySection>
               ))}
+            </div>
+          )}
+
+          {selectedMemory && (
+            <div className="memory-detail-backdrop" role="presentation" onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setSelectedMemoryId(null)
+            }}>
+              <section className="memory-detail-sheet" role="dialog" aria-modal="true" aria-labelledby="memory-detail-title">
+                <header>
+                  <h2 id="memory-detail-title">记忆详情</h2>
+                  <button type="button" aria-label="关闭记忆详情" onClick={() => setSelectedMemoryId(null)}><X /></button>
+                </header>
+                {selectedMemory.cover ? (
+                  <AuthenticatedImage server={server} token={accessToken} artifact={selectedMemory.cover} className="memory-detail-cover" />
+                ) : (
+                  <div className="memory-detail-cover memory-text-cover"><ImagesSquare /><span>文字记忆</span></div>
+                )}
+                <time>{formatHistoryTime(selectedMemory.captured_at ?? selectedMemory.created_at)}</time>
+                {editingMemoryId === selectedMemory.id ? (
+                  <textarea value={memoryDraft} maxLength={2000} autoFocus onChange={(event) => setMemoryDraft(event.target.value)} />
+                ) : (
+                  <h3>{selectedMemory.user_note || '未命名记忆'}</h3>
+                )}
+                {selectedMemory.visual_summary && <p>{selectedMemory.visual_summary}</p>}
+                <div className="memory-actions">
+                  {editingMemoryId === selectedMemory.id ? (
+                    <>
+                      <button type="button" onClick={() => void saveMemoryEdit(selectedMemory.id)}>保存</button>
+                      <button type="button" onClick={() => { setEditingMemoryId(null); setMemoryDraft('') }}>取消</button>
+                    </>
+                  ) : (
+                    <button type="button" onClick={() => { setEditingMemoryId(selectedMemory.id); setMemoryDraft(selectedMemory.user_note) }}><NotePencil /> 修改</button>
+                  )}
+                  <button className="danger-action" type="button" onClick={() => setDeleteRequest({ kind: 'memory', ids: [selectedMemory.id] })}><Trash /> 删除</button>
+                </div>
+              </section>
             </div>
           )}
         </section>
@@ -1125,6 +1475,28 @@ export default function App() {
             </div>
           </footer>
         </section>
+      )}
+
+      {deleteRequest && (
+        <div className="confirm-dialog-backdrop" role="presentation">
+          <section
+            className="confirm-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-dialog-title"
+            aria-describedby="delete-dialog-description"
+          >
+            <span className="confirm-dialog-mark"><Trash aria-hidden="true" /></span>
+            <h2 id="delete-dialog-title">
+              删除{deleteRequest.ids.length > 1 ? `${deleteRequest.ids.length} 项` : deleteRequest.kind === 'history' ? '这段对话' : '这条记忆'}？
+            </h2>
+            <p id="delete-dialog-description">删除后无法恢复。视觉记忆与聊天记录会分别保留，不会连带删除。</p>
+            <div>
+              <button type="button" onClick={() => setDeleteRequest(null)}>取消</button>
+              <button className="danger-action" type="button" autoFocus onClick={() => void confirmDelete()}>确认删除</button>
+            </div>
+          </section>
+        </div>
       )}
     </main>
   )
