@@ -144,7 +144,7 @@ export class LiveMedia {
         } else if (this.fallbackSpeaking) {
           this.fallbackSilenceChunks =
             rms < 0.012 ? this.fallbackSilenceChunks + 1 : 0
-          if (this.fallbackSilenceChunks >= 6) {
+          if (this.fallbackSilenceChunks >= 8) {
             this.fallbackSpeaking = false
             this.fallbackSilenceChunks = 0
             onSpeechEnd()
@@ -167,7 +167,7 @@ export class LiveMedia {
         resumeStream: async (stream) => stream,
         positiveSpeechThreshold: 0.6,
         negativeSpeechThreshold: 0.35,
-        redemptionMs: 320,
+        redemptionMs: 800,
         minSpeechMs: 96,
         preSpeechPadMs: 0,
         ortConfig: (ort) => {
