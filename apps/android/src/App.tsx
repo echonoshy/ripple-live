@@ -132,6 +132,7 @@ export default function App() {
         onUserText: setUserText,
         onTool: setToolStatus,
         onAudio: (audio) => media.enqueueOutput(audio),
+        onAudioDone: () => media.finishOutput(),
         onReady: async () => {
           await media.start((audio, frame) => {
             void session.sendInput(audio, frame)

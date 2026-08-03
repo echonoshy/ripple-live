@@ -86,9 +86,10 @@ Services bind as follows:
 Each inference service uses exactly one physical GPU. Qwen3-TTS uses a
 two-stage Talker/Code2Wav pipeline in `qwen3-tts-batch.yaml`. The Talker keeps
 continuous batching enabled, while CustomVoice Code2Wav uses one sequence for
-the best first-audio latency. The codec emits an initial one-frame chunk, then
-uses 25-frame chunks with 72 frames of decoder context so adjacent streaming
-chunks retain more consistent timbre. ASR and Qwen3-VL retain vLLM continuous
+the best first-audio latency. The codec emits an initial five-frame chunk,
+then uses 25-frame chunks with 72 frames of decoder context. This seeds the
+client playback buffer before the first steady-state chunk and keeps adjacent
+streaming chunks timbrally consistent. ASR and Qwen3-VL retain vLLM continuous
 batching.
 
 Run a repeatable TTS concurrency benchmark with:
@@ -97,10 +98,12 @@ Run a repeatable TTS concurrency benchmark with:
 uv run --with httpx deploy/agent-stack/tts-benchmark.py --stream --concurrency 4
 ```
 
-On the RTX 5880 validation, the 1.7B model delivered 108 ms median first-audio
-latency at four-way concurrency, a 0.24 real-time factor, and 14.08 generated
-audio-seconds/second. End-to-end Agent first audio also includes VL generation
-and sentence accumulation; the smoke test measured 1.26 seconds.
+On the RTX 5880 validation, the 1.7B model delivered 197 ms median first-audio
+latency at four-way concurrency, a 0.24 real-time factor, and 14.22 generated
+audio-seconds/second. The larger initial chunk trades about 90 ms of server
+TTFA for enough audio to prevent an immediate playback underrun. End-to-end
+Agent first audio also includes VL generation and sentence accumulation; the
+smoke test measured 0.93 seconds.
 
 ## Tool extension
 
@@ -111,10 +114,18 @@ executed as code.
 
 The built-in tools are:
 
+- `web_search` (DuckDuckGo Instant Answer summaries and related sources)
 - `get_current_time`
 - `calculate`
 - `remember`
 - `recall`
+
+`web_search` uses DuckDuckGo's keyless Instant Answer endpoint. It returns a
+compact answer, source snippets, and URLs, but it is not a complete general web
+search API, so some current-events or long-tail queries can return no results.
+Set `RIPPLE_SEARCH_PROXY` when the Gateway host needs a dedicated outbound HTTP
+proxy. The search client has a 12-second timeout and never treats an empty
+result as evidence.
 
 ## Context extension
 

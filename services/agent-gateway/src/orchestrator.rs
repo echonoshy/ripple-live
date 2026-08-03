@@ -19,6 +19,7 @@ use crate::{
 const SYSTEM_PROMPT: &str = "你是 Ripple Live，一个运行在用户自有服务器上的中文多模态语音 Agent。
 你可以理解当前语音转写和随附的视频画面。回答应自然、简洁、适合直接朗读。
 需要外部动作或精确结果时必须使用提供的工具，不要假装已经调用。
+用户要求联网、搜索、最新信息或外部资料时必须调用 web_search，并根据返回来源作答。若工具返回 result_count 为 0，不得把自身已有知识说成搜索结果，必须明确说明本次搜索没有找到结果。
 只有用户明确要求记住某件事时才调用 remember；需要历史记忆时调用 recall。
 工具失败时如实说明。不要在朗读内容中输出工具调用 JSON。";
 
@@ -50,6 +51,7 @@ impl AgentOrchestrator {
             context.clone(),
             &settings.skills_dir,
             settings.cli_max_output_bytes,
+            &settings.search_proxy,
         )?;
         info!(external_tools = tools.external_tool_count(), skills_dir = %settings.skills_dir.display(), "skills loaded");
         Ok(Self {

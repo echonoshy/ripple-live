@@ -18,8 +18,17 @@ type AudioLevelMessage = {
   level: number
 }
 
-function resampleTo16k(samples: Float32Array, sourceRate: number) {
-  const targetRate = 16000
+type PlaybackStateMessage = {
+  type: 'playback-started' | 'playback-underrun'
+  bufferedMs?: number
+  count?: number
+}
+
+function resample(
+  samples: Float32Array,
+  sourceRate: number,
+  targetRate: number,
+) {
   if (sourceRate === targetRate) return samples
 
   const outputLength = Math.max(
@@ -39,6 +48,10 @@ function resampleTo16k(samples: Float32Array, sourceRate: number) {
   return output
 }
 
+function resampleTo16k(samples: Float32Array, sourceRate: number) {
+  return resample(samples, sourceRate, 16000)
+}
+
 export class LiveMedia {
   private readonly options: LiveMediaOptions
   private audioStream: MediaStream | null = null
@@ -46,13 +59,12 @@ export class LiveMedia {
   private captureContext: AudioContext | null = null
   private playbackContext: AudioContext | null = null
   private captureNode: AudioWorkletNode | null = null
+  private playbackNode: AudioWorkletNode | null = null
   private sourceNode: MediaStreamAudioSourceNode | null = null
   private silentGain: GainNode | null = null
   private vad: MicVAD | null = null
   private muted = false
   private running = false
-  private nextPlaybackTime = 0
-  private playbackSources = new Set<AudioBufferSourceNode>()
   private facingMode: 'user' | 'environment'
   private lastFrameAt = 0
   private fallbackVad = false
@@ -75,6 +87,8 @@ export class LiveMedia {
     }
 
     if (this.options.withVideo) await this.openCamera()
+
+    await this.openPlayback()
 
     this.audioStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -185,39 +199,23 @@ export class LiveMedia {
   }
 
   enqueueOutput(samples: Float32Array) {
-    if (!samples.length) return
-    if (!this.playbackContext) {
-      this.playbackContext = new AudioContext()
-      this.nextPlaybackTime = this.playbackContext.currentTime + 0.2
-    }
+    if (!samples.length || !this.playbackNode || !this.playbackContext) return
+    const output =
+      this.playbackContext.sampleRate === 24000
+        ? new Float32Array(samples)
+        : resample(samples, 24000, this.playbackContext.sampleRate)
+    this.playbackNode.port.postMessage(
+      { type: 'enqueue', samples: output },
+      [output.buffer],
+    )
+  }
 
-    const context = this.playbackContext
-    const buffer = context.createBuffer(1, samples.length, 24000)
-    buffer.copyToChannel(new Float32Array(samples), 0)
-    const source = context.createBufferSource()
-    source.buffer = buffer
-    source.connect(context.destination)
-    this.playbackSources.add(source)
-    source.onended = () => {
-      this.playbackSources.delete(source)
-      source.disconnect()
-    }
-    const startAt = Math.max(this.nextPlaybackTime, context.currentTime + 0.03)
-    source.start(startAt)
-    this.nextPlaybackTime = startAt + buffer.duration
+  finishOutput() {
+    this.playbackNode?.port.postMessage({ type: 'end' })
   }
 
   clearOutput() {
-    for (const source of this.playbackSources) {
-      try {
-        source.stop()
-      } catch {
-        // A source that already ended is harmless.
-      }
-      source.disconnect()
-    }
-    this.playbackSources.clear()
-    this.nextPlaybackTime = 0
+    this.playbackNode?.port.postMessage({ type: 'clear' })
   }
 
   stop() {
@@ -230,9 +228,11 @@ export class LiveMedia {
     void vad?.destroy().catch(() => {})
     this.clearOutput()
     this.captureNode?.disconnect()
+    this.playbackNode?.disconnect()
     this.sourceNode?.disconnect()
     this.silentGain?.disconnect()
     this.captureNode = null
+    this.playbackNode = null
     this.sourceNode = null
     this.silentGain = null
     this.audioStream?.getTracks().forEach((track) => track.stop())
@@ -242,6 +242,45 @@ export class LiveMedia {
     void this.playbackContext?.close()
     this.playbackContext = null
     this.stopCamera()
+  }
+
+  private async openPlayback() {
+    this.playbackContext = new AudioContext({
+      latencyHint: 'interactive',
+      sampleRate: 24000,
+    })
+    await this.playbackContext.audioWorklet.addModule('/playback-processor.js')
+    this.playbackNode = new AudioWorkletNode(
+      this.playbackContext,
+      'stream-playback-processor',
+      {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        processorOptions: {
+          initialBufferMs: 450,
+          rebufferMs: 300,
+        },
+      },
+    )
+    this.playbackNode.port.onmessage = (
+      event: MessageEvent<PlaybackStateMessage>,
+    ) => {
+      if (event.data.type === 'playback-underrun') {
+        console.warn('[Ripple Live] playback buffer underrun', {
+          count: event.data.count,
+        })
+      } else if (event.data.type === 'playback-started') {
+        console.info('[Ripple Live] buffered playback started', {
+          bufferedMs: event.data.bufferedMs,
+          sampleRate: this.playbackContext?.sampleRate,
+        })
+      }
+    }
+    this.playbackNode.connect(this.playbackContext.destination)
+    if (this.playbackContext.state === 'suspended') {
+      await this.playbackContext.resume()
+    }
   }
 
   private async openCamera() {

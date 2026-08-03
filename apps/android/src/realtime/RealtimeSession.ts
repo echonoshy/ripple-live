@@ -40,6 +40,7 @@ type SessionOptions = {
   onUserText: (text: string) => void
   onTool: (label: string) => void
   onAudio: (audio: Float32Array) => void
+  onAudioDone: () => void
   onReady: () => Promise<void>
 }
 
@@ -269,6 +270,7 @@ export class RealtimeSession {
         break
       case 'response.done':
         if (!this.isCurrentResponse(event)) return
+        this.options.onAudioDone()
         this.currentResponseId = null
         this.outputActive = false
         this.interruptPending = false

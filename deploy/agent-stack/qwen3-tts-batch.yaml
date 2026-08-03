@@ -14,8 +14,8 @@ connectors:
       # Official steady-state chunk and decoder sliding-context sizes.
       codec_chunk_frames: 25
       codec_left_context_frames: 72
-      # Emit one small initial chunk for TTFA, then return to 25-frame chunks.
-      initial_codec_chunk_frames: 1
+      # Seed playback with enough audio to bridge the first steady-state chunk.
+      initial_codec_chunk_frames: 5
       decode_cudagraph_capture_sizes: [25, 73, 97, 169, 325]
 
 stages:

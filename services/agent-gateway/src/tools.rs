@@ -1,4 +1,4 @@
-use std::{path::Path, sync::OnceLock};
+use std::{collections::HashSet, path::Path, sync::OnceLock, time::Duration};
 
 use chrono::SecondsFormat;
 use chrono_tz::Tz;
@@ -12,6 +12,31 @@ use crate::{
 
 fn builtin_schemas() -> Vec<Value> {
     vec![
+        json!({
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "使用 DuckDuckGo 在线查询事实摘要和相关网页来源。适用于需要联网、最新信息或外部资料的问题；若没有结果应如实说明。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "简洁、具体的搜索关键词，不要使用“是什么”等完整问句，例如 OpenAI、量子计算"
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "最多返回的来源数量，范围 1 到 8",
+                            "default": 5,
+                            "minimum": 1,
+                            "maximum": 8
+                        }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }
+            }
+        }),
         json!({
             "type": "function",
             "function": {
@@ -87,6 +112,7 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
             "calculate" => Some("calculate"),
             "remember" => Some("remember"),
             "recall" => Some("recall"),
+            "web_search" => Some("web_search"),
             _ => None,
         };
     }
@@ -104,6 +130,18 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
     {
         return Some("recall");
     }
+    if [
+        "联网搜索",
+        "网上搜索",
+        "网页搜索",
+        "用 DuckDuckGo",
+        "使用 DuckDuckGo",
+    ]
+    .iter()
+    .any(|needle| transcript.contains(needle))
+    {
+        return Some("web_search");
+    }
     None
 }
 
@@ -112,6 +150,8 @@ pub struct ToolExecutor {
     context: ContextStore,
     registry: SkillRegistry,
     cli: CliRunner,
+    client: reqwest::Client,
+    search_proxy: Option<String>,
 }
 
 impl ToolExecutor {
@@ -119,11 +159,20 @@ impl ToolExecutor {
         context: ContextStore,
         skills_dir: &Path,
         max_output_bytes: usize,
+        search_proxy: &str,
     ) -> anyhow::Result<Self> {
+        let mut client = reqwest::Client::builder();
+        let search_proxy =
+            (!search_proxy.trim().is_empty()).then(|| search_proxy.trim().to_owned());
+        if let Some(proxy) = &search_proxy {
+            client = client.proxy(reqwest::Proxy::all(proxy)?);
+        }
         Ok(Self {
             context,
             registry: SkillRegistry::load(skills_dir)?,
             cli: CliRunner::new(max_output_bytes),
+            client: client.build()?,
+            search_proxy,
         })
     }
 
@@ -149,7 +198,7 @@ impl ToolExecutor {
     pub async fn execute(&self, session_id: &str, name: &str, arguments: &str) -> Value {
         match self.execute_inner(session_id, name, arguments).await {
             Ok(value) => value,
-            Err(error) => json!({"ok": false, "error": error.to_string()}),
+            Err(error) => json!({"ok": false, "error": format!("{error:#}")}),
         }
     }
 
@@ -161,6 +210,35 @@ impl ToolExecutor {
     ) -> anyhow::Result<Value> {
         let payload: Value = serde_json::from_str(arguments)?;
         match name {
+            "web_search" => {
+                let query = payload
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|query| !query.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("搜索关键词不能为空"))?;
+                if query.chars().count() > 200 {
+                    anyhow::bail!("搜索关键词不能超过 200 个字符");
+                }
+                let max_results = payload
+                    .get("max_results")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(5)
+                    .clamp(1, 8) as usize;
+                let mut effective_query = query.to_owned();
+                let mut response = self.fetch_duckduckgo(&effective_query).await?;
+                let simplified = simplify_search_query(query);
+                if !duckduckgo_has_results(&response) && simplified != query {
+                    effective_query = simplified;
+                    response = self.fetch_duckduckgo(&effective_query).await?;
+                }
+                Ok(format_duckduckgo_results(
+                    query,
+                    &effective_query,
+                    &response,
+                    max_results,
+                ))
+            }
             "get_current_time" => {
                 let name = payload
                     .get("timezone")
@@ -202,6 +280,76 @@ impl ToolExecutor {
             },
         }
     }
+
+    async fn fetch_duckduckgo(&self, query: &str) -> anyhow::Result<Value> {
+        let response = self
+            .client
+            .get("https://api.duckduckgo.com/")
+            .query(&[
+                ("q", query),
+                ("format", "json"),
+                ("no_html", "1"),
+                ("no_redirect", "1"),
+                ("skip_disambig", "0"),
+                ("t", "ripple-live"),
+            ])
+            .header(
+                reqwest::header::USER_AGENT,
+                "RippleLive/0.2 (DuckDuckGo Instant Answer client)",
+            )
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .timeout(Duration::from_secs(12))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body = response.bytes().await?;
+        if !body.is_empty()
+            && let Ok(payload) = serde_json::from_slice(&body)
+        {
+            return Ok(payload);
+        }
+        self.fetch_duckduckgo_with_curl(query).await
+    }
+
+    async fn fetch_duckduckgo_with_curl(&self, query: &str) -> anyhow::Result<Value> {
+        let encoded_query = format!("q={query}");
+        let mut command = tokio::process::Command::new("curl");
+        command.args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "12",
+            "--get",
+            "https://api.duckduckgo.com/",
+            "--data-urlencode",
+            &encoded_query,
+            "--data",
+            "format=json",
+            "--data",
+            "no_html=1",
+            "--data",
+            "no_redirect=1",
+            "--data",
+            "skip_disambig=0",
+            "--data",
+            "t=ripple-live",
+            "--header",
+            "User-Agent: RippleLive/0.2 (DuckDuckGo Instant Answer client)",
+        ]);
+        if let Some(proxy) = &self.search_proxy {
+            command.args(["--proxy", proxy]);
+        }
+        let output = command.output().await?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "DuckDuckGo curl request failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(serde_json::from_slice(&output.stdout)?)
+    }
 }
 
 fn explicit_tool_name(transcript: &str) -> Option<&str> {
@@ -218,8 +366,129 @@ fn explicit_tool_name(transcript: &str) -> Option<&str> {
 fn is_builtin_tool(name: &str) -> bool {
     matches!(
         name,
-        "get_current_time" | "calculate" | "remember" | "recall"
+        "web_search" | "get_current_time" | "calculate" | "remember" | "recall"
     )
+}
+
+fn duckduckgo_has_results(payload: &Value) -> bool {
+    ["Answer", "AbstractText"].iter().any(|key| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+    }) || payload
+        .get("RelatedTopics")
+        .and_then(Value::as_array)
+        .is_some_and(|topics| !topics.is_empty())
+}
+
+fn simplify_search_query(query: &str) -> String {
+    let mut simplified = query.trim().trim_matches(['？', '?', '。', '！', '!']);
+    for prefix in ["请问", "请搜索", "请查询", "搜索", "查询"] {
+        simplified = simplified.strip_prefix(prefix).unwrap_or(simplified).trim();
+    }
+    for suffix in [
+        "是什么",
+        "是谁",
+        "怎么样",
+        "有哪些",
+        "的最新消息",
+        "最新消息",
+    ] {
+        simplified = simplified.strip_suffix(suffix).unwrap_or(simplified).trim();
+    }
+    if simplified.is_empty() {
+        query.trim().to_owned()
+    } else {
+        simplified.to_owned()
+    }
+}
+
+fn format_duckduckgo_results(
+    query: &str,
+    effective_query: &str,
+    payload: &Value,
+    max_results: usize,
+) -> Value {
+    let answer = payload
+        .get("Answer")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let abstract_text = payload
+        .get("AbstractText")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let abstract_url = payload
+        .get("AbstractURL")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let abstract_source = payload
+        .get("AbstractSource")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let mut results = Vec::new();
+    let mut seen_urls = HashSet::new();
+    if !abstract_text.is_empty() {
+        if !abstract_url.is_empty() {
+            seen_urls.insert(abstract_url.to_owned());
+        }
+        results.push(json!({
+            "title": payload.get("Heading").and_then(Value::as_str).unwrap_or(abstract_source),
+            "snippet": abstract_text,
+            "url": abstract_url,
+            "source": abstract_source
+        }));
+    }
+    if let Some(topics) = payload.get("RelatedTopics").and_then(Value::as_array) {
+        collect_related_topics(topics, &mut results, &mut seen_urls, max_results);
+    }
+    results.truncate(max_results);
+    let result_count = results.len();
+    json!({
+        "ok": true,
+        "provider": "duckduckgo_instant_answer",
+        "query": query,
+        "effective_query": effective_query,
+        "answer": answer,
+        "results": results,
+        "result_count": result_count,
+        "limitations": "DuckDuckGo Instant Answer 不是完整网页搜索 API；部分查询可能没有摘要或相关来源。"
+    })
+}
+
+fn collect_related_topics(
+    topics: &[Value],
+    output: &mut Vec<Value>,
+    seen_urls: &mut HashSet<String>,
+    limit: usize,
+) {
+    for topic in topics {
+        if output.len() >= limit {
+            return;
+        }
+        if let Some(nested) = topic.get("Topics").and_then(Value::as_array) {
+            collect_related_topics(nested, output, seen_urls, limit);
+            continue;
+        }
+        let text = topic
+            .get("Text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let url = topic
+            .get("FirstURL")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if text.is_empty() || url.is_empty() || !seen_urls.insert(url.to_owned()) {
+            continue;
+        }
+        output.push(json!({"title": text, "snippet": text, "url": url}));
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -457,5 +726,35 @@ mod tests {
             Some("calculate")
         );
         assert_eq!(select_forced_tool("请记住：我喜欢乌龙茶"), Some("remember"));
+        assert_eq!(select_forced_tool("请联网搜索 OpenAI"), Some("web_search"));
+    }
+
+    #[test]
+    fn formats_duckduckgo_instant_answers() {
+        let payload = json!({
+            "Heading": "Ripple",
+            "AbstractText": "Ripple is a test abstract.",
+            "AbstractURL": "https://example.com/ripple",
+            "AbstractSource": "Example",
+            "Answer": "",
+            "RelatedTopics": [
+                {"Text": "First related result", "FirstURL": "https://example.com/first"},
+                {"Name": "Nested", "Topics": [
+                    {"Text": "Second related result", "FirstURL": "https://example.com/second"}
+                ]}
+            ]
+        });
+        let result = format_duckduckgo_results("ripple 是什么", "ripple", &payload, 2);
+        assert_eq!(result["ok"], json!(true));
+        assert_eq!(result["provider"], json!("duckduckgo_instant_answer"));
+        assert_eq!(result["result_count"], json!(2));
+        assert_eq!(result["effective_query"], json!("ripple"));
+        assert_eq!(result["results"][0]["source"], json!("Example"));
+        assert_eq!(
+            result["results"][1]["url"],
+            json!("https://example.com/first")
+        );
+        assert_eq!(simplify_search_query("OpenAI 是什么？"), "OpenAI");
+        assert_eq!(simplify_search_query("请查询量子计算"), "量子计算");
     }
 }

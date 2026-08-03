@@ -29,6 +29,7 @@ pub struct Settings {
     pub max_tool_rounds: usize,
     pub skills_dir: PathBuf,
     pub cli_max_output_bytes: usize,
+    pub search_proxy: String,
     pub request_timeout: Duration,
 }
 
@@ -81,6 +82,7 @@ impl Settings {
             max_tool_rounds: parsed("MAX_TOOL_ROUNDS", 6),
             skills_dir: PathBuf::from(value("SKILLS_DIR", "skills")),
             cli_max_output_bytes: parsed("CLI_MAX_OUTPUT_BYTES", 256 * 1024),
+            search_proxy: value("SEARCH_PROXY", ""),
             request_timeout: Duration::from_secs(parsed("REQUEST_TIMEOUT_SECONDS", 180)),
         })
     }

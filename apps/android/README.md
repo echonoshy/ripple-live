@@ -8,7 +8,8 @@ The app supports:
 - camera frames sampled at one frame per second during a video turn;
 - server-side structured tool calls and visible tool status;
 - response interruption when the user starts speaking;
-- 24 kHz float32 response playback;
+- continuous 24 kHz float32 response playback through an AudioWorklet ring
+  buffer, with 450 ms startup buffering and underrun recovery;
 - a new session ID for every voice or video call so separate calls never share
   conversation history;
 - a configurable plain-WebSocket server address.

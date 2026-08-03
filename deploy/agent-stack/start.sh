@@ -27,6 +27,7 @@ TTS_CUDA_HOME="${TTS_CUDA_HOME:-/usr/local/cuda-12.8}"
 TTS_OMNI_SITE="$TTS_OMNI_RUNTIME/lib/python3.12/site-packages"
 TTS_OMNI_LIBRARY_PATH="$TTS_CUDA_HOME/targets/x86_64-linux/lib:$TTS_OMNI_SITE/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 GATEWAY_DATA_DIR="${RIPPLE_DATA_DIR:-$REPO_ROOT/.cache/agent-gateway}"
+SEARCH_PROXY="${RIPPLE_SEARCH_PROXY:-${https_proxy:-${HTTPS_PROXY:-}}}"
 if [[ "$GATEWAY_DATA_DIR" != /* ]]; then
   GATEWAY_DATA_DIR="$REPO_ROOT/$GATEWAY_DATA_DIR"
 fi
@@ -139,4 +140,5 @@ start_process gateway env \
   RIPPLE_TTS_LANGUAGE="${RIPPLE_TTS_LANGUAGE:-Chinese}" \
   RIPPLE_TTS_INSTRUCTIONS="${RIPPLE_TTS_INSTRUCTIONS:-自然、温暖、亲切的中文女声。语速适中，语气平静，停顿自然，像真人助手交流，避免播音腔和夸张情绪。}" \
   RIPPLE_AUDIO_CHUNK_MS="${RIPPLE_AUDIO_CHUNK_MS:-100}" \
+  RIPPLE_SEARCH_PROXY="$SEARCH_PROXY" \
   "$REPO_ROOT/services/agent-gateway/target/release/ripple-agent-gateway"
