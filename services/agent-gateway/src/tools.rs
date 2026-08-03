@@ -81,6 +81,23 @@ fn builtin_schemas() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "list_todos",
+                "description": "查询当前用户的待办事项。用户询问有哪些、多少个或之前创建了什么待办时必须调用；completed 省略时只返回未完成待办。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "completed": {
+                            "type": "boolean",
+                            "description": "false 查询未完成待办，true 查询已完成待办；省略时为 false"
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "recall",
                 "description": "从当前用户所有会话保存的长期记忆中检索信息，并返回相关原始画面。query 应提炼为简洁关键词。",
                 "parameters": {
@@ -97,7 +114,7 @@ fn builtin_schemas() -> Vec<Value> {
 pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
     static EXPLICIT: OnceLock<Regex> = OnceLock::new();
     let explicit = EXPLICIT.get_or_init(|| {
-        Regex::new(r#"(?i)(?:调用|使用)\\s*[`'\"]?([a-z_]+)[`'\"]?\\s*工具"#).unwrap()
+        Regex::new(r#"(?i)(?:调用|使用)\s*[`'\"]?([a-z_]+)[`'\"]?\s*工具"#).unwrap()
     });
     if let Some(name) = explicit
         .captures(transcript)
@@ -110,6 +127,7 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
             "remember" => Some("remember"),
             "recall" => Some("recall"),
             "create_todo" => Some("create_todo"),
+            "list_todos" => Some("list_todos"),
             "web_search" => Some("web_search"),
             _ => None,
         };
@@ -141,6 +159,9 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
     .any(|needle| transcript.contains(needle))
     {
         return Some("create_todo");
+    }
+    if asks_about_todos(transcript) {
+        return Some("list_todos");
     }
     if [
         "长期记忆",
@@ -213,9 +234,12 @@ impl ToolExecutor {
         {
             return Some(name.to_owned());
         }
-        select_forced_tool(transcript)
-            .filter(|name| is_builtin_tool(name) || self.registry.get(name).is_some())
-            .map(str::to_owned)
+        let selected = select_forced_tool(transcript)
+            .filter(|name| is_builtin_tool(name) || self.registry.get(name).is_some());
+        if selected == Some("create_todo") && mentions_relative_time(transcript) {
+            return Some("get_current_time".to_owned());
+        }
+        selected.map(str::to_owned)
     }
 
     pub async fn execute(
@@ -330,6 +354,22 @@ impl ToolExecutor {
                     artifacts,
                 })
             }
+            "list_todos" => {
+                let completed = payload
+                    .get("completed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let todos = self
+                    .memories
+                    .list_todos(&execution.user_id, Some(completed), 100)
+                    .await?;
+                Ok(ToolOutcome::value(json!({
+                    "ok": true,
+                    "completed": completed,
+                    "count": todos.len(),
+                    "todos": todos
+                })))
+            }
             "recall" => {
                 let query = payload.get("query").and_then(Value::as_str).unwrap_or("");
                 let memories = self.memories.recall(&execution.user_id, query, 5).await?;
@@ -391,6 +431,53 @@ fn explicit_tool_name(transcript: &str) -> Option<&str> {
         .map(|item| item.as_str())
 }
 
+fn asks_about_todos(transcript: &str) -> bool {
+    let mentions_todo = transcript.contains("待办") || transcript.contains("代办");
+    mentions_todo
+        && [
+            "哪些",
+            "多少",
+            "几个",
+            "什么",
+            "有没有",
+            "还有",
+            "查看",
+            "查询",
+            "查一下",
+            "检查",
+            "列出",
+            "列表",
+            "之前",
+            "当前",
+            "现在",
+            "我的",
+        ]
+        .iter()
+        .any(|needle| transcript.contains(needle))
+}
+
+fn mentions_relative_time(transcript: &str) -> bool {
+    [
+        "今天",
+        "明天",
+        "后天",
+        "今晚",
+        "早上",
+        "上午",
+        "中午",
+        "下午",
+        "晚上",
+        "下班",
+        "周末",
+        "下周",
+        "下个月",
+        "一会",
+        "稍后",
+    ]
+    .iter()
+    .any(|needle| transcript.contains(needle))
+}
+
 fn parse_due_at(value: &str) -> anyhow::Result<f64> {
     let due_at = chrono::DateTime::parse_from_rfc3339(value.trim())?.timestamp() as f64;
     if due_at < chrono::Utc::now().timestamp() as f64 - 60.0 {
@@ -402,7 +489,7 @@ fn parse_due_at(value: &str) -> anyhow::Result<f64> {
 fn is_builtin_tool(name: &str) -> bool {
     matches!(
         name,
-        "get_current_time" | "calculate" | "remember" | "recall"
+        "get_current_time" | "calculate" | "remember" | "recall" | "create_todo" | "list_todos"
     )
 }
 
@@ -643,6 +730,24 @@ mod tests {
         assert_eq!(select_forced_tool("请记住：我喜欢乌龙茶"), Some("remember"));
         assert_eq!(select_forced_tool("记一下这个位置"), Some("remember"));
         assert_eq!(select_forced_tool("我上次放哪里了"), Some("recall"));
+        assert_eq!(select_forced_tool("我有哪些待办"), Some("list_todos"));
+        assert_eq!(
+            select_forced_tool("帮我检查一下，我还有哪些代办事项"),
+            Some("list_todos")
+        );
+        assert_eq!(
+            select_forced_tool("我之前让你创建的是什么待办"),
+            Some("list_todos")
+        );
         assert_eq!(select_forced_tool("请联网搜索 OpenAI"), Some("web_search"));
+        assert!(is_builtin_tool("create_todo"));
+        assert!(is_builtin_tool("list_todos"));
+    }
+
+    #[test]
+    fn recognizes_relative_todo_times() {
+        assert!(mentions_relative_time("提醒我明天下班买抽纸"));
+        assert!(mentions_relative_time("把这个做成待办，周末处理"));
+        assert!(!mentions_relative_time("把这个做成待办"));
     }
 }

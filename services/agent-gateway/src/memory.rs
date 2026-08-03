@@ -263,8 +263,8 @@ impl MemoryService {
         Ok(results)
     }
 
-    /// A todo is captured as a visual memory first, so its evidence remains
-    /// available from the task list instead of becoming an unrelated text item.
+    /// Todo evidence is stored on the todo itself. It must not create an entry
+    /// in the user's long-term visual-memory library.
     pub async fn create_todo(&self, request: CreateTodoRequest) -> anyhow::Result<TodoRecord> {
         if let Some(todo_id) = self
             .existing_todo_execution(&request.response_id, &request.tool_call_id)
@@ -283,37 +283,74 @@ impl MemoryService {
         if summary.chars().count() > 2_000 {
             anyhow::bail!("待办摘要不能超过 2000 个字符");
         }
-        let memory = self
-            .create(CreateMemoryRequest {
-                user_id: request.user_id.clone(),
-                conversation_id: request.conversation_id,
-                source_turn_id: request.source_turn_id,
-                response_id: request.response_id.clone(),
-                tool_call_id: request.tool_call_id.clone(),
-                user_note: title.to_owned(),
-                visual_summary: if summary.is_empty() {
-                    format!("待办来源：{title}")
-                } else {
-                    summary.to_owned()
-                },
-                frames: request.frames,
-            })
-            .await?;
+        let stored = match request
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.mime_type == "image/jpeg")
+        {
+            Some(frame) => Some((
+                self.assets
+                    .store_jpeg(&request.user_id, &frame.bytes)
+                    .await?,
+                frame.captured_at_ms,
+            )),
+            None => None,
+        };
         let todo_id = format!("todo_{}", Uuid::new_v4().simple());
         let now = unix_time();
+        let mut transaction = self.context.pool().begin().await?;
+        let cover_asset_id = if let Some((asset, captured_at_ms)) = stored {
+            sqlx::query(
+                "INSERT INTO assets(
+                    id, user_id, sha256, mime_type, storage_key, width, height,
+                    size_bytes, captured_at, created_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(user_id, sha256) DO NOTHING",
+            )
+            .bind(&asset.id)
+            .bind(&request.user_id)
+            .bind(&asset.sha256)
+            .bind(&asset.mime_type)
+            .bind(&asset.storage_key)
+            .bind(i64::from(asset.width))
+            .bind(i64::from(asset.height))
+            .bind(asset.size_bytes as i64)
+            .bind(captured_at_ms.map(|value| value as f64 / 1_000.0))
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            Some(
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM assets WHERE user_id = ? AND sha256 = ?",
+                )
+                .bind(&request.user_id)
+                .bind(&asset.sha256)
+                .fetch_one(&mut *transaction)
+                .await?,
+            )
+        } else {
+            None
+        };
         sqlx::query(
             "INSERT INTO todos(
-                id, user_id, memory_id, title, due_at, completed_at, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
+                id, user_id, memory_id, conversation_id, source_turn_id,
+                source_response_id, title, visual_summary, cover_asset_id,
+                due_at, completed_at, created_at, updated_at
+             ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
         )
         .bind(&todo_id)
         .bind(&request.user_id)
-        .bind(&memory.memory.id)
+        .bind(&request.conversation_id)
+        .bind(request.source_turn_id)
+        .bind(&request.response_id)
         .bind(title)
+        .bind(summary)
+        .bind(&cover_asset_id)
         .bind(request.due_at)
         .bind(now)
         .bind(now)
-        .execute(self.context.pool())
+        .execute(&mut *transaction)
         .await?;
         sqlx::query(
             "INSERT INTO todo_tool_executions(response_id, tool_call_id, todo_id)
@@ -322,8 +359,9 @@ impl MemoryService {
         .bind(&request.response_id)
         .bind(&request.tool_call_id)
         .bind(&todo_id)
-        .execute(self.context.pool())
+        .execute(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         self.get_todo(&request.user_id, &todo_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("创建后的待办不存在"))
@@ -650,33 +688,25 @@ impl MemoryService {
 
     async fn get_todo(&self, user_id: &str, todo_id: &str) -> anyhow::Result<Option<TodoRecord>> {
         let row = sqlx::query(
-            "SELECT t.id, t.memory_id, t.title, t.due_at, t.completed_at, t.created_at,
-                    m.visual_summary, m.cover_asset_id
-             FROM todos t
-             LEFT JOIN memory_items m ON m.id = t.memory_id AND m.user_id = t.user_id
-             WHERE t.id = ? AND t.user_id = ?",
+            "SELECT id, title, visual_summary, cover_asset_id, due_at, completed_at, created_at
+             FROM todos WHERE id = ? AND user_id = ?",
         )
         .bind(todo_id)
         .bind(user_id)
         .fetch_optional(self.context.pool())
         .await?;
         let Some(row) = row else { return Ok(None) };
-        let memory_id: Option<String> = row.get("memory_id");
         let cover_id: Option<String> = row.get("cover_asset_id");
         let title: String = row.get("title");
         Ok(Some(TodoRecord {
             id: row.get("id"),
-            memory_id: memory_id.clone(),
+            memory_id: None,
             title: title.clone(),
-            visual_summary: row
-                .get::<Option<String>, _>("visual_summary")
-                .unwrap_or_default(),
+            visual_summary: row.get("visual_summary"),
             due_at: row.get("due_at"),
             completed_at: row.get("completed_at"),
             created_at: row.get("created_at"),
-            cover: cover_id
-                .zip(memory_id)
-                .map(|(asset_id, memory_id)| artifact(asset_id, &memory_id, &title)),
+            cover: cover_id.map(|asset_id| artifact(asset_id, todo_id, &title)),
         }))
     }
 
@@ -819,7 +849,12 @@ mod tests {
         let created = service.create_todo(request.clone()).await.unwrap();
         let repeated = service.create_todo(request).await.unwrap();
         assert_eq!(created.id, repeated.id);
-        assert!(created.memory_id.is_some());
+        assert!(created.memory_id.is_none());
+        let memory_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_items")
+            .fetch_one(service.context.pool())
+            .await
+            .unwrap();
+        assert_eq!(memory_count, 0);
         assert_eq!(
             service
                 .list_todos(&user.id, Some(false), 10)

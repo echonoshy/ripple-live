@@ -171,10 +171,15 @@ impl ContextStore {
             )",
             "CREATE TABLE IF NOT EXISTS todos (
                 id TEXT PRIMARY KEY, user_id TEXT NOT NULL, memory_id TEXT,
-                title TEXT NOT NULL, due_at REAL, completed_at REAL,
+                conversation_id TEXT, source_turn_id INTEGER, source_response_id TEXT,
+                title TEXT NOT NULL, visual_summary TEXT NOT NULL DEFAULT '',
+                cover_asset_id TEXT, due_at REAL, completed_at REAL,
                 created_at REAL NOT NULL, updated_at REAL NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id),
-                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE SET NULL
+                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE SET NULL,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+                FOREIGN KEY(source_turn_id) REFERENCES turns(id),
+                FOREIGN KEY(cover_asset_id) REFERENCES assets(id) ON DELETE SET NULL
             )",
             "CREATE TABLE IF NOT EXISTS todo_tool_executions (
                 response_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
@@ -212,13 +217,55 @@ impl ContextStore {
             .await?;
         self.ensure_column("memory_items", "archived_at", "REAL")
             .await?;
+        self.ensure_column("todos", "conversation_id", "TEXT")
+            .await?;
+        self.ensure_column("todos", "source_turn_id", "INTEGER")
+            .await?;
+        self.ensure_column("todos", "source_response_id", "TEXT")
+            .await?;
+        self.ensure_column("todos", "visual_summary", "TEXT NOT NULL DEFAULT ''")
+            .await?;
+        self.ensure_column("todos", "cover_asset_id", "TEXT")
+            .await?;
         self.migrate_memory_sources_nullable().await?;
+        self.migrate_todo_evidence().await?;
         sqlx::query(
             "UPDATE invitation_codes SET use_count = 1
              WHERE used_by IS NOT NULL AND use_count = 0",
         )
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn migrate_todo_evidence(&self) -> anyhow::Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE todos
+             SET visual_summary = COALESCE(NULLIF(visual_summary, ''),
+                    (SELECT m.visual_summary FROM memory_items m WHERE m.id = todos.memory_id), ''),
+                 cover_asset_id = COALESCE(cover_asset_id,
+                    (SELECT m.cover_asset_id FROM memory_items m WHERE m.id = todos.memory_id)),
+                 conversation_id = COALESCE(conversation_id,
+                    (SELECT m.conversation_id FROM memory_items m WHERE m.id = todos.memory_id)),
+                 source_turn_id = COALESCE(source_turn_id,
+                    (SELECT m.source_turn_id FROM memory_items m WHERE m.id = todos.memory_id)),
+                 source_response_id = COALESCE(source_response_id,
+                    (SELECT m.source_response_id FROM memory_items m WHERE m.id = todos.memory_id))
+             WHERE memory_id IS NOT NULL",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM memory_items
+             WHERE id IN (SELECT memory_id FROM todos WHERE memory_id IS NOT NULL)",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("UPDATE todos SET memory_id = NULL WHERE memory_id IS NOT NULL")
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
         Ok(())
     }
 

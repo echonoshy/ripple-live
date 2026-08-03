@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use chrono::{SecondsFormat, Utc};
+use chrono_tz::Asia::Shanghai;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -24,7 +26,15 @@ const SYSTEM_PROMPT: &str = "你是 Ripple Live，一个运行在用户自有服
 只有用户明确要求记住某件事时才调用 remember；有当前画面时，visual_summary 必须客观描述画面中有助于以后检索的物品、位置和文字。需要查找用户过去保存的信息时调用 recall，并把 query 提炼为简洁关键词。
 只有用户明确要求记住某件事时才调用 remember；有当前画面时，visual_summary 必须客观描述画面中有助于以后检索的物品、位置和文字。需要查找用户过去保存的信息时调用 recall，并把 query 提炼为简洁关键词。
 用户明确要求把当前信息做成待办或提醒时调用 create_todo；它会同时保存画面证据。未指定时间就不要设置提醒；“明天”“下周”等相对时间先用 get_current_time 获取 Asia/Shanghai 当前时间，再换算成带时区的 RFC3339 due_at。用户只要求总结时，直接给出简短摘要和不超过三条重点；只有明确说要保存时才写入记忆。
-工具失败时如实说明。不要在朗读内容中输出工具调用 JSON。";
+工具返回 ok=false 时绝对不能声称操作成功，必须说明工具返回的错误；需要修正参数时，应再次调用工具，只有收到 ok=true 后才能确认已创建或已保存。不要在朗读内容中输出工具调用 JSON。";
+
+fn system_prompt() -> String {
+    let now = Utc::now().with_timezone(&Shanghai);
+    format!(
+        "{SYSTEM_PROMPT}\n当前 Asia/Shanghai 日期时间：{}。处理今天、明天、下班等时间表达时必须以此为准。",
+        now.to_rfc3339_opts(SecondsFormat::Secs, true)
+    )
+}
 
 const MIN_SPEECH_CHUNK_CHARS: usize = 40;
 const SOFT_SPEECH_CHUNK_CHARS: usize = 60;
@@ -89,7 +99,7 @@ impl AgentOrchestrator {
             .add_turn(conversation_id, "user", input, None)
             .await?;
         let compiled = self.context_compiler.compile(conversation_id).await?;
-        let mut messages = vec![json!({"role": "system", "content": SYSTEM_PROMPT})];
+        let mut messages = vec![json!({"role": "system", "content": system_prompt()})];
         messages.extend(compiled.messages);
         let tools = self.tools.schemas();
 
@@ -278,7 +288,7 @@ impl AgentOrchestrator {
             }),
         )
         .await;
-        let mut messages = vec![json!({"role": "system", "content": SYSTEM_PROMPT})];
+        let mut messages = vec![json!({"role": "system", "content": system_prompt()})];
         messages.extend(compiled.messages);
         messages.push(build_multimodal_user_message(&transcript, &frames));
 
