@@ -69,7 +69,7 @@ complete WAV file. `RIPPLE_AUDIO_CHUNK_MS` controls the downstream packet
 size; keep the default at 100 ms unless the client or network requires a
 different trade-off.
 
-Every response event carries a `response_id`. The Android client discards
+Every response event carries a `response_id`. The mobile client discards
 audio from an older response after barge-in, while the Gateway aborts the
 upstream request. The smoke test covers tool use, TTS-to-ASR loopback,
 streaming first-audio timing, cancellation, and response isolation.
@@ -135,7 +135,7 @@ memories in `.cache/agent-gateway/context.sqlite3`. A later Redis/PostgreSQL or
 vector-memory implementation can replace this class without changing the
 Android protocol or model adapters.
 
-The Android client creates a new session UUID whenever a voice or video call is
+The mobile client creates a new session UUID whenever a voice or video call is
 started. Server-side events record the session lifecycle and each response's
 input commit, transcript, context load, Agent rounds, TTS segments, completion,
 cancellation, or failure. Inspect the latest flow with:

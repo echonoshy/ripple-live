@@ -42,7 +42,7 @@ async def main() -> None:
         await socket.send(json.dumps({"type": "session.start", "mode": "video"}))
         ready = json.loads(await socket.recv())
         assert ready["type"] == "session.ready"
-        test_image = Path("apps/android/src-tauri/icons/icon.png").read_bytes()
+        test_image = Path("apps/mobile/src-tauri/icons/icon.png").read_bytes()
         committed_at = time.perf_counter()
         await socket.send(
             json.dumps(

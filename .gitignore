@@ -9,16 +9,16 @@
 __pycache__/
 *.py[cod]
 
-# Android and web dependencies
-/apps/android/node_modules/
-/apps/android/dist/
-/apps/android/.android-sdk/
-/apps/android/src-tauri/target/
-/apps/android/src-tauri/gen/schemas/
-/apps/android/src-tauri/gen/android/.gradle/
-/apps/android/src-tauri/gen/android/build/
-/apps/android/src-tauri/gen/android/app/build/
-/apps/android/src-tauri/gen/android/local.properties
+# Mobile client dependencies, SDKs, and generated build output
+/apps/mobile/node_modules/
+/apps/mobile/dist/
+/apps/mobile/.android-sdk/
+/apps/mobile/src-tauri/target/
+/apps/mobile/src-tauri/gen/schemas/
+/apps/mobile/src-tauri/gen/android/.gradle/
+/apps/mobile/src-tauri/gen/android/build/
+/apps/mobile/src-tauri/gen/android/app/build/
+/apps/mobile/src-tauri/gen/android/local.properties
 
 # Service state
 /deploy/agent-stack/data/

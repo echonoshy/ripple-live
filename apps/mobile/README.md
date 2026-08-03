@@ -1,6 +1,23 @@
-# Ripple Live Android
+# Ripple Live Mobile
 
-Tauri 2 + React client for the self-hosted Ripple multimodal Agent.
+Shared Tauri 2 + React client for the self-hosted Ripple multimodal Agent on
+Android and iOS.
+
+## Directory layout
+
+```text
+src/                         Shared React UI and realtime media logic
+public/                      Shared browser assets and AudioWorklets
+src-tauri/src/               Shared native Rust entry points
+src-tauri/gen/android/       Tauri-generated Android/Gradle host project
+src-tauri/gen/apple/         Tauri-generated iOS/Xcode host project
+src-tauri/tauri.conf.json    Shared Tauri configuration
+src-tauri/tauri.ios.conf.json iOS configuration override
+```
+
+The Android and Apple directories intentionally remain below `src-tauri/gen`.
+They are platform hosts generated for one shared Tauri application, rather than
+independent app implementations.
 
 The app supports:
 
@@ -24,7 +41,7 @@ Every time the user starts a call, the client creates a fresh UUID and sends it
 as the WebSocket `session_id`. Reconnecting by starting another call therefore
 creates an empty conversation instead of restoring the previous call.
 
-## Build
+## Android build
 
 Install the local Android SDK/NDK once:
 
@@ -63,6 +80,21 @@ adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-u
 
 Android 7.0 (API 24) or newer is required. The app requests microphone and
 camera permission at runtime.
+
+## iOS build
+
+iOS development requires macOS with Xcode and the Rust iOS targets installed.
+From this directory, initialize or refresh the generated host and build with:
+
+```bash
+npm ci
+npm run ios:init
+npm run ios:build
+```
+
+Use `npm run ios:dev` to launch through Xcode during development. The signing
+team and iOS-specific bundle identifier are defined in
+`src-tauri/tauri.ios.conf.json`.
 
 ## Security note
 

@@ -1,6 +1,6 @@
 # Ripple Live
 
-Ripple Live is a self-hosted multimodal voice Agent for Android. The current
+Ripple Live is a self-hosted multimodal voice Agent for Android and iOS. The current
 implementation uses a cascaded pipeline so speech recognition, visual
 reasoning, tool execution, context storage, and speech synthesis can be
 operated and upgraded independently.
@@ -8,13 +8,13 @@ operated and upgraded independently.
 ## Architecture
 
 ```text
-Android microphone ──16 kHz PCM──┐
-Android camera ──sampled JPEG─────┼── Rust Agent Gateway :8700
-                                 │     ├── Qwen3-ASR 0.6B :8711
-                                 │     ├── Qwen3-VL 8B :8712
-                                 │     ├── allowlisted tools
-                                 │     ├── SQLite context/event store
-Android speaker ◀─24 kHz PCM─────┘     └── Qwen3-TTS 1.7B + vLLM-Omni :8723
+Mobile microphone ──16 kHz PCM──┐
+Mobile camera ──sampled JPEG─────┼── Rust Agent Gateway :8700
+                                │     ├── Qwen3-ASR 0.6B :8711
+                                │     ├── Qwen3-VL 8B :8712
+                                │     ├── allowlisted tools
+                                │     ├── SQLite context/event store
+Mobile speaker ◀─24 kHz PCM─────┘     └── Qwen3-TTS 1.7B + vLLM-Omni :8723
 ```
 
 The gateway owns conversation turns and the tool loop. Tool calls are parsed
@@ -34,7 +34,11 @@ with the same layout to register a tool without changing gateway source code.
 ## Repository layout
 
 ```text
-apps/android/                     Tauri 2 + React Android client
+apps/mobile/                      Shared Tauri 2 + React mobile client
+  src/                            Shared React application
+  src-tauri/                      Shared Rust/Tauri runtime and configuration
+    gen/android/                  Tauri-generated Android host project
+    gen/apple/                    Tauri-generated iOS host project
 services/agent-gateway/           Rust WebSocket protocol, tools, context, adapters
 deploy/agent-stack/               Install, download, start, stop, and status
 .cache/models/                    Local model weights (ignored by Git)
@@ -72,7 +76,7 @@ Stop the stack with:
 ./deploy/agent-stack/stop.sh
 ```
 
-## Android
+## Mobile clients
 
 The default endpoint is:
 
@@ -83,12 +87,12 @@ ws://YOUR_SERVER_IP:8700/v1/agent/realtime
 Build the web client:
 
 ```bash
-cd apps/android
+cd apps/mobile
 npm ci
 npm run build
 ```
 
-Follow `apps/android/README.md` for Android SDK setup and APK builds.
+Follow `apps/mobile/README.md` for Android and iOS development and packaging.
 
 ## Accounts and invitations
 

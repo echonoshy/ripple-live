@@ -6,7 +6,7 @@ Ship an iPhone build that replaces the current Ripple Live app, uses the supplie
 
 ## Design
 
-Android and iOS already run the React application under `apps/android/src` and the Tauri runtime under `apps/android/src-tauri`. Preserve that shared architecture. Track the supplied PNG as the canonical source, derive each Android launcher and Xcode AppIcon raster from it, and add the two iOS privacy declarations needed by the existing `LiveMedia` calls to `navigator.mediaDevices.getUserMedia`.
+Android and iOS run the React application under `apps/mobile/src` and the Tauri runtime under `apps/mobile/src-tauri`. Preserve that shared architecture. Track the supplied PNG as the canonical source, derive each Android launcher and Xcode AppIcon raster from it, and add the two iOS privacy declarations needed by the existing `LiveMedia` calls to `navigator.mediaDevices.getUserMedia`.
 
 ## Constraints
 
