@@ -89,21 +89,39 @@ test('mobile app keeps the service address out of visible forms', () => {
   assert.doesNotMatch(appSource, /htmlFor="server">服务地址/)
 })
 
-test('mobile home gives voice and video equal Kiro-inspired entries', () => {
+test('mobile todo reminders are enabled for Android and iOS', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const reminderSource = readFileSync(path.join(appRoot, 'src/reminders.ts'), 'utf8')
+  const rustSource = readFileSync(path.join(appRoot, 'src-tauri/src/lib.rs'), 'utf8')
+  const capability = JSON.parse(
+    readFileSync(path.join(appRoot, 'src-tauri/capabilities/default.json'), 'utf8'),
+  )
+
+  assert.match(appSource, /notifyDueTodos/)
+  assert.match(appSource, /screen === 'todos'/)
+  assert.match(reminderSource, /requestPermission/)
+  assert.match(reminderSource, /sendNotification/)
+  assert.match(rustSource, /tauri_plugin_notification::init\(\)/)
+  assert.ok(capability.permissions.includes('notification:default'))
+})
+
+test('mobile home presents video as the primary call entry', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
 
-  assert.match(appSource, /<strong>语音通话<\/strong>/)
-  assert.match(appSource, /<small>只听声音<\/small>/)
-  assert.match(appSource, /<strong>视频通话<\/strong>/)
-  assert.match(appSource, /<small>看见现场<\/small>/)
+  assert.match(appSource, /<h1>打开镜头，开始聊聊<\/h1>/)
+  assert.match(appSource, /<strong>开始视频通话<\/strong>/)
+  assert.match(appSource, /<small>让我看见现场<\/small>/)
+  assert.match(appSource, /aria-label="开始语音通话"/)
   assert.equal(
     (appSource.match(/className="launch-button call-entry"/g) ?? []).length,
-    2,
+    0,
   )
+  assert.match(appSource, /className="launch-button call-entry is-video"/)
+  assert.match(appSource, /className="launch-button call-entry is-voice"/)
   assert.match(
     cssSource,
-    /\.launch-actions\s*{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s,
+    /\.launch-actions\s*{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 72px/s,
   )
   assert.match(cssSource, /animation:\s*ripple-ready-pulse 3\.5s/)
   assert.match(cssSource, /@media \(prefers-reduced-motion: reduce\)/)
@@ -119,11 +137,19 @@ test('mobile home gives voice and video equal Kiro-inspired entries', () => {
   }
   assert.match(cssSource, /@media \(max-width: 359px\)/)
   assert.match(cssSource, /\.launch-button\s*{[^}]*min-width:\s*44px/s)
+  assert.match(cssSource, /--voice-accent:\s*#b178ff/)
+  assert.match(cssSource, /--video-accent:\s*#77a7ff/)
+  assert.match(cssSource, /\.call-entry\.is-voice/)
+  assert.match(cssSource, /\.call-entry\.is-video/)
 })
 
 test('mobile libraries expose accessible shared management controls', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
+  const toolbarSource = readFileSync(
+    path.join(appRoot, 'src/components/LibraryToolbar.tsx'),
+    'utf8',
+  )
 
   for (const file of [
     'LibraryToolbar.tsx',
@@ -139,6 +165,9 @@ test('mobile libraries expose accessible shared management controls', () => {
 
   assert.match(appSource, /aria-label="搜索聊天历史"/)
   assert.match(appSource, /aria-label="搜索视觉记忆"/)
+  assert.doesNotMatch(appSource, /对话资料库|视觉资料库|className="history-heading"/)
+  assert.match(appSource, /className="library-region"/)
+  assert.match(toolbarSource, /className="visually-hidden"/)
   assert.match(appSource, /删除后无法恢复/)
   assert.match(appSource, /groupLibraryItems/)
   assert.match(appSource, /setDebouncedHistoryQuery\(historyQuery\), 250/)
@@ -154,4 +183,7 @@ test('mobile libraries expose accessible shared management controls', () => {
     /grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/,
   )
   assert.match(cssSource, /@media \(prefers-reduced-motion: reduce\)/)
+  assert.match(cssSource, /\.library-region\s*{[^}]*margin-top:\s*24px/s)
+  assert.match(cssSource, /\.history-list \.history-row\s*{[^}]*min-height:\s*74px/s)
+  assert.match(cssSource, /\.memory-library-grid\s*{[^}]*gap:\s*8px/s)
 })

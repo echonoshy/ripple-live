@@ -49,6 +49,17 @@ export type VisualMemory = {
   archived_at: number | null
 }
 
+export type TodoItem = {
+  id: string
+  memory_id: string | null
+  title: string
+  visual_summary: string
+  due_at: number | null
+  completed_at: number | null
+  created_at: number
+  cover: MemoryArtifact | null
+}
+
 export type LibraryPatch = {
   is_pinned?: boolean
   archived?: boolean
@@ -247,6 +258,35 @@ export async function memories(
     server,
     `/v1/memories?${librarySearchParams(options)}`,
     {},
+    token,
+  )
+  return payload.data
+}
+
+export async function todos(
+  server: string,
+  token: string,
+  completed = false,
+) {
+  const payload = await request<{ data: TodoItem[] }>(
+    server,
+    `/v1/todos?completed=${completed ? 'true' : 'false'}&limit=100`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function updateTodo(
+  server: string,
+  token: string,
+  todoId: string,
+  completed: boolean,
+) {
+  const payload = await request<{ data: TodoItem }>(
+    server,
+    `/v1/todos/${encodeURIComponent(todoId)}`,
+    { method: 'PATCH', body: JSON.stringify({ completed }) },
     token,
   )
   return payload.data

@@ -58,7 +58,7 @@ export function LibraryToolbar({
   const searchId = kind === '聊天历史' ? 'history-search' : 'memory-search'
   return (
     <div className="library-toolbar">
-      <label htmlFor={searchId}>搜索{kind}</label>
+      <label className="visually-hidden" htmlFor={searchId}>搜索{kind}</label>
       <div className="library-search">
         <MagnifyingGlass aria-hidden="true" />
         <input

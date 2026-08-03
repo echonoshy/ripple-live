@@ -2,12 +2,15 @@ import {
   ArrowLeft,
   CameraRotate,
   ChatCircleDots,
+  CheckCircle,
   ClockCounterClockwise,
+  Circle,
   EnvelopeSimple,
   GearSix,
   HandPalm,
   ImagesSquare,
   LockKey,
+  ListChecks,
   Microphone,
   MicrophoneSlash,
   PhoneDisconnect,
@@ -36,15 +39,19 @@ import {
   memoryMutation,
   register,
   updateMemory,
+  todos,
+  updateTodo,
   type AuthUser,
   type ConversationMessage,
   type ConversationSummary,
   type MemoryArtifact,
+  type TodoItem,
   type VisualMemory,
 } from './api'
 import { LibraryActions } from './components/LibraryActions'
 import { LibrarySection } from './components/LibrarySection'
 import { LibraryToolbar } from './components/LibraryToolbar'
+import { MarkdownContent } from './components/MarkdownContent'
 import {
   groupLibraryItems,
   libraryOptionsForView,
@@ -54,6 +61,7 @@ import {
   type LibraryView,
 } from './library'
 import { LiveMedia } from './media/LiveMedia'
+import { notifyDueTodos } from './reminders'
 import {
   RealtimeSession,
   type ResponseArtifact,
@@ -70,6 +78,7 @@ type Screen =
   | 'history'
   | 'conversation'
   | 'memories'
+  | 'todos'
 
 function AuthenticatedImage({
   server,
@@ -183,6 +192,9 @@ export default function App() {
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null)
   const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null)
   const [memoryDraft, setMemoryDraft] = useState('')
+  const [todoItems, setTodoItems] = useState<TodoItem[]>([])
+  const [todoBusy, setTodoBusy] = useState(false)
+  const [todoError, setTodoError] = useState('')
   const [revealedItem, setRevealedItem] = useState<string | null>(null)
   const [deleteRequest, setDeleteRequest] = useState<{
     kind: 'history' | 'memory'
@@ -308,6 +320,38 @@ export default function App() {
       active = false
     }
   }, [accessToken, debouncedMemoryQuery, memoryScope, screen, server])
+
+  useEffect(() => {
+    if (screen !== 'todos' || !accessToken) return
+    let active = true
+    setTodoBusy(true)
+    setTodoError('')
+    void todos(server, accessToken)
+      .then((items) => {
+        if (active) setTodoItems(items)
+      })
+      .catch((error: unknown) => {
+        if (active) setTodoError(error instanceof Error ? error.message : '无法加载待办')
+      })
+      .finally(() => {
+        if (active) setTodoBusy(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [accessToken, screen, server])
+
+  useEffect(() => {
+    if (!accessToken) return
+    const checkReminders = () => {
+      void todos(server, accessToken)
+        .then(notifyDueTodos)
+        .catch(() => {})
+    }
+    checkReminders()
+    const timer = window.setInterval(checkReminders, 60_000)
+    return () => window.clearInterval(timer)
+  }, [accessToken, server])
 
   const isActive = [
     'connecting',
@@ -485,6 +529,7 @@ export default function App() {
     setHistoryItems([])
     setHistoryMessages([])
     setMemoryItems([])
+    setTodoItems([])
     if (token) await logoutApi(server, token).catch(() => {})
   }
 
@@ -501,6 +546,17 @@ export default function App() {
       setMemoryDraft('')
     } catch (error) {
       setMemoryError(error instanceof Error ? error.message : '无法修改记忆')
+    }
+  }
+
+  const setTodoCompleted = async (todo: TodoItem) => {
+    const previous = todoItems
+    setTodoItems((items) => items.filter((item) => item.id !== todo.id))
+    try {
+      await updateTodo(server, accessToken, todo.id, true)
+    } catch (error) {
+      setTodoItems(previous)
+      setTodoError(error instanceof Error ? error.message : '无法更新待办')
     }
   }
 
@@ -834,6 +890,14 @@ export default function App() {
               <button
                 className="icon-button"
                 type="button"
+                aria-label="待办"
+                onClick={() => setScreen('todos')}
+              >
+                <ListChecks />
+              </button>
+              <button
+                className="icon-button"
+                type="button"
                 aria-label="视觉记忆"
                 onClick={() => setScreen('memories')}
               >
@@ -863,37 +927,32 @@ export default function App() {
               <img src={appIcon} alt="" />
             </div>
             <p><span aria-hidden="true" /> 准备就绪</p>
-            <h1>今天想聊什么？</h1>
-            <span>我可以听、看，也可以帮你使用工具。</span>
+            <h1>打开镜头，开始聊聊</h1>
+            <span>让我看见现场，实时听懂并回应你。</span>
           </div>
 
           <div className="launch-actions">
             <button
-              className="launch-button call-entry"
+              className="launch-button call-entry is-video"
+              type="button"
+              onClick={() => openCall('video')}
+            >
+              <span className="call-entry-icon" aria-hidden="true">
+                <VideoCamera weight="fill" />
+              </span>
+              <span className="call-entry-copy">
+                <strong>开始视频通话</strong>
+                <small>让我看见现场</small>
+              </span>
+            </button>
+            <button
+              className="launch-button call-entry is-voice"
               type="button"
               aria-label="开始语音通话"
               onClick={() => openCall('audio')}
             >
               <span className="call-entry-icon" aria-hidden="true">
                 <Microphone weight="fill" />
-              </span>
-              <span>
-                <strong>语音通话</strong>
-                <small>只听声音</small>
-              </span>
-            </button>
-            <button
-              className="launch-button call-entry"
-              type="button"
-              aria-label="开始视频通话"
-              onClick={() => openCall('video')}
-            >
-              <span className="call-entry-icon" aria-hidden="true">
-                <VideoCamera weight="fill" />
-              </span>
-              <span>
-                <strong>视频通话</strong>
-                <small>看见现场</small>
               </span>
             </button>
           </div>
@@ -915,12 +974,7 @@ export default function App() {
             <span className="header-spacer" />
           </header>
 
-          <div className="history-heading">
-            <p>{user.email}</p>
-            <h2>对话资料库</h2>
-          </div>
-
-          <div aria-label="搜索聊天历史">
+          <div className="library-region" aria-label="搜索聊天历史">
             <LibraryToolbar
               kind="聊天历史"
               query={historyQuery}
@@ -1035,6 +1089,55 @@ export default function App() {
         </section>
       )}
 
+      {screen === 'todos' && (
+        <section className="history-screen todo-screen">
+          <header className="screen-header">
+            <button className="icon-button" type="button" aria-label="返回" onClick={() => setScreen('home')}>
+              <ArrowLeft />
+            </button>
+            <h1>待办</h1>
+            <span className="header-spacer" />
+          </header>
+          <p className="todo-intro">从视觉记忆创建的事项；完成前可以随时回看当时的画面和摘要。</p>
+          {todoBusy && <div className="history-skeleton" aria-label="正在加载"><span /><span /><span /></div>}
+          {todoError && <div className="history-error">{todoError}</div>}
+          {!todoBusy && !todoError && todoItems.length === 0 && (
+            <div className="history-empty">
+              <ListChecks />
+              <h2>没有待处理事项</h2>
+              <p>视频通话时说“把这个做成待办”即可把画面、摘要和任务一起保存。</p>
+              <button type="button" onClick={() => openCall('video')}>打开视频通话</button>
+            </div>
+          )}
+          {!todoBusy && todoItems.length > 0 && (
+            <div className="todo-list">
+              {todoItems.map((todo) => (
+                <article className="todo-card" key={todo.id}>
+                  <button
+                    className="todo-complete"
+                    type="button"
+                    aria-label={`完成：${todo.title}`}
+                    onClick={() => void setTodoCompleted(todo)}
+                  >
+                    <Circle />
+                  </button>
+                  {todo.cover ? (
+                    <AuthenticatedImage server={server} token={accessToken} artifact={todo.cover} className="todo-cover" />
+                  ) : (
+                    <span className="todo-cover todo-text-cover"><CheckCircle /></span>
+                  )}
+                  <div>
+                    <strong>{todo.title}</strong>
+                    {todo.visual_summary && <p>{todo.visual_summary}</p>}
+                    <time>{todo.due_at ? `提醒：${formatHistoryTime(todo.due_at)}` : '未设置提醒'}</time>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
       {screen === 'memories' && (
         <section className="history-screen memory-screen">
           <header className="screen-header">
@@ -1050,12 +1153,7 @@ export default function App() {
             <span className="header-spacer" />
           </header>
 
-          <div className="history-heading">
-            <p>{user.email}</p>
-            <h2>视觉资料库</h2>
-          </div>
-
-          <div aria-label="搜索视觉记忆">
+          <div className="library-region" aria-label="搜索视觉记忆">
             <LibraryToolbar
               kind="视觉记忆"
               query={memoryQuery}
@@ -1240,7 +1338,7 @@ export default function App() {
                     <strong>{message.role === 'user' ? '你' : 'Ripple'}</strong>
                     <time>{formatHistoryTime(message.created_at)}</time>
                   </div>
-                  <p>{message.content}</p>
+                  <MarkdownContent>{message.content}</MarkdownContent>
                   {message.attachments.length > 0 && (
                     <div className="message-attachments">
                       {message.attachments.map((artifact) => (
@@ -1349,7 +1447,7 @@ export default function App() {
               )}
               <div className="utterance assistant-utterance">
                 <span>Ripple</span>
-                <p>
+                <MarkdownContent>
                   {assistantText ||
                     (sessionState === 'listening'
                       ? '我在听'
@@ -1360,7 +1458,7 @@ export default function App() {
                       : sessionState === 'speaking'
                         ? '正在回答'
                         : '正在建立实时连接')}
-                </p>
+                </MarkdownContent>
                 {liveArtifacts.length > 0 && (
                   <div className="live-artifacts">
                     {liveArtifacts.map((artifact) => (
