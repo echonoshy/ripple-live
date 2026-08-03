@@ -1,3 +1,5 @@
+import type { LibraryAction, LibraryListOptions } from './library'
+
 export type AuthUser = {
   id: string
   email: string
@@ -15,6 +17,8 @@ export type ConversationSummary = {
   preview: string
   created_at: number
   updated_at: number
+  is_pinned: boolean
+  archived_at: number | null
 }
 
 export type ConversationMessage = {
@@ -41,6 +45,17 @@ export type VisualMemory = {
   captured_at?: number | null
   created_at: number
   cover?: MemoryArtifact | null
+  is_pinned: boolean
+  archived_at: number | null
+}
+
+export type LibraryPatch = {
+  is_pinned?: boolean
+  archived?: boolean
+}
+
+export type MemoryPatch = LibraryPatch & {
+  user_note?: string
 }
 
 function httpBase(server: string) {
@@ -112,14 +127,97 @@ export function logout(server: string, token: string) {
   return request<void>(server, '/v1/auth/logout', { method: 'POST' }, token)
 }
 
-export async function conversations(server: string, token: string) {
+function librarySearchParams(options: LibraryListOptions) {
+  const params = new URLSearchParams({
+    scope: options.scope,
+    query: options.query,
+    limit: String(options.limit),
+  })
+  if (options.pinned !== undefined) params.set('pinned', String(options.pinned))
+  return params
+}
+
+export async function conversations(
+  server: string,
+  token: string,
+  options: LibraryListOptions = {
+    scope: 'active',
+    query: '',
+    limit: 50,
+  },
+) {
   const payload = await request<{ data: ConversationSummary[] }>(
     server,
-    '/v1/conversations?limit=50',
+    `/v1/conversations?${librarySearchParams(options)}`,
     {},
     token,
   )
   return payload.data
+}
+
+export async function updateConversation(
+  server: string,
+  token: string,
+  id: string,
+  patch: LibraryPatch,
+) {
+  const payload = await request<{ data: ConversationSummary }>(
+    server,
+    `/v1/conversations/${encodeURIComponent(id)}`,
+    { method: 'PATCH', body: JSON.stringify(patch) },
+    token,
+  )
+  return payload.data
+}
+
+export function deleteConversation(server: string, token: string, id: string) {
+  return request<void>(
+    server,
+    `/v1/conversations/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+    token,
+  )
+}
+
+export function conversationMutation(
+  server: string,
+  token: string,
+  id: string,
+  action: LibraryAction,
+) {
+  if (action === 'delete') return deleteConversation(server, token, id)
+  if (action === 'pin' || action === 'unpin') {
+    return updateConversation(server, token, id, {
+      is_pinned: action === 'pin',
+    })
+  }
+  return updateConversation(server, token, id, {
+    archived: action === 'archive',
+  })
+}
+
+async function batchMutation(
+  server: string,
+  token: string,
+  path: string,
+  ids: string[],
+  action: LibraryAction,
+) {
+  return request<{ updated: number }>(
+    server,
+    path,
+    { method: 'POST', body: JSON.stringify({ ids, action }) },
+    token,
+  )
+}
+
+export function batchConversations(
+  server: string,
+  token: string,
+  ids: string[],
+  action: LibraryAction,
+) {
+  return batchMutation(server, token, '/v1/conversations/batch', ids, action)
 }
 
 export async function conversationMessages(
@@ -136,10 +234,18 @@ export async function conversationMessages(
   return payload.data
 }
 
-export async function memories(server: string, token: string) {
+export async function memories(
+  server: string,
+  token: string,
+  options: LibraryListOptions = {
+    scope: 'active',
+    query: '',
+    limit: 100,
+  },
+) {
   const payload = await request<{ data: VisualMemory[] }>(
     server,
-    '/v1/memories?limit=100',
+    `/v1/memories?${librarySearchParams(options)}`,
     {},
     token,
   )
@@ -150,15 +256,44 @@ export async function updateMemory(
   server: string,
   token: string,
   memoryId: string,
-  userNote: string,
+  patch: string | MemoryPatch,
 ) {
   const payload = await request<{ data: VisualMemory }>(
     server,
     `/v1/memories/${encodeURIComponent(memoryId)}`,
-    { method: 'PATCH', body: JSON.stringify({ user_note: userNote }) },
+    {
+      method: 'PATCH',
+      body: JSON.stringify(
+        typeof patch === 'string' ? { user_note: patch } : patch,
+      ),
+    },
     token,
   )
   return payload.data
+}
+
+export function memoryMutation(
+  server: string,
+  token: string,
+  id: string,
+  action: LibraryAction,
+) {
+  if (action === 'delete') return deleteMemory(server, token, id)
+  if (action === 'pin' || action === 'unpin') {
+    return updateMemory(server, token, id, { is_pinned: action === 'pin' })
+  }
+  return updateMemory(server, token, id, {
+    archived: action === 'archive',
+  })
+}
+
+export function batchMemories(
+  server: string,
+  token: string,
+  ids: string[],
+  action: LibraryAction,
+) {
+  return batchMutation(server, token, '/v1/memories/batch', ids, action)
 }
 
 export function deleteMemory(

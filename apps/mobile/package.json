@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test:mobile": "node --test tests/mobile-package.test.mjs",
+    "test:library": "tsc src/library.ts --outDir .test-dist --module nodenext --moduleResolution nodenext --target es2022 --ignoreConfig && node --test tests/library.test.mjs; task_status=$?; rm -f .test-dist/library.js; rmdir .test-dist 2>/dev/null || true; exit $task_status",
+    "test:mobile": "node --test tests/mobile-package.test.mjs && npm run test:library",
     "lint": "oxlint",
     "preview": "vite preview",
     "tauri": "tauri",
