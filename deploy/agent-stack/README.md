@@ -126,8 +126,8 @@ standalone Rust `ripple-tool` CLI:
 - `web_fetch` uses Tavily Extract for one public HTTP/HTTPS URL.
 - `weather_lookup` uses QWeather GeoAPI and Weather API.
 
-Configure `RIPPLE_TAVILY_API_KEY` plus the QWeather API host, project ID,
-credential ID, and Ed25519 private-key path in `.env`. The Gateway passes only
+Configure `RIPPLE_TAVILY_API_KEY` plus the QWeather API host and either an API
+key or the JWT project ID, credential ID, and Ed25519 private-key path in `.env`. The Gateway passes only
 the manifest allowlisted variables to each short-lived CLI process. Set
 `RIPPLE_SEARCH_PROXY` when the Gateway host needs a dedicated outbound proxy.
 Tool results use a stable JSON envelope, share a SQLite cache, and never treat

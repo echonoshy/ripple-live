@@ -47,23 +47,44 @@ struct CachedResponse {
 pub struct WeatherClient {
     client: Client,
     api_host: String,
-    project_id: String,
-    credential_id: String,
-    signing_key: SigningKey,
-    private_key_text: String,
+    auth: WeatherAuth,
     cache_path: Option<PathBuf>,
+}
+
+enum WeatherAuth {
+    ApiKey(String),
+    Jwt {
+        project_id: String,
+        credential_id: String,
+        signing_key: Box<SigningKey>,
+        private_key_text: String,
+    },
 }
 
 impl WeatherClient {
     pub fn from_env() -> Result<Self, ToolError> {
         let api_host = required_env("RIPPLE_QWEATHER_API_HOST")?;
-        let project_id = required_env("RIPPLE_QWEATHER_PROJECT_ID")?;
-        let credential_id = required_env("RIPPLE_QWEATHER_CREDENTIAL_ID")?;
-        let private_key_path = required_env("RIPPLE_QWEATHER_PRIVATE_KEY_PATH")?;
-        let private_key_text = std::fs::read_to_string(&private_key_path)
-            .map_err(|_| ToolError::auth("无法读取和风天气 Ed25519 私钥", PROVIDER))?;
-        let signing_key = SigningKey::from_pkcs8_pem(&private_key_text)
-            .map_err(|_| ToolError::auth("和风天气 Ed25519 私钥格式无效", PROVIDER))?;
+        let auth = match std::env::var("RIPPLE_QWEATHER_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(api_key) => WeatherAuth::ApiKey(api_key),
+            None => {
+                let project_id = required_env("RIPPLE_QWEATHER_PROJECT_ID")?;
+                let credential_id = required_env("RIPPLE_QWEATHER_CREDENTIAL_ID")?;
+                let private_key_path = required_env("RIPPLE_QWEATHER_PRIVATE_KEY_PATH")?;
+                let private_key_text = std::fs::read_to_string(&private_key_path)
+                    .map_err(|_| ToolError::auth("无法读取和风天气 Ed25519 私钥", PROVIDER))?;
+                let signing_key = SigningKey::from_pkcs8_pem(&private_key_text)
+                    .map_err(|_| ToolError::auth("和风天气 Ed25519 私钥格式无效", PROVIDER))?;
+                WeatherAuth::Jwt {
+                    project_id,
+                    credential_id,
+                    signing_key: Box::new(signing_key),
+                    private_key_text,
+                }
+            }
+        };
         let api_host = if api_host.starts_with("http://") || api_host.starts_with("https://") {
             api_host
         } else {
@@ -77,10 +98,7 @@ impl WeatherClient {
                     ToolError::new("UPSTREAM_ERROR", error.to_string(), false).provider(PROVIDER)
                 })?,
             api_host: api_host.trim_end_matches('/').to_owned(),
-            project_id,
-            credential_id,
-            signing_key,
-            private_key_text,
+            auth,
             cache_path: std::env::var_os("RIPPLE_TOOL_CACHE_DB").map(PathBuf::from),
         })
     }
@@ -249,17 +267,22 @@ impl WeatherClient {
                 retry_count: 0,
             });
         }
-        let token = self.jwt()?;
+        let token = match &self.auth {
+            WeatherAuth::Jwt { .. } => Some(self.jwt()?),
+            WeatherAuth::ApiKey(_) => None,
+        };
         let endpoint = format!("{}{}", self.api_host, path_and_query);
         let started = Instant::now();
         let result = send_with_retry(PROVIDER, 3, Duration::from_secs(10), || {
-            self.client.get(&endpoint).bearer_auth(&token)
+            let request = self.client.get(&endpoint);
+            match (&self.auth, token.as_deref()) {
+                (WeatherAuth::ApiKey(api_key), _) => request.header("X-QW-Api-Key", api_key),
+                (WeatherAuth::Jwt { .. }, Some(token)) => request.bearer_auth(token),
+                (WeatherAuth::Jwt { .. }, None) => request,
+            }
         })
         .await
-        .map_err(|mut error| {
-            error.message = redact(&error.message, &[&token, &self.private_key_text]);
-            error
-        })?;
+        .map_err(|error| self.sanitize_error(error, token.as_deref()))?;
         let request_id = result
             .response
             .headers()
@@ -281,21 +304,44 @@ impl WeatherClient {
     }
 
     fn jwt(&self) -> Result<String, ToolError> {
+        let WeatherAuth::Jwt {
+            project_id,
+            credential_id,
+            signing_key,
+            ..
+        } = &self.auth
+        else {
+            return Err(ToolError::auth("当前天气认证方式不是 JWT", PROVIDER));
+        };
         let now = chrono::Utc::now().timestamp();
         let header = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&json!({"alg": "EdDSA", "kid": self.credential_id}))
+            serde_json::to_vec(&json!({"alg": "EdDSA", "kid": credential_id}))
                 .map_err(|_| ToolError::auth("无法生成和风天气 JWT", PROVIDER))?,
         );
         let payload = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&json!({"sub": self.project_id, "iat": now - 30, "exp": now + 900}))
+            serde_json::to_vec(&json!({"sub": project_id, "iat": now - 30, "exp": now + 900}))
                 .map_err(|_| ToolError::auth("无法生成和风天气 JWT", PROVIDER))?,
         );
         let signing_input = format!("{header}.{payload}");
-        let signature = self.signing_key.sign(signing_input.as_bytes());
+        let signature = signing_key.sign(signing_input.as_bytes());
         Ok(format!(
             "{signing_input}.{}",
             URL_SAFE_NO_PAD.encode(signature.to_bytes())
         ))
+    }
+
+    fn sanitize_error(&self, mut error: ToolError, token: Option<&str>) -> ToolError {
+        match &self.auth {
+            WeatherAuth::ApiKey(api_key) => {
+                error.message = redact(&error.message, &[api_key]);
+            }
+            WeatherAuth::Jwt {
+                private_key_text, ..
+            } => {
+                error.message = redact(&error.message, &[token.unwrap_or(""), private_key_text]);
+            }
+        }
+        error
     }
 
     fn cache_get(&self, key: &str) -> Option<Value> {
@@ -382,10 +428,7 @@ mod tests {
         let client = WeatherClient {
             client: Client::new(),
             api_host: server.uri(),
-            project_id: "project".into(),
-            credential_id: "credential".into(),
-            signing_key: SigningKey::from_bytes(&[7_u8; 32]),
-            private_key_text: "private-test-value".into(),
+            auth: WeatherAuth::ApiKey("test-key".into()),
             cache_path: None,
         };
         let output = client
