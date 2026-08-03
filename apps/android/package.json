@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:mobile": "node --test tests/mobile-package.test.mjs",
     "lint": "oxlint",
     "preview": "vite preview",
     "tauri": "tauri",
