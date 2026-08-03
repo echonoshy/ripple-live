@@ -116,6 +116,8 @@ fn app(state: AppState) -> Router {
             "/v1/memories/{memory_id}",
             get(get_memory).patch(update_memory).delete(delete_memory),
         )
+        .route("/v1/todos", get(list_todos))
+        .route("/v1/todos/{todo_id}", axum::routing::patch(update_todo))
         .route("/v1/assets/{asset_id}/content", get(asset_content))
         .route("/v1/responses", post(create_response))
         .route("/v1/agent/realtime", get(realtime))
@@ -141,6 +143,17 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         },
         "external_tools": state.orchestrator.external_tool_count()
     }))
+}
+
+#[derive(Deserialize)]
+struct TodoQuery {
+    limit: Option<i64>,
+    completed: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct TodoPatch {
+    completed: bool,
 }
 
 #[derive(Deserialize)]
@@ -537,6 +550,50 @@ async fn delete_memory(
     match state.memories.delete(&user.id, &memory_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => api_error(StatusCode::NOT_FOUND, "记忆不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn list_todos(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TodoQuery>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .memories
+        .list_todos(
+            &user.id,
+            query.completed,
+            query.limit.unwrap_or(100).clamp(1, 100) as usize,
+        )
+        .await
+    {
+        Ok(todos) => Json(json!({"data": todos})).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn update_todo(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(todo_id): Path<String>,
+    Json(request): Json<TodoPatch>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .memories
+        .complete_todo(&user.id, &todo_id, request.completed)
+        .await
+    {
+        Ok(Some(todo)) => Json(json!({"data": todo})).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "待办不存在"),
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
 }

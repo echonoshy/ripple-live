@@ -169,19 +169,6 @@ impl ContextStore {
                 PRIMARY KEY(response_id, tool_call_id),
                 FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE CASCADE
             )",
-            "CREATE TABLE IF NOT EXISTS todos (
-                id TEXT PRIMARY KEY, user_id TEXT NOT NULL, memory_id TEXT,
-                title TEXT NOT NULL, due_at REAL, completed_at REAL,
-                created_at REAL NOT NULL, updated_at REAL NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id),
-                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE SET NULL
-            )",
-            "CREATE TABLE IF NOT EXISTS todo_tool_executions (
-                response_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
-                todo_id TEXT NOT NULL,
-                PRIMARY KEY(response_id, tool_call_id),
-                FOREIGN KEY(todo_id) REFERENCES todos(id) ON DELETE CASCADE
-            )",
             "CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, id)",
             "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, id)",
             "CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id, id)",
@@ -190,7 +177,6 @@ impl ContextStore {
             "CREATE INDEX IF NOT EXISTS idx_memory_items_user ON memory_items(user_id, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_memory_assets_memory ON memory_assets(memory_id, ordinal)",
             "CREATE INDEX IF NOT EXISTS idx_turn_attachments_turn ON turn_attachments(turn_id, ordinal)",
-            "CREATE INDEX IF NOT EXISTS idx_todos_user_due ON todos(user_id, completed_at, due_at)",
         ] {
             sqlx::query(statement).execute(&self.pool).await?;
         }

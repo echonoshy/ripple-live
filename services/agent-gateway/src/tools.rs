@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::{
     capabilities::{CliRunner, SkillRegistry},
-    memory::{CreateMemoryRequest, MemoryArtifact, MemoryService},
+    memory::{CreateMemoryRequest, CreateTodoRequest, MemoryArtifact, MemoryService},
     protocol::VideoFrame,
 };
 
@@ -64,6 +64,23 @@ fn builtin_schemas() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "create_todo",
+                "description": "仅在用户明确要求把当前内容做成待办或提醒时调用。会保存当前画面作为可回看的证据，并创建一个待办。用户没有说明确时间时不要设置 due_at；有明确提醒时间时，due_at 必须是带时区的 RFC3339 时间。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "简短、可执行的待办标题"},
+                        "visual_summary": {"type": "string", "description": "对当前画面和待办来源的一句话摘要"},
+                        "due_at": {"type": "string", "description": "明确提醒时间的 RFC3339 格式，例如 2026-08-04T10:00:00+08:00；没有明确时间则省略"}
+                    },
+                    "required": ["title"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "recall",
                 "description": "从当前用户所有会话保存的长期记忆中检索信息，并返回相关原始画面。query 应提炼为简洁关键词。",
                 "parameters": {
@@ -79,8 +96,9 @@ fn builtin_schemas() -> Vec<Value> {
 
 pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
     static EXPLICIT: OnceLock<Regex> = OnceLock::new();
-    let explicit = EXPLICIT
-        .get_or_init(|| Regex::new(r#"(?i)(?:调用|使用)\s*[`'"]?([a-z_]+)[`'"]?\s*工具"#).unwrap());
+    let explicit = EXPLICIT.get_or_init(|| {
+        Regex::new(r#"(?i)(?:调用|使用)\\s*[`'\"]?([a-z_]+)[`'\"]?\\s*工具"#).unwrap()
+    });
     if let Some(name) = explicit
         .captures(transcript)
         .and_then(|capture| capture.get(1))
@@ -91,6 +109,7 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
             "calculate" => Some("calculate"),
             "remember" => Some("remember"),
             "recall" => Some("recall"),
+            "create_todo" => Some("create_todo"),
             "web_search" => Some("web_search"),
             _ => None,
         };
@@ -109,6 +128,19 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
     .any(|needle| transcript.contains(needle))
     {
         return Some("remember");
+    }
+    if [
+        "做成待办",
+        "创建待办",
+        "加个待办",
+        "记个待办",
+        "加入待办",
+        "提醒我",
+    ]
+    .iter()
+    .any(|needle| transcript.contains(needle))
+    {
+        return Some("create_todo");
     }
     if [
         "长期记忆",
@@ -262,6 +294,42 @@ impl ToolExecutor {
                     artifacts,
                 })
             }
+            "create_todo" => {
+                let title = payload
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("待办标题不能为空"))?;
+                let due_at = payload
+                    .get("due_at")
+                    .and_then(Value::as_str)
+                    .map(parse_due_at)
+                    .transpose()?;
+                let todo = self
+                    .memories
+                    .create_todo(CreateTodoRequest {
+                        user_id: execution.user_id.clone(),
+                        conversation_id: execution.conversation_id.clone(),
+                        source_turn_id: execution.user_turn_id,
+                        response_id: execution.response_id.clone(),
+                        tool_call_id: execution.tool_call_id.clone(),
+                        title: title.to_owned(),
+                        visual_summary: payload
+                            .get("visual_summary")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        due_at,
+                        frames: execution.frames.clone(),
+                    })
+                    .await?;
+                let artifacts = todo.cover.clone().into_iter().collect();
+                Ok(ToolOutcome {
+                    value: json!({"ok": true, "todo": todo}),
+                    artifacts,
+                })
+            }
             "recall" => {
                 let query = payload.get("query").and_then(Value::as_str).unwrap_or("");
                 let memories = self.memories.recall(&execution.user_id, query, 5).await?;
@@ -321,6 +389,14 @@ fn explicit_tool_name(transcript: &str) -> Option<&str> {
         .captures(transcript)
         .and_then(|capture| capture.get(1))
         .map(|item| item.as_str())
+}
+
+fn parse_due_at(value: &str) -> anyhow::Result<f64> {
+    let due_at = chrono::DateTime::parse_from_rfc3339(value.trim())?.timestamp() as f64;
+    if due_at < chrono::Utc::now().timestamp() as f64 - 60.0 {
+        anyhow::bail!("提醒时间不能早于当前时间");
+    }
+    Ok(due_at)
 }
 
 fn is_builtin_tool(name: &str) -> bool {

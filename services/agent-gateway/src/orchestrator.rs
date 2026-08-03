@@ -22,6 +22,8 @@ const SYSTEM_PROMPT: &str = "你是 Ripple Live，一个运行在用户自有服
 需要外部动作或精确结果时必须使用提供的工具，不要假装已经调用。
 用户要求联网、搜索、最新信息或外部资料时必须调用 web_search，并根据返回来源作答。若工具返回 result_count 为 0，不得把自身已有知识说成搜索结果，必须明确说明本次搜索没有找到结果。
 只有用户明确要求记住某件事时才调用 remember；有当前画面时，visual_summary 必须客观描述画面中有助于以后检索的物品、位置和文字。需要查找用户过去保存的信息时调用 recall，并把 query 提炼为简洁关键词。
+只有用户明确要求记住某件事时才调用 remember；有当前画面时，visual_summary 必须客观描述画面中有助于以后检索的物品、位置和文字。需要查找用户过去保存的信息时调用 recall，并把 query 提炼为简洁关键词。
+用户明确要求把当前信息做成待办或提醒时调用 create_todo；它会同时保存画面证据。未指定时间就不要设置提醒；“明天”“下周”等相对时间先用 get_current_time 获取 Asia/Shanghai 当前时间，再换算成带时区的 RFC3339 due_at。用户只要求总结时，直接给出简短摘要和不超过三条重点；只有明确说要保存时才写入记忆。
 工具失败时如实说明。不要在朗读内容中输出工具调用 JSON。";
 
 const MIN_SPEECH_CHUNK_CHARS: usize = 40;
@@ -121,7 +123,14 @@ impl AgentOrchestrator {
                 return Ok(output);
             }
             if !reply.content.trim().is_empty() {
-                anyhow::bail!("模型同时返回了文本和工具调用");
+                info!(
+                    %conversation_id,
+                    %response_id,
+                    round,
+                    text_chars = reply.content.chars().count(),
+                    tool_calls = reply.tool_calls.len(),
+                    "ignoring tool-call round text and continuing with tools"
+                );
             }
             for call in reply.tool_calls {
                 let outcome = self
@@ -378,7 +387,14 @@ impl AgentOrchestrator {
                     break;
                 }
                 if !content.trim().is_empty() {
-                    anyhow::bail!("模型同时返回了朗读文本和工具调用");
+                    info!(
+                        %session_id,
+                        %response_id,
+                        round,
+                        text_chars = content.chars().count(),
+                        tool_calls = calls.len(),
+                        "excluding tool-call round text from speech and continuing with tools"
+                    );
                 }
                 for call in calls {
                     info!(
@@ -649,17 +665,18 @@ fn streamed_raw_message(content: &str, calls: &[crate::adapters::ToolCall]) -> V
 
 struct SpeechSegmenter {
     pending: String,
+    ready: Vec<String>,
 }
 
 impl SpeechSegmenter {
     fn new() -> Self {
         Self {
             pending: String::new(),
+            ready: Vec::new(),
         }
     }
 
     fn push(&mut self, delta: &str) -> Vec<String> {
-        let mut ready = Vec::new();
         for character in delta.chars() {
             self.pending.push(character);
             let length = self.pending.chars().count();
@@ -670,14 +687,17 @@ impl SpeechSegmenter {
             if (sentence_end || clause_end || length >= MAX_SPEECH_CHUNK_CHARS)
                 && let Some(phrase) = self.take_pending()
             {
-                ready.push(phrase);
+                self.ready.push(phrase);
             }
         }
-        ready
+        Vec::new()
     }
 
     fn finish(mut self) -> Vec<String> {
-        self.take_pending().into_iter().collect()
+        if let Some(phrase) = self.take_pending() {
+            self.ready.push(phrase);
+        }
+        self.ready
     }
 
     fn take_pending(&mut self) -> Option<String> {
@@ -790,15 +810,27 @@ mod tests {
     fn segments_long_streaming_text_between_forty_and_eighty_characters() {
         let mut at_sentence = SpeechSegmenter::new();
         let sentence = format!("{}。", "连".repeat(MIN_SPEECH_CHUNK_CHARS - 1));
-        assert_eq!(at_sentence.push(&sentence), vec![sentence]);
+        assert!(at_sentence.push(&sentence).is_empty());
+        assert_eq!(at_sentence.finish(), vec![sentence]);
 
         let mut at_clause = SpeechSegmenter::new();
         let clause = format!("{}，", "连".repeat(SOFT_SPEECH_CHUNK_CHARS - 1));
-        assert_eq!(at_clause.push(&clause), vec![clause]);
+        assert!(at_clause.push(&clause).is_empty());
+        assert_eq!(at_clause.finish(), vec![clause]);
 
         let mut at_limit = SpeechSegmenter::new();
         let bounded = "连".repeat(MAX_SPEECH_CHUNK_CHARS);
-        assert_eq!(at_limit.push(&bounded), vec![bounded]);
+        assert!(at_limit.push(&bounded).is_empty());
+        assert_eq!(at_limit.finish(), vec![bounded]);
+    }
+
+    #[test]
+    fn buffers_streaming_speech_until_the_round_outcome_is_known() {
+        let mut segmenter = SpeechSegmenter::new();
+        let sentence = format!("{}。", "工".repeat(MIN_SPEECH_CHUNK_CHARS - 1));
+
+        assert!(segmenter.push(&sentence).is_empty());
+        assert_eq!(segmenter.finish(), vec![sentence]);
     }
 
     #[test]

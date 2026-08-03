@@ -58,6 +58,31 @@ pub struct MemorySearchResult {
     pub assets: Vec<MemoryArtifact>,
 }
 
+#[derive(Clone, Debug)]
+pub struct CreateTodoRequest {
+    pub user_id: String,
+    pub conversation_id: String,
+    pub source_turn_id: i64,
+    pub response_id: String,
+    pub tool_call_id: String,
+    pub title: String,
+    pub visual_summary: String,
+    pub due_at: Option<f64>,
+    pub frames: Vec<VideoFrame>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TodoRecord {
+    pub id: String,
+    pub memory_id: Option<String>,
+    pub title: String,
+    pub visual_summary: String,
+    pub due_at: Option<f64>,
+    pub completed_at: Option<f64>,
+    pub created_at: f64,
+    pub cover: Option<MemoryArtifact>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateMemoryRequest {
     pub user_note: String,
@@ -236,6 +261,127 @@ impl MemoryService {
         }
         results.truncate(limit.clamp(1, 20));
         Ok(results)
+    }
+
+    /// A todo is captured as a visual memory first, so its evidence remains
+    /// available from the task list instead of becoming an unrelated text item.
+    pub async fn create_todo(&self, request: CreateTodoRequest) -> anyhow::Result<TodoRecord> {
+        if let Some(todo_id) = self
+            .existing_todo_execution(&request.response_id, &request.tool_call_id)
+            .await?
+        {
+            return self
+                .get_todo(&request.user_id, &todo_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("幂等记录指向的待办不存在"));
+        }
+        let title = request.title.trim();
+        if title.is_empty() || title.chars().count() > 500 {
+            anyhow::bail!("待办标题不能为空且不能超过 500 个字符");
+        }
+        let summary = request.visual_summary.trim();
+        if summary.chars().count() > 2_000 {
+            anyhow::bail!("待办摘要不能超过 2000 个字符");
+        }
+        let memory = self
+            .create(CreateMemoryRequest {
+                user_id: request.user_id.clone(),
+                conversation_id: request.conversation_id,
+                source_turn_id: request.source_turn_id,
+                response_id: request.response_id.clone(),
+                tool_call_id: request.tool_call_id.clone(),
+                user_note: title.to_owned(),
+                visual_summary: if summary.is_empty() {
+                    format!("待办来源：{title}")
+                } else {
+                    summary.to_owned()
+                },
+                frames: request.frames,
+            })
+            .await?;
+        let todo_id = format!("todo_{}", Uuid::new_v4().simple());
+        let now = unix_time();
+        sqlx::query(
+            "INSERT INTO todos(
+                id, user_id, memory_id, title, due_at, completed_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
+        )
+        .bind(&todo_id)
+        .bind(&request.user_id)
+        .bind(&memory.memory.id)
+        .bind(title)
+        .bind(request.due_at)
+        .bind(now)
+        .bind(now)
+        .execute(self.context.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO todo_tool_executions(response_id, tool_call_id, todo_id)
+             VALUES (?, ?, ?)",
+        )
+        .bind(&request.response_id)
+        .bind(&request.tool_call_id)
+        .bind(&todo_id)
+        .execute(self.context.pool())
+        .await?;
+        self.get_todo(&request.user_id, &todo_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("创建后的待办不存在"))
+    }
+
+    pub async fn list_todos(
+        &self,
+        user_id: &str,
+        completed: Option<bool>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<TodoRecord>> {
+        let rows = match completed {
+            Some(true) => sqlx::query(
+                "SELECT id FROM todos WHERE user_id = ? AND completed_at IS NOT NULL
+                 ORDER BY completed_at DESC LIMIT ?",
+            )
+            .bind(user_id)
+            .bind(limit.clamp(1, 100) as i64)
+            .fetch_all(self.context.pool())
+            .await?,
+            _ => sqlx::query(
+                "SELECT id FROM todos WHERE user_id = ? AND completed_at IS NULL
+                 ORDER BY CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, created_at DESC LIMIT ?",
+            )
+            .bind(user_id)
+            .bind(limit.clamp(1, 100) as i64)
+            .fetch_all(self.context.pool())
+            .await?,
+        };
+        let mut todos = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Some(todo) = self.get_todo(user_id, &row.get::<String, _>("id")).await? {
+                todos.push(todo);
+            }
+        }
+        Ok(todos)
+    }
+
+    pub async fn complete_todo(
+        &self,
+        user_id: &str,
+        todo_id: &str,
+        completed: bool,
+    ) -> anyhow::Result<Option<TodoRecord>> {
+        let now = unix_time();
+        let result = sqlx::query(
+            "UPDATE todos SET completed_at = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+        )
+        .bind(if completed { Some(now) } else { None })
+        .bind(now)
+        .bind(todo_id)
+        .bind(user_id)
+        .execute(self.context.pool())
+        .await?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_todo(user_id, todo_id).await
     }
 
     pub async fn list(
@@ -502,6 +648,53 @@ impl MemoryService {
         Ok(())
     }
 
+    async fn get_todo(&self, user_id: &str, todo_id: &str) -> anyhow::Result<Option<TodoRecord>> {
+        let row = sqlx::query(
+            "SELECT t.id, t.memory_id, t.title, t.due_at, t.completed_at, t.created_at,
+                    m.visual_summary, m.cover_asset_id
+             FROM todos t
+             LEFT JOIN memory_items m ON m.id = t.memory_id AND m.user_id = t.user_id
+             WHERE t.id = ? AND t.user_id = ?",
+        )
+        .bind(todo_id)
+        .bind(user_id)
+        .fetch_optional(self.context.pool())
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let memory_id: Option<String> = row.get("memory_id");
+        let cover_id: Option<String> = row.get("cover_asset_id");
+        let title: String = row.get("title");
+        Ok(Some(TodoRecord {
+            id: row.get("id"),
+            memory_id: memory_id.clone(),
+            title: title.clone(),
+            visual_summary: row
+                .get::<Option<String>, _>("visual_summary")
+                .unwrap_or_default(),
+            due_at: row.get("due_at"),
+            completed_at: row.get("completed_at"),
+            created_at: row.get("created_at"),
+            cover: cover_id
+                .zip(memory_id)
+                .map(|(asset_id, memory_id)| artifact(asset_id, &memory_id, &title)),
+        }))
+    }
+
+    async fn existing_todo_execution(
+        &self,
+        response_id: &str,
+        tool_call_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT todo_id FROM todo_tool_executions
+             WHERE response_id = ? AND tool_call_id = ?",
+        )
+        .bind(response_id)
+        .bind(tool_call_id)
+        .fetch_optional(self.context.pool())
+        .await?)
+    }
+
     async fn existing_execution(
         &self,
         response_id: &str,
@@ -588,6 +781,74 @@ mod tests {
         assert!(relevance("蓝色转接头放哪了", "蓝色转接头放在右边第二个抽屉") > 0.4);
         assert_eq!(relevance("蓝色转接头", "蓝色转接头放在抽屉"), 1.0);
         assert_eq!(relevance("咖啡", "蓝色转接头放在抽屉"), 0.0);
+    }
+
+    #[tokio::test]
+    async fn creates_completes_and_lists_todo_with_memory_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = ContextStore::open(&directory.path().join("context.sqlite3"))
+            .await
+            .unwrap();
+        context
+            .seed_invitation_codes(&["todo-invite".to_owned()], 1, 24)
+            .await
+            .unwrap();
+        let (user, _) = context
+            .register_user("todo@example.com", "password-todo", "todo-invite", 24)
+            .await
+            .unwrap();
+        let conversation = context.create_conversation(&user.id).await.unwrap();
+        let turn = context
+            .add_turn(&conversation, "user", "把这个做成待办", None)
+            .await
+            .unwrap();
+        let service = MemoryService::new(context, directory.path().join("assets"))
+            .await
+            .unwrap();
+        let request = CreateTodoRequest {
+            user_id: user.id.clone(),
+            conversation_id: conversation,
+            source_turn_id: turn,
+            response_id: "resp_todo".to_owned(),
+            tool_call_id: "call_todo".to_owned(),
+            title: "购买滤芯".to_owned(),
+            visual_summary: "空调滤芯型号为 XX-123".to_owned(),
+            due_at: Some(1_900_000_000.0),
+            frames: Vec::new(),
+        };
+        let created = service.create_todo(request.clone()).await.unwrap();
+        let repeated = service.create_todo(request).await.unwrap();
+        assert_eq!(created.id, repeated.id);
+        assert!(created.memory_id.is_some());
+        assert_eq!(
+            service
+                .list_todos(&user.id, Some(false), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let completed = service
+            .complete_todo(&user.id, &created.id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(completed.completed_at.is_some());
+        assert!(
+            service
+                .list_todos(&user.id, Some(false), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            service
+                .list_todos(&user.id, Some(true), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
