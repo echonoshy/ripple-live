@@ -30,6 +30,10 @@ pub struct Settings {
     pub skills_dir: PathBuf,
     pub cli_max_output_bytes: usize,
     pub search_proxy: String,
+    pub invite_codes: Vec<String>,
+    pub invite_max_uses: i64,
+    pub invite_ttl_hours: i64,
+    pub auth_token_ttl_hours: i64,
     pub request_timeout: Duration,
 }
 
@@ -83,6 +87,15 @@ impl Settings {
             skills_dir: PathBuf::from(value("SKILLS_DIR", "skills")),
             cli_max_output_bytes: parsed("CLI_MAX_OUTPUT_BYTES", 256 * 1024),
             search_proxy: value("SEARCH_PROXY", ""),
+            invite_codes: value("INVITE_CODES", "")
+                .split(',')
+                .map(str::trim)
+                .filter(|code| !code.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            invite_max_uses: parsed("INVITE_MAX_USES", 10),
+            invite_ttl_hours: parsed("INVITE_TTL_HOURS", 24 * 7),
+            auth_token_ttl_hours: parsed("AUTH_TOKEN_TTL_HOURS", 24 * 30),
             request_timeout: Duration::from_secs(parsed("REQUEST_TIMEOUT_SECONDS", 180)),
         })
     }

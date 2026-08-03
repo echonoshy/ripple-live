@@ -6,12 +6,12 @@ use std::{
 use axum::{
     Json, Router,
     extract::{
-        Query, State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderValue, Method},
-    response::IntoResponse,
-    routing::get,
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::{SinkExt, StreamExt};
@@ -23,6 +23,7 @@ use ripple_agent_gateway::{
     orchestrator::AgentOrchestrator,
     protocol::{ClientEvent, VideoFrame},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tower_http::{
@@ -54,6 +55,16 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let settings = Arc::new(Settings::from_env()?);
     let context = ContextStore::open(&settings.database_path()).await?;
+    context
+        .seed_invitation_codes(
+            &settings.invite_codes,
+            settings.invite_max_uses,
+            settings.invite_ttl_hours,
+        )
+        .await?;
+    if settings.invite_codes.is_empty() {
+        warn!("registration is disabled because RIPPLE_INVITE_CODES is empty");
+    }
     let adapters = ModelAdapters::new((*settings).clone())?;
     let orchestrator = AgentOrchestrator::new(Arc::clone(&settings), context.clone(), adapters)?;
     let state = AppState {
@@ -67,6 +78,16 @@ async fn main() -> anyhow::Result<()> {
         .allow_headers(tower_http::cors::Any);
     let app = Router::new()
         .route("/health", get(health))
+        .route("/v1/auth/register", post(register))
+        .route("/v1/auth/login", post(login))
+        .route("/v1/auth/me", get(me))
+        .route("/v1/auth/logout", post(logout))
+        .route("/v1/conversations", get(list_conversations))
+        .route(
+            "/v1/conversations/{conversation_id}/messages",
+            get(conversation_messages),
+        )
+        .route("/v1/responses", post(create_response))
         .route("/v1/agent/realtime", get(realtime))
         .layer(cors)
         .layer(
@@ -97,17 +118,321 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
+#[derive(Deserialize)]
+struct RegisterRequest {
+    email: String,
+    password: String,
+    invitation_code: String,
+}
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct ListQuery {
+    limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct ResponsesRequest {
+    input: Value,
+    #[serde(default)]
+    conversation: Option<Value>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    stream: bool,
+}
+
+async fn register(State(state): State<AppState>, Json(request): Json<RegisterRequest>) -> Response {
+    match state
+        .context
+        .register_user(
+            &request.email,
+            &request.password,
+            &request.invitation_code,
+            state.settings.auth_token_ttl_hours,
+        )
+        .await
+    {
+        Ok((user, token)) => (
+            StatusCode::CREATED,
+            Json(json!({"access_token": token, "token_type": "bearer", "user": user})),
+        )
+            .into_response(),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn login(State(state): State<AppState>, Json(request): Json<LoginRequest>) -> Response {
+    match state
+        .context
+        .login_user(
+            &request.email,
+            &request.password,
+            state.settings.auth_token_ttl_hours,
+        )
+        .await
+    {
+        Ok((user, token)) => {
+            Json(json!({"access_token": token, "token_type": "bearer", "user": user}))
+                .into_response()
+        }
+        Err(error) => api_error(StatusCode::UNAUTHORIZED, &error.to_string()),
+    }
+}
+
+async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match authenticated_user(&state, &headers).await {
+        Ok(user) => Json(json!({"user": user})).into_response(),
+        Err(response) => response,
+    }
+}
+
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(token) = bearer_token(&headers) else {
+        return api_error(StatusCode::UNAUTHORIZED, "需要登录");
+    };
+    if let Err(error) = state.context.revoke_token(token).await {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn list_conversations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .list_conversations(&user.id, query.limit.unwrap_or(50))
+        .await
+    {
+        Ok(conversations) => Json(json!({"data": conversations})).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn conversation_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .conversation_messages(&user.id, &conversation_id, query.limit.unwrap_or(500))
+        .await
+    {
+        Ok(Some(messages)) => Json(json!({"data": messages})).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "对话不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn create_response(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ResponsesRequest>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    if request.stream {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "当前版本暂不支持 Responses API 流式输出",
+        );
+    }
+    if request
+        .model
+        .as_deref()
+        .is_some_and(|model| model.trim().is_empty())
+    {
+        return api_error(StatusCode::BAD_REQUEST, "model 不能为空");
+    }
+    let input = match responses_input_text(&request.input) {
+        Some(input) if !input.trim().is_empty() => input,
+        _ => return api_error(StatusCode::BAD_REQUEST, "当前仅支持文本 input"),
+    };
+    let requested_conversation = request.conversation.as_ref().and_then(|value| {
+        value
+            .as_str()
+            .or_else(|| value.get("id").and_then(Value::as_str))
+    });
+    let conversation_id = match requested_conversation {
+        Some(id) => match state.context.conversation_belongs_to(id, &user.id).await {
+            Ok(true) => id.to_owned(),
+            Ok(false) => return api_error(StatusCode::NOT_FOUND, "对话不存在"),
+            Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        },
+        None => match state.context.create_conversation(&user.id).await {
+            Ok(id) => id,
+            Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        },
+    };
+    match state
+        .orchestrator
+        .run_text_response(&conversation_id, &input)
+        .await
+    {
+        Ok(output) => {
+            let response_id = format!("resp_{}", Uuid::new_v4().simple());
+            let message_id = format!("msg_{}", Uuid::new_v4().simple());
+            let completed_at = unix_timestamp();
+            Json(json!({
+                "id": response_id,
+                "object": "response",
+                "created_at": completed_at,
+                "status": "completed",
+                "completed_at": completed_at,
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": state.settings.agent_model,
+                "conversation": {"id": conversation_id},
+                "output": [{
+                    "id": message_id,
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": output, "annotations": []}]
+                }],
+                "parallel_tool_calls": false,
+                "previous_response_id": null,
+                "reasoning": {"effort": null, "summary": null},
+                "store": true,
+                "temperature": state.settings.agent_temperature,
+                "text": {"format": {"type": "text"}},
+                "tool_choice": "auto",
+                "tools": [],
+                "top_p": 1.0,
+                "truncation": "disabled",
+                "usage": null,
+                "metadata": {}
+            }))
+            .into_response()
+        }
+        Err(error) => api_error(StatusCode::BAD_GATEWAY, &error.to_string()),
+    }
+}
+
+async fn authenticated_user(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<ripple_agent_gateway::auth::AuthUser, Response> {
+    let Some(token) = bearer_token(headers) else {
+        return Err(api_error(StatusCode::UNAUTHORIZED, "需要登录"));
+    };
+    match state.context.authenticate(token).await {
+        Ok(Some(user)) => Ok(user),
+        Ok(None) => Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "登录已失效，请重新登录",
+        )),
+        Err(error) => Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &error.to_string(),
+        )),
+    }
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .filter(|token| !token.is_empty())
+}
+
+fn responses_input_text(input: &Value) -> Option<String> {
+    if let Some(text) = input.as_str() {
+        return Some(text.to_owned());
+    }
+    let items = input.as_array()?;
+    let mut parts = Vec::new();
+    for item in items {
+        if item.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        match item.get("content") {
+            Some(Value::String(text)) => parts.push(text.clone()),
+            Some(Value::Array(content)) => {
+                for part in content {
+                    if matches!(
+                        part.get("type").and_then(Value::as_str),
+                        Some("input_text" | "text")
+                    ) && let Some(text) = part.get("text").and_then(Value::as_str)
+                    {
+                        parts.push(text.to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn api_error(status: StatusCode, message: &str) -> Response {
+    (
+        status,
+        Json(json!({
+            "error": {"message": message, "type": "invalid_request_error", "param": null, "code": null}
+        })),
+    )
+        .into_response()
+}
+
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 async fn realtime(
     websocket: WebSocketUpgrade,
     Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    let session_id = query
-        .get("session_id")
-        .cloned()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-    websocket.on_upgrade(move |socket| handle_socket(socket, state, session_id))
+) -> Response {
+    let Some(token) = query.get("access_token") else {
+        return api_error(StatusCode::UNAUTHORIZED, "需要登录");
+    };
+    let user = match state.context.authenticate(token).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return api_error(StatusCode::UNAUTHORIZED, "登录已失效，请重新登录"),
+        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    let conversation_id = match query.get("conversation_id").filter(|id| !id.is_empty()) {
+        Some(id) => match state.context.conversation_belongs_to(id, &user.id).await {
+            Ok(true) => id.clone(),
+            Ok(false) => return api_error(StatusCode::NOT_FOUND, "对话不存在"),
+            Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        },
+        None => match state.context.create_conversation(&user.id).await {
+            Ok(id) => id,
+            Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        },
+    };
+    websocket
+        .on_upgrade(move |socket| handle_socket(socket, state, conversation_id))
+        .into_response()
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
@@ -141,6 +466,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
         json!({
             "type": "session.created",
             "session_id": session_id,
+            "conversation_id": session_id,
             "sample_rate_in": state.settings.sample_rate_in,
             "sample_rate_out": state.settings.sample_rate_out
         }),

@@ -1,17 +1,34 @@
 import {
   ArrowLeft,
   CameraRotate,
+  ChatCircleDots,
+  ClockCounterClockwise,
+  EnvelopeSimple,
   GearSix,
   HandPalm,
+  LockKey,
   Microphone,
   MicrophoneSlash,
   PhoneDisconnect,
+  SignOut,
+  Ticket,
   VideoCamera,
   X,
 } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import appIcon from '../src-tauri/icons/icon.png'
+import {
+  conversationMessages,
+  conversations,
+  currentUser,
+  login,
+  logout as logoutApi,
+  register,
+  type AuthUser,
+  type ConversationMessage,
+  type ConversationSummary,
+} from './api'
 import { LiveMedia } from './media/LiveMedia'
 import {
   RealtimeSession,
@@ -21,7 +38,7 @@ import {
 
 const DEFAULT_SERVER = '140.143.229.103:8700'
 
-type Screen = 'home' | 'call' | 'settings'
+type Screen = 'home' | 'call' | 'settings' | 'history' | 'conversation'
 
 const stateLabels: Record<SessionState, string> = {
   idle: '准备就绪',
@@ -41,6 +58,23 @@ function formatDuration(seconds: number) {
   return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
 }
 
+function formatHistoryTime(timestamp: number) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp * 1000))
+}
+
+function normalizeServerAddress(value: string) {
+  return value
+    .trim()
+    .replace(/^https?:\/\//, '')
+    .replace(/^wss?:\/\//, '')
+    .replace(/\/+$/, '')
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home')
   const [mode, setMode] = useState<RealtimeMode>('audio')
@@ -58,12 +92,98 @@ export default function App() {
   const [cameraFacing, setCameraFacing] = useState<'user' | 'environment'>(
     'environment',
   )
+  const [accessToken, setAccessToken] = useState(
+    () => localStorage.getItem('ripple-access-token') ?? '',
+  )
+  const [user, setUser] = useState<AuthUser | null>(null)
+  const [authChecked, setAuthChecked] = useState(false)
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
+  const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [invitationCode, setInvitationCode] = useState('')
+  const [authError, setAuthError] = useState('')
+  const [authBusy, setAuthBusy] = useState(false)
+  const [historyItems, setHistoryItems] = useState<ConversationSummary[]>([])
+  const [historyMessages, setHistoryMessages] = useState<ConversationMessage[]>([])
+  const [historyBusy, setHistoryBusy] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+  const [selectedConversation, setSelectedConversation] = useState<ConversationSummary | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sessionRef = useRef<RealtimeSession | null>(null)
   const mediaRef = useRef<LiveMedia | null>(null)
   const visualizerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    let active = true
+    if (!accessToken) {
+      setAuthChecked(true)
+      return
+    }
+    setAuthChecked(false)
+    void currentUser(server, accessToken)
+      .then((nextUser) => {
+        if (active) setUser(nextUser)
+      })
+      .catch(() => {
+        if (!active) return
+        localStorage.removeItem('ripple-access-token')
+        setAccessToken('')
+        setUser(null)
+      })
+      .finally(() => {
+        if (active) setAuthChecked(true)
+      })
+    return () => {
+      active = false
+    }
+  }, [accessToken, server])
+
+  useEffect(() => {
+    if (screen !== 'history' || !accessToken) return
+    let active = true
+    setHistoryBusy(true)
+    setHistoryError('')
+    void conversations(server, accessToken)
+      .then((items) => {
+        if (active) setHistoryItems(items)
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setHistoryError(error instanceof Error ? error.message : '无法加载历史记录')
+        }
+      })
+      .finally(() => {
+        if (active) setHistoryBusy(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [accessToken, screen, server])
+
+  useEffect(() => {
+    if (screen !== 'conversation' || !accessToken || !selectedConversation) return
+    let active = true
+    setHistoryBusy(true)
+    setHistoryError('')
+    setHistoryMessages([])
+    void conversationMessages(server, accessToken, selectedConversation.id)
+      .then((items) => {
+        if (active) setHistoryMessages(items)
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setHistoryError(error instanceof Error ? error.message : '无法加载聊天内容')
+        }
+      })
+      .finally(() => {
+        if (active) setHistoryBusy(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [accessToken, screen, selectedConversation, server])
 
   const isActive = [
     'connecting',
@@ -122,6 +242,7 @@ export default function App() {
       })
       const session = new RealtimeSession({
         server,
+        accessToken,
         mode: nextMode,
         onState: setSessionState,
         onError: (message) => {
@@ -133,6 +254,7 @@ export default function App() {
         onTool: setToolStatus,
         onAudio: (audio) => media.enqueueOutput(audio),
         onAudioDone: () => media.finishOutput(),
+        onConversation: () => {},
         onReady: async () => {
           await media.start((audio, frame) => {
             void session.sendInput(audio, frame)
@@ -160,7 +282,7 @@ export default function App() {
         setSessionState('error')
       }
     },
-    [cameraFacing, server],
+    [accessToken, cameraFacing, server],
   )
 
   useEffect(() => {
@@ -194,14 +316,52 @@ export default function App() {
   }
 
   const saveSettings = () => {
-    const normalized = serverDraft
-      .trim()
-      .replace(/^wss?:\/\//, '')
-      .replace(/\/+$/, '')
+    const normalized = normalizeServerAddress(serverDraft)
     setServer(normalized || DEFAULT_SERVER)
     setServerDraft(normalized || DEFAULT_SERVER)
     localStorage.setItem('ripple-agent-server', normalized || DEFAULT_SERVER)
     setScreen('home')
+  }
+
+  const submitAuth = async () => {
+    const normalized = normalizeServerAddress(serverDraft) || DEFAULT_SERVER
+    setAuthBusy(true)
+    setAuthError('')
+    try {
+      const session =
+        authMode === 'login'
+          ? await login(normalized, authEmail, authPassword)
+          : await register(
+              normalized,
+              authEmail,
+              authPassword,
+              invitationCode,
+            )
+      setServer(normalized)
+      setServerDraft(normalized)
+      localStorage.setItem('ripple-agent-server', normalized)
+      localStorage.setItem('ripple-access-token', session.access_token)
+      setAccessToken(session.access_token)
+      setUser(session.user)
+      setAuthChecked(true)
+      setAuthPassword('')
+      setInvitationCode('')
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : '登录失败')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  const signOut = async () => {
+    const token = accessToken
+    localStorage.removeItem('ripple-access-token')
+    setAccessToken('')
+    setUser(null)
+    setScreen('home')
+    setHistoryItems([])
+    setHistoryMessages([])
+    if (token) await logoutApi(server, token).catch(() => {})
   }
 
   const statusClass = useMemo(
@@ -216,6 +376,128 @@ export default function App() {
     [isActive, sessionState],
   )
 
+  if (!authChecked) {
+    return (
+      <main className="app-shell auth-shell">
+        <section className="auth-screen auth-loading" aria-live="polite">
+          <img src={appIcon} alt="" />
+          <p>正在确认登录状态</p>
+        </section>
+      </main>
+    )
+  }
+
+  if (!user) {
+    return (
+      <main className="app-shell auth-shell">
+        <section className="auth-screen">
+          <header className="auth-brand">
+            <img src={appIcon} alt="" />
+            <div>
+              <strong>Ripple Live</strong>
+              <span>登录你的私人实时 Agent</span>
+            </div>
+          </header>
+
+          <div className="auth-intro">
+            <p>{authMode === 'login' ? '欢迎回来' : '接受邀请'}</p>
+            <h1>{authMode === 'login' ? '继续你的对话' : '创建私人账号'}</h1>
+            <span>
+              {authMode === 'login'
+                ? '历史聊天只保存在你连接的 Ripple 服务中。'
+                : '首次注册需要有效邀请码，邀请码受次数和有效期限制。'}
+            </span>
+          </div>
+
+          <form
+            className="auth-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void submitAuth()
+            }}
+          >
+            <label htmlFor="auth-email">邮箱</label>
+            <div className="field-control">
+              <EnvelopeSimple aria-hidden="true" />
+              <input
+                id="auth-email"
+                type="email"
+                autoComplete="email"
+                value={authEmail}
+                onChange={(event) => setAuthEmail(event.target.value)}
+                placeholder="you@example.com"
+                required
+              />
+            </div>
+
+            <label htmlFor="auth-password">密码</label>
+            <div className="field-control">
+              <LockKey aria-hidden="true" />
+              <input
+                id="auth-password"
+                type="password"
+                autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                value={authPassword}
+                onChange={(event) => setAuthPassword(event.target.value)}
+                placeholder="至少 8 个字符"
+                minLength={8}
+                required
+              />
+            </div>
+
+            {authMode === 'register' && (
+              <>
+                <label htmlFor="invitation-code">邀请码</label>
+                <div className="field-control">
+                  <Ticket aria-hidden="true" />
+                  <input
+                    id="invitation-code"
+                    value={invitationCode}
+                    onChange={(event) => setInvitationCode(event.target.value)}
+                    placeholder="输入邀请码"
+                    required
+                  />
+                </div>
+              </>
+            )}
+
+            <label htmlFor="auth-server">服务地址</label>
+            <input
+              className="server-field"
+              id="auth-server"
+              value={serverDraft}
+              inputMode="url"
+              autoCapitalize="none"
+              autoCorrect="off"
+              onChange={(event) => setServerDraft(event.target.value)}
+              required
+            />
+
+            {authError && <p className="form-error">{authError}</p>}
+            <button className="primary-button" type="submit" disabled={authBusy}>
+              {authBusy
+                ? '正在连接'
+                : authMode === 'login'
+                  ? '登录'
+                  : '创建账号'}
+            </button>
+          </form>
+
+          <button
+            className="auth-switch"
+            type="button"
+            onClick={() => {
+              setAuthMode(authMode === 'login' ? 'register' : 'login')
+              setAuthError('')
+            }}
+          >
+            {authMode === 'login' ? '有邀请码？创建账号' : '已有账号？返回登录'}
+          </button>
+        </section>
+      </main>
+    )
+  }
+
   return (
     <main className="app-shell">
       {screen === 'home' && (
@@ -228,14 +510,24 @@ export default function App() {
                 <span>私人实时 Agent</span>
               </div>
             </div>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="打开设置"
-              onClick={() => setScreen('settings')}
-            >
-              <GearSix />
-            </button>
+            <div className="header-actions">
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="聊天历史"
+                onClick={() => setScreen('history')}
+              >
+                <ClockCounterClockwise />
+              </button>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="打开设置"
+                onClick={() => setScreen('settings')}
+              >
+                <GearSix />
+              </button>
+            </div>
           </header>
 
           <div className="ready-state">
@@ -274,6 +566,114 @@ export default function App() {
         </section>
       )}
 
+      {screen === 'history' && (
+        <section className="history-screen">
+          <header className="screen-header">
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="返回"
+              onClick={() => setScreen('home')}
+            >
+              <ArrowLeft />
+            </button>
+            <h1>聊天历史</h1>
+            <span className="header-spacer" />
+          </header>
+
+          <div className="history-heading">
+            <p>{user.email}</p>
+            <h2>最近聊过的内容</h2>
+          </div>
+
+          {historyBusy && (
+            <div className="history-skeleton" aria-label="正在加载">
+              <span />
+              <span />
+              <span />
+            </div>
+          )}
+          {historyError && <div className="history-error">{historyError}</div>}
+          {!historyBusy && !historyError && historyItems.length === 0 && (
+            <div className="history-empty">
+              <ChatCircleDots />
+              <h2>还没有聊天记录</h2>
+              <p>完成第一次语音或视频对话后，文本内容会出现在这里。</p>
+              <button type="button" onClick={() => openCall('audio')}>
+                开始语音通话
+              </button>
+            </div>
+          )}
+          {!historyBusy && historyItems.length > 0 && (
+            <div className="history-list">
+              {historyItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedConversation(item)
+                    setScreen('conversation')
+                  }}
+                >
+                  <div>
+                    <strong>{item.title || '未命名对话'}</strong>
+                    <time>{formatHistoryTime(item.updated_at)}</time>
+                  </div>
+                  <p>{item.preview || '这次对话还没有文本内容'}</p>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {screen === 'conversation' && selectedConversation && (
+        <section className="history-screen conversation-history-screen">
+          <header className="screen-header">
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="返回聊天历史"
+              onClick={() => setScreen('history')}
+            >
+              <ArrowLeft />
+            </button>
+            <h1>聊天内容</h1>
+            <span className="header-spacer" />
+          </header>
+
+          <div className="conversation-title">
+            <h2>{selectedConversation.title || '未命名对话'}</h2>
+            <time>{formatHistoryTime(selectedConversation.updated_at)}</time>
+          </div>
+
+          {historyBusy && (
+            <div className="message-skeleton" aria-label="正在加载聊天内容">
+              <span />
+              <span />
+              <span />
+            </div>
+          )}
+          {historyError && <div className="history-error">{historyError}</div>}
+          {!historyBusy && !historyError && (
+            <div className="message-history">
+              {historyMessages.map((message) => (
+                <article
+                  key={message.id}
+                  className={message.role === 'user' ? 'is-user' : 'is-assistant'}
+                >
+                  <div>
+                    <strong>{message.role === 'user' ? '你' : 'Ripple'}</strong>
+                    <time>{formatHistoryTime(message.created_at)}</time>
+                  </div>
+                  <p>{message.content}</p>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
       {screen === 'settings' && (
         <section className="settings-screen">
           <header className="screen-header">
@@ -303,6 +703,16 @@ export default function App() {
             <p>使用明文 WebSocket 连接。只需填写 IP 和端口。</p>
             <button className="primary-button" type="button" onClick={saveSettings}>
               保存
+            </button>
+          </div>
+          <div className="account-panel">
+            <div>
+              <span>当前账号</span>
+              <strong>{user.email}</strong>
+            </div>
+            <button type="button" onClick={() => void signOut()}>
+              <SignOut />
+              退出登录
             </button>
           </div>
         </section>

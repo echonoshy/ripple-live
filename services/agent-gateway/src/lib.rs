@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod audio;
+pub mod auth;
 pub mod capabilities;
 pub mod config;
 pub mod context;

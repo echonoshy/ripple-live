@@ -90,6 +90,30 @@ npm run build
 
 Follow `apps/android/README.md` for Android SDK setup and APK builds.
 
+## Accounts and invitations
+
+Ripple Live requires an account before opening a realtime conversation. Set one
+or more comma-separated invitation codes before starting the gateway:
+
+```bash
+RIPPLE_INVITE_CODES=first-private-code,second-private-code
+RIPPLE_INVITE_MAX_USES=10
+RIPPLE_INVITE_TTL_HOURS=168
+```
+
+Each code has a redemption limit and an expiration time measured from when the
+gateway first stores it. Restarting the gateway does not extend that expiration.
+The first registration uses an email address, password, and invitation code.
+After that, the user signs in with email and password. The client stores a
+revocable access token locally. `RIPPLE_AUTH_TOKEN_TTL_HOURS` defaults to 720
+hours.
+
+Authenticated text clients can use `POST /v1/responses` with a string `input`
+and optional `conversation` ID. The response implements the non-streaming text
+subset of the Responses API shape. Image and file inputs, SSE streaming, and
+token usage accounting are not implemented yet. Realtime audio and video
+continue to use the WebSocket route.
+
 ## Security
 
 The first deployment keeps the existing unauthenticated `ws://` transport.

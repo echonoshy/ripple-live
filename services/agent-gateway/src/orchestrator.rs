@@ -67,6 +67,73 @@ impl AgentOrchestrator {
         self.tools.external_tool_count()
     }
 
+    pub async fn run_text_response(
+        &self,
+        conversation_id: &str,
+        input: &str,
+    ) -> anyhow::Result<String> {
+        let input = input.trim();
+        if input.is_empty() {
+            anyhow::bail!("input 不能为空");
+        }
+        self.context
+            .add_turn(conversation_id, "user", input, None)
+            .await?;
+        let compiled = self.context_compiler.compile(conversation_id).await?;
+        let mut messages = vec![json!({"role": "system", "content": SYSTEM_PROMPT})];
+        messages.extend(compiled.messages);
+        let tools = self.tools.schemas();
+
+        for round in 0..self.settings.max_tool_rounds {
+            let tool_choice = if round == 0 {
+                self.tools
+                    .select_forced_tool(input)
+                    .map(|name| json!({"type": "function", "function": {"name": name}}))
+                    .unwrap_or_else(|| json!("auto"))
+            } else {
+                json!("auto")
+            };
+            let reply = self
+                .adapters
+                .complete(&messages, &tools, tool_choice)
+                .await?;
+            messages.push(reply.raw_message);
+            if reply.tool_calls.is_empty() {
+                let output = reply.content.trim().to_owned();
+                if output.is_empty() {
+                    anyhow::bail!("模型没有生成回复");
+                }
+                self.context
+                    .add_turn(conversation_id, "assistant", &output, None)
+                    .await?;
+                return Ok(output);
+            }
+            if !reply.content.trim().is_empty() {
+                anyhow::bail!("模型同时返回了文本和工具调用");
+            }
+            for call in reply.tool_calls {
+                let result = self
+                    .tools
+                    .execute(conversation_id, &call.name, &call.arguments)
+                    .await;
+                self.context
+                    .record_event(
+                        conversation_id,
+                        "tool.result",
+                        &json!({
+                            "call_id": call.id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                            "result": result
+                        }),
+                    )
+                    .await?;
+                messages.push(tool_result_message(&call, &result));
+            }
+        }
+        anyhow::bail!("工具调用轮次超过限制")
+    }
+
     pub async fn run_turn(
         &self,
         session_id: &str,

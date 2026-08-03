@@ -16,6 +16,7 @@ export type SessionState =
 type RealtimeEvent = {
   type: string
   session_id?: string
+  conversation_id?: string
   text?: string
   delta?: string
   audio?: string
@@ -33,6 +34,8 @@ type Transport = {
 
 type SessionOptions = {
   server: string
+  accessToken: string
+  conversationId?: string
   mode: RealtimeMode
   onState: (state: SessionState) => void
   onError: (message: string) => void
@@ -42,6 +45,7 @@ type SessionOptions = {
   onAudio: (audio: Float32Array) => void
   onAudioDone: () => void
   onReady: () => Promise<void>
+  onConversation: (conversationId: string) => void
 }
 
 function float32ToBase64(samples: Float32Array) {
@@ -121,7 +125,7 @@ async function connectTauriWebSocket(
 
 export class RealtimeSession {
   private readonly options: SessionOptions
-  private readonly sessionId = crypto.randomUUID()
+  private conversationId: string | null
   private transport: Transport | null = null
   private ready = false
   private closed = false
@@ -133,13 +137,18 @@ export class RealtimeSession {
 
   constructor(options: SessionOptions) {
     this.options = options
+    this.conversationId = options.conversationId ?? null
   }
 
   async connect() {
-    const sessionId = encodeURIComponent(this.sessionId)
-    const url = `ws://${normalizeServer(this.options.server)}/v1/agent/realtime?mode=${this.options.mode}&session_id=${sessionId}`
+    const params = new URLSearchParams({
+      mode: this.options.mode,
+      access_token: this.options.accessToken,
+    })
+    if (this.conversationId) params.set('conversation_id', this.conversationId)
+    const url = `ws://${normalizeServer(this.options.server)}/v1/agent/realtime?${params}`
     console.info('[Ripple Live] connecting session', {
-      sessionId: this.sessionId,
+      conversationId: this.conversationId,
       mode: this.options.mode,
     })
     this.options.onState('connecting')
@@ -213,13 +222,16 @@ export class RealtimeSession {
 
     switch (event.type) {
       case 'session.created':
+        this.conversationId =
+          event.conversation_id ?? event.session_id ?? this.conversationId
+        if (this.conversationId) this.options.onConversation(this.conversationId)
         console.info('[Ripple Live] session created', {
-          sessionId: event.session_id ?? this.sessionId,
+          conversationId: this.conversationId,
         })
         break
       case 'session.ready':
         console.info('[Ripple Live] session ready', {
-          sessionId: event.session_id ?? this.sessionId,
+          conversationId: event.session_id ?? this.conversationId,
         })
         this.ready = true
         this.options.onState('listening')
@@ -287,7 +299,7 @@ export class RealtimeSession {
         break
       case 'error':
         console.error('[Ripple Live] session error', {
-          sessionId: this.sessionId,
+          conversationId: this.conversationId,
           responseId: event.response_id,
           message: event.message,
         })
@@ -376,7 +388,7 @@ export class RealtimeSession {
       }
     }
     console.info('[Ripple Live] session closed', {
-      sessionId: this.sessionId,
+      conversationId: this.conversationId,
     })
     this.options.onState('ended')
   }
