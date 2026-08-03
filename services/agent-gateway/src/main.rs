@@ -19,8 +19,8 @@ use ripple_agent_gateway::{
     adapters::ModelAdapters,
     audio::decode_le_f32,
     config::Settings,
-    context::ContextStore,
-    memory::{MemoryService, UpdateMemoryRequest},
+    context::{ContextStore, LibraryAction, LibraryScope},
+    memory::MemoryService,
     orchestrator::AgentOrchestrator,
     protocol::{ClientEvent, VideoFrame},
 };
@@ -81,22 +81,37 @@ async fn main() -> anyhow::Result<()> {
         memories,
         orchestrator,
     };
+    let app = app(state);
+
+    let listener = tokio::net::TcpListener::bind(settings.address).await?;
+    info!(address = %settings.address, "Ripple Rust Agent Gateway started");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn app(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(HeaderValue::from_static("*"))
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
         .allow_headers(tower_http::cors::Any);
-    let app = Router::new()
+    Router::new()
         .route("/health", get(health))
         .route("/v1/auth/register", post(register))
         .route("/v1/auth/login", post(login))
         .route("/v1/auth/me", get(me))
         .route("/v1/auth/logout", post(logout))
         .route("/v1/conversations", get(list_conversations))
+        .route("/v1/conversations/batch", post(batch_conversations))
+        .route(
+            "/v1/conversations/{conversation_id}",
+            axum::routing::patch(update_conversation).delete(delete_conversation),
+        )
         .route(
             "/v1/conversations/{conversation_id}/messages",
             get(conversation_messages),
         )
         .route("/v1/memories", get(list_memories))
+        .route("/v1/memories/batch", post(batch_memories))
         .route(
             "/v1/memories/{memory_id}",
             get(get_memory).patch(update_memory).delete(delete_memory),
@@ -112,12 +127,7 @@ async fn main() -> anyhow::Result<()> {
                     .level(Level::INFO),
             ),
         )
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(settings.address).await?;
-    info!(address = %settings.address, "Ripple Rust Agent Gateway started");
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(state)
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
@@ -149,6 +159,36 @@ struct LoginRequest {
 #[derive(Deserialize)]
 struct ListQuery {
     limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LibraryListQuery {
+    #[serde(default)]
+    scope: LibraryScope,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    query: String,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LibraryPatch {
+    is_pinned: Option<bool>,
+    archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchMutation {
+    ids: Vec<String>,
+    action: LibraryAction,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryPatch {
+    user_note: Option<String>,
+    is_pinned: Option<bool>,
+    archived: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -220,7 +260,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
 async fn list_conversations(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<ListQuery>,
+    Query(query): Query<LibraryListQuery>,
 ) -> Response {
     let user = match authenticated_user(&state, &headers).await {
         Ok(user) => user,
@@ -228,11 +268,115 @@ async fn list_conversations(
     };
     match state
         .context
-        .list_conversations(&user.id, query.limit.unwrap_or(50))
+        .list_conversations(
+            &user.id,
+            query.scope,
+            query.pinned,
+            &query.query,
+            query.limit.unwrap_or(50),
+        )
         .await
     {
         Ok(conversations) => Json(json!({"data": conversations})).into_response(),
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn update_conversation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<LibraryPatch>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    if request.is_pinned.is_none() && request.archived.is_none() {
+        return api_error(StatusCode::BAD_REQUEST, "至少需要提供一个修改字段");
+    }
+    if let Some(is_pinned) = request.is_pinned
+        && let Err(error) = state
+            .context
+            .mutate_conversations(
+                &user.id,
+                std::slice::from_ref(&conversation_id),
+                if is_pinned {
+                    LibraryAction::Pin
+                } else {
+                    LibraryAction::Unpin
+                },
+            )
+            .await
+    {
+        return mutation_error(error);
+    }
+    if let Some(archived) = request.archived
+        && let Err(error) = state
+            .context
+            .mutate_conversations(
+                &user.id,
+                std::slice::from_ref(&conversation_id),
+                if archived {
+                    LibraryAction::Archive
+                } else {
+                    LibraryAction::Unarchive
+                },
+            )
+            .await
+    {
+        return mutation_error(error);
+    }
+    match state
+        .context
+        .conversation_summary(&user.id, &conversation_id)
+        .await
+    {
+        Ok(Some(conversation)) => Json(json!({"data": conversation})).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "对话不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn delete_conversation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .mutate_conversations(
+            &user.id,
+            std::slice::from_ref(&conversation_id),
+            LibraryAction::Delete,
+        )
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => mutation_error(error),
+    }
+}
+
+async fn batch_conversations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BatchMutation>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .mutate_conversations(&user.id, &request.ids, request.action)
+        .await
+    {
+        Ok(updated) => Json(json!({"updated": updated})).into_response(),
+        Err(error) => mutation_error(error),
     }
 }
 
@@ -260,7 +404,7 @@ async fn conversation_messages(
 async fn list_memories(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<ListQuery>,
+    Query(query): Query<LibraryListQuery>,
 ) -> Response {
     let user = match authenticated_user(&state, &headers).await {
         Ok(user) => user,
@@ -268,7 +412,13 @@ async fn list_memories(
     };
     match state
         .memories
-        .list(&user.id, query.limit.unwrap_or(50).clamp(1, 100) as usize)
+        .list(
+            &user.id,
+            query.scope,
+            query.pinned,
+            &query.query,
+            query.limit.unwrap_or(50).clamp(1, 100) as usize,
+        )
         .await
     {
         Ok(memories) => Json(json!({"data": memories})).into_response(),
@@ -298,7 +448,68 @@ async fn update_memory(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(memory_id): Path<String>,
-    Json(request): Json<UpdateMemoryRequest>,
+    Json(request): Json<MemoryPatch>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    if request.user_note.is_none() && request.is_pinned.is_none() && request.archived.is_none() {
+        return api_error(StatusCode::BAD_REQUEST, "至少需要提供一个修改字段");
+    }
+    match state.memories.get(&user.id, &memory_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "记忆不存在"),
+        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+    if let Some(note) = request.user_note
+        && let Err(error) = state.memories.update(&user.id, &memory_id, &note).await
+    {
+        return api_error(StatusCode::BAD_REQUEST, &error.to_string());
+    }
+    if let Some(is_pinned) = request.is_pinned
+        && let Err(error) = state
+            .memories
+            .mutate(
+                &user.id,
+                std::slice::from_ref(&memory_id),
+                if is_pinned {
+                    LibraryAction::Pin
+                } else {
+                    LibraryAction::Unpin
+                },
+            )
+            .await
+    {
+        return mutation_error(error);
+    }
+    if let Some(archived) = request.archived
+        && let Err(error) = state
+            .memories
+            .mutate(
+                &user.id,
+                std::slice::from_ref(&memory_id),
+                if archived {
+                    LibraryAction::Archive
+                } else {
+                    LibraryAction::Unarchive
+                },
+            )
+            .await
+    {
+        return mutation_error(error);
+    }
+    match state.memories.get(&user.id, &memory_id).await {
+        Ok(Some(memory)) => Json(json!({"data": memory.memory})).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "记忆不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn batch_memories(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BatchMutation>,
 ) -> Response {
     let user = match authenticated_user(&state, &headers).await {
         Ok(user) => user,
@@ -306,16 +517,11 @@ async fn update_memory(
     };
     match state
         .memories
-        .update(&user.id, &memory_id, &request.user_note)
+        .mutate(&user.id, &request.ids, request.action)
         .await
     {
-        Ok(true) => match state.memories.get(&user.id, &memory_id).await {
-            Ok(Some(memory)) => Json(json!({"data": memory.memory})).into_response(),
-            Ok(None) => api_error(StatusCode::NOT_FOUND, "记忆不存在"),
-            Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
-        },
-        Ok(false) => api_error(StatusCode::NOT_FOUND, "记忆不存在"),
-        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+        Ok(updated) => Json(json!({"updated": updated})).into_response(),
+        Err(error) => mutation_error(error),
     }
 }
 
@@ -527,6 +733,18 @@ fn api_error(status: StatusCode, message: &str) -> Response {
         })),
     )
         .into_response()
+}
+
+fn mutation_error(error: anyhow::Error) -> Response {
+    let message = error.to_string();
+    let status = if message.contains("不存在") {
+        StatusCode::NOT_FOUND
+    } else if message.starts_with("ids ") {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    api_error(status, &message)
 }
 
 fn unix_timestamp() -> i64 {
@@ -904,6 +1122,287 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: String, sess
     .await;
     drop(event_sender);
     let _ = writer.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, header::AUTHORIZATION},
+    };
+    use ripple_agent_gateway::{adapters::ModelAdapters, memory::CreateMemoryRequest};
+    use serde_json::Value;
+    use tempfile::TempDir;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    async fn test_state() -> (TempDir, AppState, String, String, String) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings = Settings::from_env().unwrap();
+        settings.data_dir = directory.path().join("data");
+        settings.skills_dir = directory.path().join("skills");
+        settings.agent_backend = "mock".to_owned();
+        settings.asr_backend = "mock".to_owned();
+        settings.tts_backend = "mock".to_owned();
+        tokio::fs::create_dir_all(&settings.skills_dir)
+            .await
+            .unwrap();
+        let settings = Arc::new(settings);
+        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        context
+            .seed_invitation_codes(&["route-one".to_owned(), "route-two".to_owned()], 1, 24)
+            .await
+            .unwrap();
+        let (user, token) = context
+            .register_user("route@example.com", "password-route", "route-one", 24)
+            .await
+            .unwrap();
+        let (other, _) = context
+            .register_user("other-route@example.com", "password-route", "route-two", 24)
+            .await
+            .unwrap();
+        let conversation = context.create_conversation(&user.id).await.unwrap();
+        context
+            .add_turn(&conversation, "user", "蓝色转接头放在哪里", None)
+            .await
+            .unwrap();
+        let foreign = context.create_conversation(&other.id).await.unwrap();
+        let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
+            .await
+            .unwrap();
+        let orchestrator = AgentOrchestrator::new(
+            Arc::clone(&settings),
+            context.clone(),
+            ModelAdapters::new((*settings).clone()).unwrap(),
+            memories.clone(),
+        )
+        .unwrap();
+        (
+            directory,
+            AppState {
+                settings,
+                context,
+                memories,
+                orchestrator,
+            },
+            token,
+            conversation,
+            foreign,
+        )
+    }
+
+    fn authenticated_request(method: &str, uri: &str, token: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    }
+
+    async fn json_body(response: Response) -> Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn conversation_routes_auth_filter_search_and_mutate_atomically() {
+        let (_directory, state, token, conversation, foreign) = test_state().await;
+
+        let unauthorized = app(state.clone())
+            .oneshot(
+                Request::patch(format!("/v1/conversations/{conversation}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"is_pinned":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let pinned = app(state.clone())
+            .oneshot(authenticated_request(
+                "PATCH",
+                &format!("/v1/conversations/{conversation}"),
+                &token,
+                r#"{"is_pinned":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(pinned.status(), StatusCode::OK);
+        assert_eq!(json_body(pinned).await["data"]["is_pinned"], true);
+
+        let foreign_patch = app(state.clone())
+            .oneshot(authenticated_request(
+                "PATCH",
+                &format!("/v1/conversations/{foreign}"),
+                &token,
+                r#"{"archived":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(foreign_patch.status(), StatusCode::NOT_FOUND);
+
+        let mixed = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                "/v1/conversations/batch",
+                &token,
+                &serde_json::json!({
+                    "ids": [conversation, foreign],
+                    "action": "archive"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(mixed.status(), StatusCode::NOT_FOUND);
+
+        let active = app(state.clone())
+            .oneshot(authenticated_request(
+                "GET",
+                "/v1/conversations?scope=active&query=%E8%BD%AC%E6%8E%A5%E5%A4%B4",
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(active.status(), StatusCode::OK);
+        assert_eq!(json_body(active).await["data"].as_array().unwrap().len(), 1);
+
+        let empty = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                "/v1/conversations/batch",
+                &token,
+                r#"{"ids":[],"action":"delete"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+        let archived = app(state.clone())
+            .oneshot(authenticated_request(
+                "PATCH",
+                &format!("/v1/conversations/{conversation}"),
+                &token,
+                r#"{"archived":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(archived.status(), StatusCode::OK);
+        let archived_list = app(state.clone())
+            .oneshot(authenticated_request(
+                "GET",
+                "/v1/conversations?scope=archived",
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            json_body(archived_list).await["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let deleted = app(state)
+            .oneshot(authenticated_request(
+                "DELETE",
+                &format!("/v1/conversations/{conversation}"),
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn memory_routes_patch_filter_batch_and_delete() {
+        let (_directory, state, token, conversation, _) = test_state().await;
+        let turn = state
+            .context
+            .add_turn(&conversation, "user", "记住电源线", None)
+            .await
+            .unwrap();
+        let memory = state
+            .memories
+            .create(CreateMemoryRequest {
+                user_id: state
+                    .context
+                    .authenticate(&token)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                conversation_id: conversation,
+                source_turn_id: turn,
+                response_id: "route-memory-response".to_owned(),
+                tool_call_id: "route-memory-call".to_owned(),
+                user_note: "白色电源线".to_owned(),
+                visual_summary: "电源线放在桌面".to_owned(),
+                frames: vec![],
+            })
+            .await
+            .unwrap()
+            .memory;
+
+        let patched = app(state.clone())
+            .oneshot(authenticated_request(
+                "PATCH",
+                &format!("/v1/memories/{}", memory.id),
+                &token,
+                r#"{"user_note":"白色 USB 电源线","is_pinned":true,"archived":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(patched.status(), StatusCode::OK);
+        let patched = json_body(patched).await;
+        assert_eq!(patched["data"]["user_note"], "白色 USB 电源线");
+        assert_eq!(patched["data"]["is_pinned"], true);
+        assert!(patched["data"]["archived_at"].is_number());
+
+        let archived = app(state.clone())
+            .oneshot(authenticated_request(
+                "GET",
+                "/v1/memories?scope=archived&query=USB",
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            json_body(archived).await["data"].as_array().unwrap().len(),
+            1
+        );
+
+        let empty = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                "/v1/memories/batch",
+                &token,
+                r#"{"ids":[],"action":"archive"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+        let deleted = app(state)
+            .oneshot(authenticated_request(
+                "DELETE",
+                &format!("/v1/memories/{}", memory.id),
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    }
 }
 
 fn append_audio(

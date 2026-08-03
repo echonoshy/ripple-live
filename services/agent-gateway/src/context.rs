@@ -23,18 +23,13 @@ pub struct ConversationSummary {
     pub archived_at: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LibraryScope {
+    #[default]
     Active,
     Archived,
     All,
-}
-
-impl Default for LibraryScope {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -546,6 +541,33 @@ impl ContextStore {
                 archived_at: row.get("archived_at"),
             })
             .collect())
+    }
+
+    pub async fn conversation_summary(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> anyhow::Result<Option<ConversationSummary>> {
+        let row = sqlx::query(
+            "SELECT c.id, c.title, c.created_at, c.updated_at,
+                c.is_pinned, c.archived_at,
+                COALESCE((SELECT content FROM turns t WHERE t.session_id = c.id
+                          ORDER BY t.id DESC LIMIT 1), '') AS preview
+             FROM conversations c WHERE c.user_id = ? AND c.id = ?",
+        )
+        .bind(user_id)
+        .bind(conversation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| ConversationSummary {
+            id: row.get("id"),
+            title: row.get("title"),
+            preview: row.get("preview"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+            is_pinned: row.get::<i64, _>("is_pinned") != 0,
+            archived_at: row.get("archived_at"),
+        }))
     }
 
     pub async fn mutate_conversations(
@@ -1091,6 +1113,92 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn migrates_legacy_memory_sources_to_nullable_without_losing_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite3");
+        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        for statement in [
+            "CREATE TABLE users (
+                id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL, created_at REAL NOT NULL
+            )",
+            "CREATE TABLE conversations (
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '新对话',
+                created_at REAL NOT NULL, updated_at REAL NOT NULL
+            )",
+            "CREATE TABLE turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                role TEXT NOT NULL, content TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL
+            )",
+            "CREATE TABLE memory_items (
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL, source_turn_id INTEGER NOT NULL,
+                source_response_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'visual',
+                user_note TEXT NOT NULL, visual_summary TEXT NOT NULL DEFAULT '',
+                cover_asset_id TEXT, captured_at REAL,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+                FOREIGN KEY(source_turn_id) REFERENCES turns(id)
+            )",
+            "INSERT INTO users VALUES ('user-1', 'legacy@example.com', 'hash', 1)",
+            "INSERT INTO conversations VALUES ('conv-1', 'user-1', '旧对话', 1, 1)",
+            "INSERT INTO turns(id, session_id, role, content, created_at)
+             VALUES (1, 'conv-1', 'user', '旧消息', 1)",
+            "INSERT INTO memory_items(
+                id, user_id, conversation_id, source_turn_id, source_response_id,
+                user_note, created_at, updated_at
+             ) VALUES ('mem-1', 'user-1', 'conv-1', 1, 'response-1', '旧记忆', 1, 1)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+
+        let store = ContextStore::open(&path).await.unwrap();
+        let columns = sqlx::query("PRAGMA table_info(memory_items)")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        for source in ["conversation_id", "source_turn_id"] {
+            let column = columns
+                .iter()
+                .find(|row| row.get::<String, _>("name") == source)
+                .unwrap();
+            assert_eq!(column.get::<i64, _>("notnull"), 0);
+        }
+        let row = sqlx::query(
+            "SELECT conversation_id, source_turn_id, is_pinned, archived_at
+             FROM memory_items WHERE id = 'mem-1'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("conversation_id").as_deref(),
+            Some("conv-1")
+        );
+        assert_eq!(row.get::<Option<i64>, _>("source_turn_id"), Some(1));
+        assert_eq!(row.get::<i64, _>("is_pinned"), 0);
+        assert_eq!(row.get::<Option<f64>, _>("archived_at"), None);
+        assert!(
+            sqlx::query("PRAGMA foreign_key_check")
+                .fetch_all(store.pool())
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }
