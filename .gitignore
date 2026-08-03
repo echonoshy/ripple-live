@@ -21,6 +21,7 @@ __pycache__/
 /apps/mobile/src-tauri/gen/android/local.properties
 
 # Service state
+/deploy/agent-stack/.env
 /deploy/agent-stack/data/
 /deploy/agent-stack/logs/
 /deploy/agent-stack/run/
