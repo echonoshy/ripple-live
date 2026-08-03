@@ -139,21 +139,10 @@ function formatHistoryTime(timestamp: number) {
   }).format(new Date(timestamp * 1000))
 }
 
-function normalizeServerAddress(value: string) {
-  return value
-    .trim()
-    .replace(/^https?:\/\//, '')
-    .replace(/^wss?:\/\//, '')
-    .replace(/\/+$/, '')
-}
-
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home')
   const [mode, setMode] = useState<RealtimeMode>('audio')
-  const [serverDraft, setServerDraft] = useState(
-    () => localStorage.getItem('ripple-agent-server') ?? DEFAULT_SERVER,
-  )
-  const [server, setServer] = useState(serverDraft)
+  const server = DEFAULT_SERVER
   const [sessionState, setSessionState] = useState<SessionState>('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const [assistantText, setAssistantText] = useState('')
@@ -461,31 +450,19 @@ export default function App() {
     await mediaRef.current?.setFacingMode(next)
   }
 
-  const saveSettings = () => {
-    const normalized = normalizeServerAddress(serverDraft)
-    setServer(normalized || DEFAULT_SERVER)
-    setServerDraft(normalized || DEFAULT_SERVER)
-    localStorage.setItem('ripple-agent-server', normalized || DEFAULT_SERVER)
-    setScreen('home')
-  }
-
   const submitAuth = async () => {
-    const normalized = normalizeServerAddress(serverDraft) || DEFAULT_SERVER
     setAuthBusy(true)
     setAuthError('')
     try {
       const session =
         authMode === 'login'
-          ? await login(normalized, authEmail, authPassword)
+          ? await login(server, authEmail, authPassword)
           : await register(
-              normalized,
+              server,
               authEmail,
               authPassword,
               invitationCode,
             )
-      setServer(normalized)
-      setServerDraft(normalized)
-      localStorage.setItem('ripple-agent-server', normalized)
       localStorage.setItem('ripple-access-token', session.access_token)
       setAccessToken(session.access_token)
       setUser(session.user)
@@ -815,18 +792,6 @@ export default function App() {
                 </div>
               </>
             )}
-
-            <label htmlFor="auth-server">服务地址</label>
-            <input
-              className="server-field"
-              id="auth-server"
-              value={serverDraft}
-              inputMode="url"
-              autoCapitalize="none"
-              autoCorrect="off"
-              onChange={(event) => setServerDraft(event.target.value)}
-              required
-            />
 
             {authError && <p className="form-error">{authError}</p>}
             <button className="primary-button" type="submit" disabled={authBusy}>
@@ -1307,26 +1272,10 @@ export default function App() {
             >
               <ArrowLeft />
             </button>
-            <h1>连接设置</h1>
+            <h1>账户设置</h1>
             <span className="header-spacer" />
           </header>
 
-          <div className="settings-form">
-            <label htmlFor="server">服务地址</label>
-            <input
-              id="server"
-              value={serverDraft}
-              inputMode="url"
-              autoCapitalize="none"
-              autoCorrect="off"
-              onChange={(event) => setServerDraft(event.target.value)}
-              placeholder="140.143.229.103:8700"
-            />
-            <p>使用明文 WebSocket 连接。只需填写 IP 和端口。</p>
-            <button className="primary-button" type="button" onClick={saveSettings}>
-              保存
-            </button>
-          </div>
           <div className="account-panel">
             <div>
               <span>当前账号</span>

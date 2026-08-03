@@ -76,7 +76,17 @@ test('mobile package has the supplied icon and iOS media permissions', () => {
     assert.match(plist, /<key>NSMicrophoneUsageDescription<\/key>/)
     assert.match(plist, /Ripple Live 使用相机进行实时视频通话。/)
     assert.match(plist, /Ripple Live 使用麦克风进行实时语音通话。/)
+    assert.match(plist, /<key>NSAppTransportSecurity<\/key>/)
+    assert.match(plist, /<key>NSExceptionDomains<\/key>/)
+    assert.match(plist, /<key>140\.143\.229\.103<\/key>/)
+    assert.match(plist, /<key>NSExceptionAllowsInsecureHTTPLoads<\/key>/)
   }
+})
+
+test('mobile app keeps the service address out of visible forms', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  assert.doesNotMatch(appSource, /htmlFor="auth-server"/)
+  assert.doesNotMatch(appSource, /htmlFor="server">服务地址/)
 })
 
 test('mobile home gives voice and video equal Kiro-inspired entries', () => {
