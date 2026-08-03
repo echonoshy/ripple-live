@@ -217,6 +217,18 @@ impl ContextStore {
             .await?;
         self.ensure_column("memory_items", "archived_at", "REAL")
             .await?;
+        sqlx::query(
+            "UPDATE conversations SET is_pinned = 0
+             WHERE archived_at IS NOT NULL AND is_pinned != 0",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "UPDATE memory_items SET is_pinned = 0
+             WHERE archived_at IS NOT NULL AND is_pinned != 0",
+        )
+        .execute(&self.pool)
+        .await?;
         self.ensure_column("todos", "conversation_id", "TEXT")
             .await?;
         self.ensure_column("todos", "source_turn_id", "INTEGER")
@@ -631,6 +643,34 @@ impl ContextStore {
         }))
     }
 
+    pub async fn rename_conversation(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        title: &str,
+    ) -> anyhow::Result<()> {
+        let title = title.trim();
+        if title.is_empty() {
+            anyhow::bail!("对话名称不能为空");
+        }
+        if title.chars().count() > 80 {
+            anyhow::bail!("对话名称不能超过 80 个字符");
+        }
+        let result = sqlx::query(
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+        )
+        .bind(title)
+        .bind(unix_time())
+        .bind(conversation_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!("对话不存在");
+        }
+        Ok(())
+    }
+
     pub async fn mutate_conversations(
         &self,
         user_id: &str,
@@ -690,10 +730,10 @@ impl ContextStore {
         } else {
             let mut update = QueryBuilder::<Sqlite>::new("UPDATE conversations SET ");
             match action {
-                LibraryAction::Pin => update.push("is_pinned = 1"),
+                LibraryAction::Pin => update.push("is_pinned = CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END"),
                 LibraryAction::Unpin => update.push("is_pinned = 0"),
                 LibraryAction::Archive => {
-                    update.push("archived_at = COALESCE(archived_at, ");
+                    update.push("is_pinned = 0, archived_at = COALESCE(archived_at, ");
                     update.push_bind(unix_time()).push(")")
                 }
                 LibraryAction::Unarchive => update.push("archived_at = NULL"),

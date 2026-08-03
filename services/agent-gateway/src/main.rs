@@ -199,6 +199,7 @@ struct LibraryListQuery {
 
 #[derive(Debug, Deserialize)]
 struct LibraryPatch {
+    title: Option<String>,
     is_pinned: Option<bool>,
     archived: Option<bool>,
 }
@@ -317,8 +318,16 @@ async fn update_conversation(
         Ok(user) => user,
         Err(response) => return response,
     };
-    if request.is_pinned.is_none() && request.archived.is_none() {
+    if request.title.is_none() && request.is_pinned.is_none() && request.archived.is_none() {
         return api_error(StatusCode::BAD_REQUEST, "至少需要提供一个修改字段");
+    }
+    if let Some(title) = request.title
+        && let Err(error) = state
+            .context
+            .rename_conversation(&user.id, &conversation_id, &title)
+            .await
+    {
+        return mutation_error(error);
     }
     if let Some(is_pinned) = request.is_pinned
         && let Err(error) = state
@@ -1480,7 +1489,7 @@ mod tests {
         assert_eq!(patched.status(), StatusCode::OK);
         let patched = json_body(patched).await;
         assert_eq!(patched["data"]["user_note"], "白色 USB 电源线");
-        assert_eq!(patched["data"]["is_pinned"], true);
+        assert_eq!(patched["data"]["is_pinned"], false);
         assert!(patched["data"]["archived_at"].is_number());
 
         let archived = app(state.clone())

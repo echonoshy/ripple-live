@@ -45,7 +45,7 @@ services/agent-gateway/           Rust WebSocket protocol, tools, context, adapt
 deploy/agent-stack/               Install, download, start, stop, and status
 .cache/models/                    Local model weights (ignored by Git)
 .venv-qwen-vllm/                  uv-managed ASR/VL environment (ignored)
-.venv-vllm-omni/                  uv-managed concurrent TTS environment (ignored)
+.venv-vllm-omni-024/              uv-managed Qwen3-TTS environment (ignored)
 ```
 
 ## Install and run the Agent stack

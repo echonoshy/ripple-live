@@ -706,10 +706,10 @@ impl MemoryService {
         } else {
             let mut update = QueryBuilder::<Sqlite>::new("UPDATE memory_items SET ");
             match action {
-                LibraryAction::Pin => update.push("is_pinned = 1"),
+                LibraryAction::Pin => update.push("is_pinned = CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END"),
                 LibraryAction::Unpin => update.push("is_pinned = 0"),
                 LibraryAction::Archive => {
-                    update.push("archived_at = COALESCE(archived_at, ");
+                    update.push("is_pinned = 0, archived_at = COALESCE(archived_at, ");
                     update.push_bind(unix_time()).push(")")
                 }
                 LibraryAction::Unarchive => update.push("archived_at = NULL"),

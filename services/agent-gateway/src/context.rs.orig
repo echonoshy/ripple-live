@@ -169,6 +169,24 @@ impl ContextStore {
                 PRIMARY KEY(response_id, tool_call_id),
                 FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE CASCADE
             )",
+            "CREATE TABLE IF NOT EXISTS todos (
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL, memory_id TEXT,
+                conversation_id TEXT, source_turn_id INTEGER, source_response_id TEXT,
+                title TEXT NOT NULL, visual_summary TEXT NOT NULL DEFAULT '',
+                cover_asset_id TEXT, due_at REAL, completed_at REAL,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE SET NULL,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+                FOREIGN KEY(source_turn_id) REFERENCES turns(id),
+                FOREIGN KEY(cover_asset_id) REFERENCES assets(id) ON DELETE SET NULL
+            )",
+            "CREATE TABLE IF NOT EXISTS todo_tool_executions (
+                response_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
+                todo_id TEXT NOT NULL,
+                PRIMARY KEY(response_id, tool_call_id),
+                FOREIGN KEY(todo_id) REFERENCES todos(id) ON DELETE CASCADE
+            )",
             "CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, id)",
             "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, id)",
             "CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id, id)",
@@ -177,6 +195,7 @@ impl ContextStore {
             "CREATE INDEX IF NOT EXISTS idx_memory_items_user ON memory_items(user_id, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_memory_assets_memory ON memory_assets(memory_id, ordinal)",
             "CREATE INDEX IF NOT EXISTS idx_turn_attachments_turn ON turn_attachments(turn_id, ordinal)",
+            "CREATE INDEX IF NOT EXISTS idx_todos_user_due ON todos(user_id, completed_at, due_at)",
         ] {
             sqlx::query(statement).execute(&self.pool).await?;
         }
@@ -198,13 +217,67 @@ impl ContextStore {
             .await?;
         self.ensure_column("memory_items", "archived_at", "REAL")
             .await?;
+        sqlx::query(
+            "UPDATE conversations SET is_pinned = 0
+             WHERE archived_at IS NOT NULL AND is_pinned != 0",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "UPDATE memory_items SET is_pinned = 0
+             WHERE archived_at IS NOT NULL AND is_pinned != 0",
+        )
+        .execute(&self.pool)
+        .await?;
+        self.ensure_column("todos", "conversation_id", "TEXT")
+            .await?;
+        self.ensure_column("todos", "source_turn_id", "INTEGER")
+            .await?;
+        self.ensure_column("todos", "source_response_id", "TEXT")
+            .await?;
+        self.ensure_column("todos", "visual_summary", "TEXT NOT NULL DEFAULT ''")
+            .await?;
+        self.ensure_column("todos", "cover_asset_id", "TEXT")
+            .await?;
         self.migrate_memory_sources_nullable().await?;
+        self.migrate_todo_evidence().await?;
         sqlx::query(
             "UPDATE invitation_codes SET use_count = 1
              WHERE used_by IS NOT NULL AND use_count = 0",
         )
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn migrate_todo_evidence(&self) -> anyhow::Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE todos
+             SET visual_summary = COALESCE(NULLIF(visual_summary, ''),
+                    (SELECT m.visual_summary FROM memory_items m WHERE m.id = todos.memory_id), ''),
+                 cover_asset_id = COALESCE(cover_asset_id,
+                    (SELECT m.cover_asset_id FROM memory_items m WHERE m.id = todos.memory_id)),
+                 conversation_id = COALESCE(conversation_id,
+                    (SELECT m.conversation_id FROM memory_items m WHERE m.id = todos.memory_id)),
+                 source_turn_id = COALESCE(source_turn_id,
+                    (SELECT m.source_turn_id FROM memory_items m WHERE m.id = todos.memory_id)),
+                 source_response_id = COALESCE(source_response_id,
+                    (SELECT m.source_response_id FROM memory_items m WHERE m.id = todos.memory_id))
+             WHERE memory_id IS NOT NULL",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM memory_items
+             WHERE id IN (SELECT memory_id FROM todos WHERE memory_id IS NOT NULL)",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("UPDATE todos SET memory_id = NULL WHERE memory_id IS NOT NULL")
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -570,6 +643,34 @@ impl ContextStore {
         }))
     }
 
+    pub async fn rename_conversation(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        title: &str,
+    ) -> anyhow::Result<()> {
+        let title = title.trim();
+        if title.is_empty() {
+            anyhow::bail!("对话名称不能为空");
+        }
+        if title.chars().count() > 80 {
+            anyhow::bail!("对话名称不能超过 80 个字符");
+        }
+        let result = sqlx::query(
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+        )
+        .bind(title)
+        .bind(unix_time())
+        .bind(conversation_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!("对话不存在");
+        }
+        Ok(())
+    }
+
     pub async fn mutate_conversations(
         &self,
         user_id: &str,
@@ -629,10 +730,10 @@ impl ContextStore {
         } else {
             let mut update = QueryBuilder::<Sqlite>::new("UPDATE conversations SET ");
             match action {
-                LibraryAction::Pin => update.push("is_pinned = 1"),
+                LibraryAction::Pin => update.push("is_pinned = CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END"),
                 LibraryAction::Unpin => update.push("is_pinned = 0"),
                 LibraryAction::Archive => {
-                    update.push("archived_at = COALESCE(archived_at, ");
+                    update.push("is_pinned = 0, archived_at = COALESCE(archived_at, ");
                     update.push_bind(unix_time()).push(")")
                 }
                 LibraryAction::Unarchive => update.push("archived_at = NULL"),
