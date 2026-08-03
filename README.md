@@ -28,8 +28,10 @@ The gateway discovers external tools from `skills/*/SKILL.md` and
 the command is executed as a JSON-in/JSON-out child process with a clean
 environment, timeout, output limit, and cancellation on turn interruption.
 
-`skills/system-info` is a minimal read-only example. Add another directory
-with the same layout to register a tool without changing gateway source code.
+`skills/system-info` is a minimal read-only example. `skills/web-research` and
+`skills/weather` register the Rust `ripple-tool` CLI subcommands for Tavily web
+search/extraction and QWeather. Add another directory with the same layout to
+register a tool without changing gateway source code.
 
 ## Repository layout
 

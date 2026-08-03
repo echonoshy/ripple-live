@@ -16,6 +16,10 @@ cargo build \
   --manifest-path "$REPO_ROOT/services/agent-gateway/Cargo.toml" \
   --release \
   --locked
+cargo build \
+  --manifest-path "$REPO_ROOT/tools/ripple-tool/Cargo.toml" \
+  --release \
+  --locked
 
 if [[ ! -x "$REPO_ROOT/.venv-qwen-vllm/bin/python" ]]; then
   "$UV_BIN" venv "$REPO_ROOT/.venv-qwen-vllm" --python 3.12
@@ -42,4 +46,4 @@ fi
   --reinstall \
   "https://github.com/vllm-project/vllm/releases/download/v0.24.0/vllm-0.24.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl"
 
-echo "Rust gateway and uv-managed model environments installed."
+echo "Rust gateway, read-only tool CLI, and uv-managed model environments installed."

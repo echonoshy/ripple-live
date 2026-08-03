@@ -1,32 +1,58 @@
-use std::{collections::HashSet, process::Stdio, time::Duration};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    process::Stdio,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
+    sync::Mutex,
 };
 
 use super::{RegisteredTool, registry::Confirmation};
 
+type RateLimitBuckets = HashMap<(String, String), VecDeque<Instant>>;
+
 #[derive(Clone)]
 pub struct CliRunner {
     max_output_bytes: usize,
+    rate_limits: Arc<Mutex<RateLimitBuckets>>,
 }
 
 impl CliRunner {
     pub fn new(max_output_bytes: usize) -> Self {
         Self {
             max_output_bytes: max_output_bytes.clamp(1_024, 4 * 1024 * 1024),
+            rate_limits: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub async fn execute(&self, tool: &RegisteredTool, arguments: &Value) -> anyhow::Result<Value> {
+    pub async fn execute(
+        &self,
+        tool: &RegisteredTool,
+        arguments: &Value,
+        subject: &str,
+    ) -> anyhow::Result<Value> {
         validate_arguments(&tool.input_schema, arguments)?;
         if tool.confirmation == Confirmation::Always {
             return Ok(json!({
                 "ok": false,
                 "needs_confirmation": true,
                 "message": "这个工具需要用户明确确认后才能执行"
+            }));
+        }
+        if !self.admit(tool, subject).await {
+            return Ok(json!({
+                "ok": false,
+                "error": {
+                    "code": "RATE_LIMITED",
+                    "message": "这个工具调用过于频繁，请稍后再试",
+                    "retryable": true
+                },
+                "meta": {"provider": "gateway"}
             }));
         }
 
@@ -98,6 +124,28 @@ impl CliRunner {
         }
         Ok(serde_json::from_slice(&stdout)?)
     }
+
+    async fn admit(&self, tool: &RegisteredTool, subject: &str) -> bool {
+        let limit = tool.rate_limit_per_minute;
+        if limit == 0 {
+            return true;
+        }
+        let now = Instant::now();
+        let key = (subject.to_owned(), tool.name.clone());
+        let mut limits = self.rate_limits.lock().await;
+        let calls = limits.entry(key).or_default();
+        while calls
+            .front()
+            .is_some_and(|time| now.duration_since(*time) >= Duration::from_secs(60))
+        {
+            calls.pop_front();
+        }
+        if calls.len() >= limit as usize {
+            return false;
+        }
+        calls.push_back(now);
+        true
+    }
 }
 
 fn validate_arguments(schema: &Value, arguments: &Value) -> anyhow::Result<()> {
@@ -128,6 +176,66 @@ fn validate_arguments(schema: &Value, arguments: &Value) -> anyhow::Result<()> {
             }
         }
     }
+    for (name, value) in object {
+        if let Some(property_schema) = properties.get(name) {
+            validate_value(name, property_schema, value)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_value(name: &str, schema: &Value, value: &Value) -> anyhow::Result<()> {
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array)
+        && !allowed.contains(value)
+    {
+        anyhow::bail!("参数 {name} 不在允许值范围内");
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("string") => {
+            let text = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("参数 {name} 必须是 string"))?;
+            let length = text.chars().count() as u64;
+            if schema
+                .get("minLength")
+                .and_then(Value::as_u64)
+                .is_some_and(|min| length < min)
+            {
+                anyhow::bail!("参数 {name} 长度不足");
+            }
+            if schema
+                .get("maxLength")
+                .and_then(Value::as_u64)
+                .is_some_and(|max| length > max)
+            {
+                anyhow::bail!("参数 {name} 长度超限");
+            }
+        }
+        Some("integer") => {
+            let number = value
+                .as_i64()
+                .ok_or_else(|| anyhow::anyhow!("参数 {name} 必须是 integer"))?;
+            if schema
+                .get("minimum")
+                .and_then(Value::as_i64)
+                .is_some_and(|min| number < min)
+            {
+                anyhow::bail!("参数 {name} 小于最小值");
+            }
+            if schema
+                .get("maximum")
+                .and_then(Value::as_i64)
+                .is_some_and(|max| number > max)
+            {
+                anyhow::bail!("参数 {name} 大于最大值");
+            }
+        }
+        Some("number") if !value.is_number() => anyhow::bail!("参数 {name} 必须是 number"),
+        Some("boolean") if !value.is_boolean() => anyhow::bail!("参数 {name} 必须是 boolean"),
+        Some("array") if !value.is_array() => anyhow::bail!("参数 {name} 必须是 array"),
+        Some("object") if !value.is_object() => anyhow::bail!("参数 {name} 必须是 object"),
+        _ => {}
+    }
     Ok(())
 }
 
@@ -146,10 +254,44 @@ mod tests {
         let registry = SkillRegistry::load(&skills_dir).unwrap();
         let tool = registry.get("system_info").unwrap();
         let result = CliRunner::new(64 * 1024)
-            .execute(tool, &json!({}))
+            .execute(tool, &json!({}), "test-user")
             .await
             .unwrap();
         assert_eq!(result["ok"], json!(true));
         assert!(result["data"]["kernel"].is_string());
+    }
+
+    #[tokio::test]
+    async fn rate_limits_each_user_and_tool_independently() {
+        let skills_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        let registry = SkillRegistry::load(&skills_dir).unwrap();
+        let mut tool = registry.get("system_info").unwrap().clone();
+        tool.rate_limit_per_minute = 1;
+        let runner = CliRunner::new(64 * 1024);
+
+        let first = runner.execute(&tool, &json!({}), "user-a").await.unwrap();
+        let limited = runner.execute(&tool, &json!({}), "user-a").await.unwrap();
+        let other_user = runner.execute(&tool, &json!({}), "user-b").await.unwrap();
+
+        assert_eq!(first["ok"], json!(true));
+        assert_eq!(limited["error"]["code"], json!("RATE_LIMITED"));
+        assert_eq!(other_user["ok"], json!(true));
+    }
+
+    #[test]
+    fn validates_types_ranges_and_enums() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "minimum": 1, "maximum": 8},
+                "topic": {"type": "string", "enum": ["general", "news"], "maxLength": 20}
+            },
+            "required": ["count", "topic"],
+            "additionalProperties": false
+        });
+        assert!(validate_arguments(&schema, &json!({"count": 5, "topic": "news"})).is_ok());
+        assert!(validate_arguments(&schema, &json!({"count": 9, "topic": "news"})).is_err());
+        assert!(validate_arguments(&schema, &json!({"count": 5, "topic": "other"})).is_err());
+        assert!(validate_arguments(&schema, &json!({"count": "5", "topic": "news"})).is_err());
     }
 }

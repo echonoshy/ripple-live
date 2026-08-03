@@ -19,6 +19,7 @@ pub struct RegisteredTool {
     pub command: Vec<String>,
     pub working_dir: PathBuf,
     pub timeout_ms: u64,
+    pub rate_limit_per_minute: u32,
     pub env_allowlist: Vec<String>,
     pub confirmation: Confirmation,
 }
@@ -57,6 +58,8 @@ struct ToolManifest {
     command: Vec<String>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+    #[serde(default)]
+    rate_limit_per_minute: u32,
     #[serde(default)]
     env: Vec<String>,
     #[serde(default)]
@@ -104,6 +107,7 @@ impl SkillRegistry {
                     command: tool.command,
                     working_dir: path.clone(),
                     timeout_ms: tool.timeout_ms.clamp(100, 300_000),
+                    rate_limit_per_minute: tool.rate_limit_per_minute.min(600),
                     env_allowlist: tool.env,
                     confirmation: tool.confirmation,
                 };
@@ -210,5 +214,6 @@ mod tests {
         let registry = SkillRegistry::load(directory.path()).unwrap();
         assert_eq!(registry.len(), 1);
         assert!(registry.get("demo_query").is_some());
+        assert_eq!(registry.get("demo_query").unwrap().rate_limit_per_minute, 0);
     }
 }

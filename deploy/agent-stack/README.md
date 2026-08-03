@@ -112,20 +112,26 @@ Tool JSON schemas and implementations live in
 `schemas` and dispatched by `ToolExecutor`; arbitrary model output is never
 executed as code.
 
-The built-in tools are:
+The native Gateway tools are:
 
-- `web_search` (DuckDuckGo Instant Answer summaries and related sources)
 - `get_current_time`
 - `calculate`
 - `remember`
 - `recall`
 
-`web_search` uses DuckDuckGo's keyless Instant Answer endpoint. It returns a
-compact answer, source snippets, and URLs, but it is not a complete general web
-search API, so some current-events or long-tail queries can return no results.
-Set `RIPPLE_SEARCH_PROXY` when the Gateway host needs a dedicated outbound HTTP
-proxy. The search client has a 12-second timeout and never treats an empty
-result as evidence.
+The external read-only tools are loaded from Skills and executed through the
+standalone Rust `ripple-tool` CLI:
+
+- `web_search` uses Tavily Basic Search and returns bounded source snippets.
+- `web_fetch` uses Tavily Extract for one public HTTP/HTTPS URL.
+- `weather_lookup` uses QWeather GeoAPI and Weather API.
+
+Configure `RIPPLE_TAVILY_API_KEY` plus the QWeather API host, project ID,
+credential ID, and Ed25519 private-key path in `.env`. The Gateway passes only
+the manifest allowlisted variables to each short-lived CLI process. Set
+`RIPPLE_SEARCH_PROXY` when the Gateway host needs a dedicated outbound proxy.
+Tool results use a stable JSON envelope, share a SQLite cache, and never treat
+an empty or failed result as evidence.
 
 ## Context extension
 
