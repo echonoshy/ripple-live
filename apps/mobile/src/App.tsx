@@ -1,4 +1,5 @@
 import {
+  ArrowCounterClockwise,
   ArrowLeft,
   CameraRotate,
   ChatCircleDots,
@@ -17,6 +18,7 @@ import {
   PushPin,
   SignOut,
   NotePencil,
+  Plus,
   Trash,
   Ticket,
   VideoCamera,
@@ -32,11 +34,14 @@ import {
   conversationMessages,
   conversationMutation,
   conversations,
+  createTodo,
   currentUser,
+  deleteTodo,
   login,
   logout as logoutApi,
   memories,
   memoryMutation,
+  renameConversation,
   register,
   updateMemory,
   todos,
@@ -70,6 +75,8 @@ import {
 } from './realtime/RealtimeSession'
 
 const DEFAULT_SERVER = '140.143.229.103:8700'
+const DEFAULT_VIEWPORT = 'width=device-width, initial-scale=1.0'
+const ZOOM_LOCKED_VIEWPORT = `${DEFAULT_VIEWPORT}, maximum-scale=1.0, user-scalable=no`
 
 type Screen =
   | 'home'
@@ -148,6 +155,24 @@ function formatHistoryTime(timestamp: number) {
   }).format(new Date(timestamp * 1000))
 }
 
+function todoDueLabel(dueAt: number | null) {
+  if (!dueAt) return '未设置提醒'
+  const now = new Date()
+  const due = new Date(dueAt * 1000)
+  const startOfTomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+  if (due.getTime() < now.getTime()) return `已逾期 · ${formatHistoryTime(dueAt)}`
+  if (due < startOfTomorrow) return `今天 ${due.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
+  if (due < new Date(startOfTomorrow.getTime() + 86_400_000)) return `明天 ${due.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
+  return `提醒：${formatHistoryTime(dueAt)}`
+}
+
+function todoDateInputValue(dueAt: number | null) {
+  if (!dueAt) return ''
+  const date = new Date(dueAt * 1000)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home')
   const [mode, setMode] = useState<RealtimeMode>('audio')
@@ -181,6 +206,7 @@ export default function App() {
   const [debouncedHistoryQuery, setDebouncedHistoryQuery] = useState('')
   const [historyScope, setHistoryScope] = useState<LibraryView>('all')
   const [historySelection, setHistorySelection] = useState<Set<string>>(new Set())
+  const [historySelectionMode, setHistorySelectionMode] = useState(false)
   const [selectedConversation, setSelectedConversation] = useState<ConversationSummary | null>(null)
   const [memoryItems, setMemoryItems] = useState<VisualMemory[]>([])
   const [memoryBusy, setMemoryBusy] = useState(false)
@@ -189,17 +215,26 @@ export default function App() {
   const [debouncedMemoryQuery, setDebouncedMemoryQuery] = useState('')
   const [memoryScope, setMemoryScope] = useState<LibraryView>('all')
   const [memorySelection, setMemorySelection] = useState<Set<string>>(new Set())
+  const [memorySelectionMode, setMemorySelectionMode] = useState(false)
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null)
   const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null)
   const [memoryDraft, setMemoryDraft] = useState('')
   const [todoItems, setTodoItems] = useState<TodoItem[]>([])
+  const [todoView, setTodoView] = useState<'active' | 'completed'>('active')
+  const [todoQuery, setTodoQuery] = useState('')
+  const [todoEditor, setTodoEditor] = useState<{ todo?: TodoItem; title: string; dueAt: string } | null>(null)
   const [todoBusy, setTodoBusy] = useState(false)
   const [todoError, setTodoError] = useState('')
+  const [revealedTodo, setRevealedTodo] = useState<string | null>(null)
   const [revealedItem, setRevealedItem] = useState<string | null>(null)
   const [deleteRequest, setDeleteRequest] = useState<{
-    kind: 'history' | 'memory'
+    kind: 'history' | 'memory' | 'todo'
     ids: string[]
   } | null>(null)
+  const [renameRequest, setRenameRequest] = useState<ConversationSummary | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [renameBusy, setRenameBusy] = useState(false)
+  const [renameError, setRenameError] = useState('')
   const [liveArtifacts, setLiveArtifacts] = useState<ResponseArtifact[]>([])
 
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -209,6 +244,7 @@ export default function App() {
   const visualizerRef = useRef<HTMLDivElement>(null)
   const longPressTimerRef = useRef<number | null>(null)
   const pointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
+  const todoPointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
   const suppressClickRef = useRef(false)
 
   useEffect(() => {
@@ -220,6 +256,31 @@ export default function App() {
     const timer = window.setTimeout(() => setDebouncedMemoryQuery(memoryQuery), 250)
     return () => window.clearTimeout(timer)
   }, [memoryQuery])
+
+  useEffect(() => {
+    if (screen !== 'conversation') return
+
+    const viewport = document.querySelector('meta[name="viewport"]')
+    const previousViewport = viewport?.getAttribute('content')
+    viewport?.setAttribute('content', ZOOM_LOCKED_VIEWPORT)
+
+    const preventGestureZoom = (event: Event) => event.preventDefault()
+    const preventShortcutZoom = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) event.preventDefault()
+    }
+    document.addEventListener('gesturestart', preventGestureZoom, { passive: false })
+    document.addEventListener('gesturechange', preventGestureZoom, { passive: false })
+    document.addEventListener('gestureend', preventGestureZoom, { passive: false })
+    document.addEventListener('wheel', preventShortcutZoom, { passive: false })
+
+    return () => {
+      viewport?.setAttribute('content', previousViewport ?? DEFAULT_VIEWPORT)
+      document.removeEventListener('gesturestart', preventGestureZoom)
+      document.removeEventListener('gesturechange', preventGestureZoom)
+      document.removeEventListener('gestureend', preventGestureZoom)
+      document.removeEventListener('wheel', preventShortcutZoom)
+    }
+  }, [screen])
 
   useEffect(() => {
     let active = true
@@ -326,7 +387,8 @@ export default function App() {
     let active = true
     setTodoBusy(true)
     setTodoError('')
-    void todos(server, accessToken)
+    setTodoItems([])
+    void todos(server, accessToken, todoView === 'completed')
       .then((items) => {
         if (active) setTodoItems(items)
       })
@@ -339,7 +401,7 @@ export default function App() {
     return () => {
       active = false
     }
-  }, [accessToken, screen, server])
+  }, [accessToken, screen, server, todoView])
 
   useEffect(() => {
     if (!accessToken) return
@@ -550,15 +612,66 @@ export default function App() {
   }
 
   const setTodoCompleted = async (todo: TodoItem) => {
-    const previous = todoItems
-    setTodoItems((items) => items.filter((item) => item.id !== todo.id))
     try {
-      await updateTodo(server, accessToken, todo.id, true)
+      await updateTodo(server, accessToken, todo.id, { completed: todoView === 'active' })
+      setTodoItems((items) => items.filter((item) => item.id !== todo.id))
     } catch (error) {
-      setTodoItems(previous)
       setTodoError(error instanceof Error ? error.message : '无法更新待办')
     }
   }
+
+  const saveTodo = async () => {
+    if (!todoEditor) return
+    const title = todoEditor.title.trim()
+    if (!title) {
+      setTodoError('请填写待办事项')
+      return
+    }
+    const dueAt = todoEditor.dueAt ? new Date(todoEditor.dueAt).getTime() / 1000 : undefined
+    if (todoEditor.dueAt && !Number.isFinite(dueAt)) {
+      setTodoError('提醒时间无效')
+      return
+    }
+    setTodoError('')
+    try {
+      if (todoEditor.todo) {
+        const updated = await updateTodo(server, accessToken, todoEditor.todo.id, {
+          title,
+          due_at: dueAt,
+          clear_due_at: !dueAt,
+        })
+        setTodoItems((items) => items.map((item) => (item.id === updated.id ? updated : item)))
+      } else {
+        const created = await createTodo(server, accessToken, title, dueAt)
+        if (todoView === 'active') setTodoItems((items) => [created, ...items])
+      }
+      setTodoEditor(null)
+    } catch (error) {
+      setTodoError(error instanceof Error ? error.message : '无法保存待办')
+    }
+  }
+
+  const beginTodoGesture = (event: React.PointerEvent<HTMLElement>, id: string) => {
+    if ((event.target as HTMLElement).closest('button, input, textarea, select, label')) return
+    todoPointerStartRef.current = { id, x: event.clientX, y: event.clientY }
+  }
+
+  const endTodoGesture = (event: React.PointerEvent<HTMLElement>) => {
+    const start = todoPointerStartRef.current
+    todoPointerStartRef.current = null
+    if (!start) return
+    const distance = event.clientX - start.x
+    if (distance > 44) setRevealedTodo(start.id)
+    else if (distance < -32) setRevealedTodo(null)
+  }
+
+  const visibleTodos = useMemo(() => {
+    const query = todoQuery.trim().toLocaleLowerCase('zh-CN')
+    if (!query) return todoItems
+    return todoItems.filter((todo) =>
+      `${todo.title} ${todo.visual_summary}`.toLocaleLowerCase('zh-CN').includes(query),
+    )
+  }, [todoItems, todoQuery])
 
   const historyLibraryItems = useMemo(
     () =>
@@ -599,6 +712,9 @@ export default function App() {
   const selectedMemory = selectedMemoryId
     ? memoryItems.find((item) => item.id === selectedMemoryId) ?? null
     : null
+
+  const historyVisibleIds = historyGroups.flatMap((group) => group.items.map((item) => item.id))
+  const memoryVisibleIds = memoryGroups.flatMap((group) => group.items.map((item) => item.id))
 
   const toggleSelection = (
     setter: React.Dispatch<React.SetStateAction<Set<string>>>,
@@ -671,7 +787,9 @@ export default function App() {
         if (!selected.has(item.id)) return item
         if (action === 'pin') return { ...item, is_pinned: true }
         if (action === 'unpin') return { ...item, is_pinned: false }
-        return { ...item, archived_at: action === 'archive' ? archivedAt : null }
+        return action === 'archive'
+          ? { ...item, is_pinned: false, archived_at: archivedAt }
+          : { ...item, archived_at: null }
       }),
     )
     setHistoryError('')
@@ -682,6 +800,7 @@ export default function App() {
         await batchConversations(server, accessToken, ids, action)
       }
       setHistorySelection(new Set())
+      setHistorySelectionMode(false)
       setRevealedItem(null)
     } catch (error) {
       setHistoryItems(previous)
@@ -702,7 +821,9 @@ export default function App() {
         if (!selected.has(item.id)) return item
         if (action === 'pin') return { ...item, is_pinned: true }
         if (action === 'unpin') return { ...item, is_pinned: false }
-        return { ...item, archived_at: action === 'archive' ? archivedAt : null }
+        return action === 'archive'
+          ? { ...item, is_pinned: false, archived_at: archivedAt }
+          : { ...item, archived_at: null }
       }),
     )
     setMemoryError('')
@@ -713,6 +834,7 @@ export default function App() {
         await batchMemories(server, accessToken, ids, action)
       }
       setMemorySelection(new Set())
+      setMemorySelectionMode(false)
       setRevealedItem(null)
     } catch (error) {
       setMemoryItems(previous)
@@ -723,7 +845,7 @@ export default function App() {
   const confirmDelete = async () => {
     if (!deleteRequest) return
     const { kind, ids } = deleteRequest
-    const setError = kind === 'history' ? setHistoryError : setMemoryError
+    const setError = kind === 'history' ? setHistoryError : kind === 'memory' ? setMemoryError : setTodoError
     setError('')
     try {
       if (kind === 'history') {
@@ -734,7 +856,8 @@ export default function App() {
         }
         setHistoryItems((items) => items.filter((item) => !ids.includes(item.id)))
         setHistorySelection(new Set())
-      } else {
+        setHistorySelectionMode(false)
+      } else if (kind === 'memory') {
         if (ids.length === 1) {
           await memoryMutation(server, accessToken, ids[0], 'delete')
         } else {
@@ -742,13 +865,53 @@ export default function App() {
         }
         setMemoryItems((items) => items.filter((item) => !ids.includes(item.id)))
         setMemorySelection(new Set())
+        setMemorySelectionMode(false)
         if (selectedMemoryId && ids.includes(selectedMemoryId)) setSelectedMemoryId(null)
+      } else {
+        await deleteTodo(server, accessToken, ids[0])
+        setTodoItems((items) => items.filter((item) => item.id !== ids[0]))
+        setRevealedTodo(null)
       }
       setRevealedItem(null)
       setDeleteRequest(null)
     } catch (error) {
       setError(error instanceof Error ? error.message : '删除失败，请重试')
       setDeleteRequest(null)
+    }
+  }
+
+  const beginRenameConversation = (conversation: ConversationSummary) => {
+    setRenameRequest(conversation)
+    setRenameDraft(conversation.title || '')
+    setRenameError('')
+    setRevealedItem(null)
+  }
+
+  const beginRenameMemory = (memory: VisualMemory) => {
+    setSelectedMemoryId(memory.id)
+    setEditingMemoryId(memory.id)
+    setMemoryDraft(memory.user_note || '')
+    setRevealedItem(null)
+  }
+
+  const confirmRenameConversation = async () => {
+    if (!renameRequest || !renameDraft.trim()) return
+    setRenameBusy(true)
+    setRenameError('')
+    try {
+      const updated = await renameConversation(
+        server,
+        accessToken,
+        renameRequest.id,
+        renameDraft.trim(),
+      )
+      setHistoryItems((items) => items.map((item) => (item.id === updated.id ? updated : item)))
+      setSelectedConversation((item) => (item?.id === updated.id ? updated : item))
+      setRenameRequest(null)
+    } catch (error) {
+      setRenameError(error instanceof Error ? error.message : '重命名失败，请重试')
+    } finally {
+      setRenameBusy(false)
     }
   }
 
@@ -980,16 +1143,28 @@ export default function App() {
               query={historyQuery}
               scope={historyScope}
               selectionCount={historySelection.size}
+              selectionMode={historySelectionMode}
+              itemCount={historyVisibleIds.length}
               onQueryChange={setHistoryQuery}
               onScopeChange={(scope) => {
                 setHistoryScope(scope)
                 setHistorySelection(new Set())
+                setHistorySelectionMode(false)
                 setRevealedItem(null)
               }}
               onBatchAction={(action) =>
                 void optimisticHistoryAction([...historySelection], action)
               }
-              onCancelSelection={() => setHistorySelection(new Set())}
+              onStartSelection={() => {
+                setHistorySelection(new Set())
+                setHistorySelectionMode(true)
+                setRevealedItem(null)
+              }}
+              onSelectAll={() => setHistorySelection(new Set(historyVisibleIds))}
+              onCancelSelection={() => {
+                setHistorySelection(new Set())
+                setHistorySelectionMode(false)
+              }}
             />
           </div>
 
@@ -1004,7 +1179,7 @@ export default function App() {
           {!historyBusy && !historyError && historyGroups.length === 0 && (
             <div className="history-empty">
               <ChatCircleDots />
-              <h2>{historyQuery ? '没有找到相关对话' : historyScope === 'archived' ? '还没有归档对话' : historyScope === 'pinned' ? '还没有标记对话' : '还没有聊天记录'}</h2>
+              <h2>{historyQuery ? '没有找到相关对话' : historyScope === 'archived' ? '还没有归档对话' : historyScope === 'pinned' ? '还没有置顶对话' : '还没有聊天记录'}</h2>
               <p>
                 {historyScope === 'archived'
                   ? '已归档的对话会保留，但不会出现在最近记录中。'
@@ -1031,10 +1206,13 @@ export default function App() {
                       return (
                         <article
                           key={item.id}
-                          className={`library-swipe-shell ${revealedItem === item.id ? 'is-revealed' : ''}`}
+                          className={`library-swipe-shell has-rename ${revealedItem === item.id ? 'is-revealed' : ''}`}
                           onPointerDown={(event) =>
                             beginLibraryGesture(event, item.id, () =>
-                              toggleSelection(setHistorySelection, item.id),
+                              {
+                                setHistorySelectionMode(true)
+                                toggleSelection(setHistorySelection, item.id)
+                              },
                             )
                           }
                           onPointerMove={moveLibraryGesture}
@@ -1053,7 +1231,7 @@ export default function App() {
                                 suppressClickRef.current = false
                                 return
                               }
-                              if (historySelection.size > 0) {
+                              if (historySelectionMode) {
                                 toggleSelection(setHistorySelection, item.id)
                                 return
                               }
@@ -1061,13 +1239,13 @@ export default function App() {
                               setScreen('conversation')
                             }}
                           >
-                            {historySelection.size > 0 && (
+                            {historySelectionMode && (
                               <span className={`selection-check ${selected ? 'is-selected' : ''}`} aria-hidden="true" />
                             )}
                             <span className="library-row-copy">
                               <span className="library-row-title">
                                 <strong>{item.title || '未命名对话'}</strong>
-                                {item.is_pinned && <PushPin weight="fill" aria-label="已标记" />}
+                                {item.is_pinned && <PushPin weight="fill" aria-label="已置顶" />}
                                 <time>{formatHistoryTime(item.updated_at)}</time>
                               </span>
                               <span className="library-row-preview">{item.preview || '这次对话还没有文本内容'}</span>
@@ -1077,6 +1255,7 @@ export default function App() {
                             pinned={item.is_pinned}
                             archived={item.archived_at !== null}
                             onAction={(action) => void optimisticHistoryAction([item.id], action)}
+                            onRename={() => beginRenameConversation(item)}
                           />
                         </article>
                       )
@@ -1096,46 +1275,126 @@ export default function App() {
               <ArrowLeft />
             </button>
             <h1>待办</h1>
-            <span className="header-spacer" />
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="新建待办"
+              onClick={() => setTodoEditor({ title: '', dueAt: '' })}
+            >
+              <Plus />
+            </button>
           </header>
-          <p className="todo-intro">从视觉记忆创建的事项；完成前可以随时回看当时的画面和摘要。</p>
+          <p className="todo-intro">管理日常事项、提醒和完成记录。完成后会归档在“已完成”中；向右滑动事项可删除，点击编辑可调整标题或提醒时间。</p>
+          <div className="todo-toolbar">
+            <div className="todo-view-switch" role="tablist" aria-label="待办状态">
+              <button
+                className={todoView === 'active' ? 'is-active' : ''}
+                type="button"
+                role="tab"
+                aria-selected={todoView === 'active'}
+                onClick={() => setTodoView('active')}
+              >
+                待处理
+              </button>
+              <button
+                className={todoView === 'completed' ? 'is-active' : ''}
+                type="button"
+                role="tab"
+                aria-selected={todoView === 'completed'}
+                onClick={() => setTodoView('completed')}
+              >
+                已完成
+              </button>
+            </div>
+            <label className="todo-search">
+              <input aria-label="搜索待办" value={todoQuery} onChange={(event) => setTodoQuery(event.target.value)} placeholder="搜索待办" />
+            </label>
+          </div>
           {todoBusy && <div className="history-skeleton" aria-label="正在加载"><span /><span /><span /></div>}
           {todoError && <div className="history-error">{todoError}</div>}
-          {!todoBusy && !todoError && todoItems.length === 0 && (
+          {!todoBusy && !todoError && visibleTodos.length === 0 && (
             <div className="history-empty">
               <ListChecks />
-              <h2>没有待处理事项</h2>
-              <p>视频通话时说“把这个做成待办”即可把画面、摘要和任务一起保存。</p>
-              <button type="button" onClick={() => openCall('video')}>打开视频通话</button>
+              <h2>{todoQuery ? '没有匹配的待办' : todoView === 'completed' ? '还没有已完成的待办' : '没有待处理事项'}</h2>
+              {todoQuery ? (
+                <p>换一个关键词试试。</p>
+              ) : todoView === 'completed' ? (
+                <p>完成待办后，会在这里保留画面、摘要和完成时间。</p>
+              ) : (
+                <>
+                  <p>点击右上角加号新建，或在视频通话时说“把这个做成待办”。</p>
+                  <button type="button" onClick={() => setTodoEditor({ title: '', dueAt: '' })}>新建待办</button>
+                </>
+              )}
             </div>
           )}
-          {!todoBusy && todoItems.length > 0 && (
+          {!todoBusy && visibleTodos.length > 0 && (
             <div className="todo-list">
-              {todoItems.map((todo) => (
-                <article className="todo-card" key={todo.id}>
-                  <button
-                    className="todo-complete"
-                    type="button"
-                    aria-label={`完成：${todo.title}`}
-                    onClick={() => void setTodoCompleted(todo)}
-                  >
-                    <Circle />
+              {visibleTodos.map((todo) => (
+                <article
+                  className={`todo-swipe-shell ${revealedTodo === todo.id ? 'is-revealed' : ''}`}
+                  key={todo.id}
+                  onPointerDown={(event) => beginTodoGesture(event, todo.id)}
+                  onPointerUp={endTodoGesture}
+                  onPointerCancel={() => { todoPointerStartRef.current = null }}
+                >
+                  <button className="todo-swipe-delete danger-action" type="button" onClick={() => setDeleteRequest({ kind: 'todo', ids: [todo.id] })}>
+                    <Trash aria-hidden="true" /> 删除
                   </button>
-                  {todo.cover ? (
-                    <AuthenticatedImage server={server} token={accessToken} artifact={todo.cover} className="todo-cover" />
-                  ) : (
-                    <span className="todo-cover todo-text-cover"><CheckCircle /></span>
-                  )}
-                  <div>
-                    <strong>{todo.title}</strong>
-                    {todo.visual_summary && <p>{todo.visual_summary}</p>}
-                    <time>{todo.due_at ? `提醒：${formatHistoryTime(todo.due_at)}` : '未设置提醒'}</time>
+                  <div className="todo-card todo-card-surface">
+                    <button
+                      className="todo-complete"
+                      type="button"
+                      aria-label={todoView === 'active' ? `完成：${todo.title}` : `恢复：${todo.title}`}
+                      onClick={() => void setTodoCompleted(todo)}
+                    >
+                      {todoView === 'active' ? <Circle /> : <ArrowCounterClockwise />}
+                    </button>
+                    {todo.cover ? (
+                      <AuthenticatedImage server={server} token={accessToken} artifact={todo.cover} className="todo-cover" />
+                    ) : (
+                      <span className="todo-cover todo-text-cover"><CheckCircle /></span>
+                    )}
+                    <div className="todo-copy">
+                      <div className="todo-title-row">
+                        <strong>{todo.title}</strong>
+                        <button className="todo-edit" type="button" aria-label={`编辑：${todo.title}`} onClick={() => setTodoEditor({ todo, title: todo.title, dueAt: todoDateInputValue(todo.due_at) })}>
+                          <NotePencil />
+                        </button>
+                      </div>
+                      {todo.visual_summary && <p>{todo.visual_summary}</p>}
+                      <time className={todo.due_at && todo.due_at < Date.now() / 1000 && todoView === 'active' ? 'is-overdue' : ''}>
+                        {todoView === 'completed' && todo.completed_at ? `完成：${formatHistoryTime(todo.completed_at)}` : todoDueLabel(todo.due_at)}
+                      </time>
+                    </div>
                   </div>
                 </article>
               ))}
             </div>
           )}
         </section>
+      )}
+
+      {todoEditor && (
+        <div className="confirm-dialog-backdrop" role="presentation">
+          <section className="todo-editor" role="dialog" aria-modal="true" aria-labelledby="todo-editor-title">
+            <h2 id="todo-editor-title">{todoEditor.todo ? '编辑待办' : '新建待办'}</h2>
+            <label>
+              事项
+              <input autoFocus value={todoEditor.title} maxLength={500} onChange={(event) => setTodoEditor({ ...todoEditor, title: event.target.value })} placeholder="例如：买咖啡豆" />
+            </label>
+            <label>
+              提醒时间
+              <input type="datetime-local" value={todoEditor.dueAt} onChange={(event) => setTodoEditor({ ...todoEditor, dueAt: event.target.value })} />
+            </label>
+            <div className="todo-editor-actions">
+              {todoEditor.dueAt && <button type="button" onClick={() => setTodoEditor({ ...todoEditor, dueAt: '' })}>清除提醒</button>}
+              <span />
+              <button type="button" onClick={() => setTodoEditor(null)}>取消</button>
+              <button className="primary-button" type="button" onClick={() => void saveTodo()}>保存</button>
+            </div>
+          </section>
+        </div>
       )}
 
       {screen === 'memories' && (
@@ -1159,16 +1418,28 @@ export default function App() {
               query={memoryQuery}
               scope={memoryScope}
               selectionCount={memorySelection.size}
+              selectionMode={memorySelectionMode}
+              itemCount={memoryVisibleIds.length}
               onQueryChange={setMemoryQuery}
               onScopeChange={(scope) => {
                 setMemoryScope(scope)
                 setMemorySelection(new Set())
+                setMemorySelectionMode(false)
                 setRevealedItem(null)
               }}
               onBatchAction={(action) =>
                 void optimisticMemoryAction([...memorySelection], action)
               }
-              onCancelSelection={() => setMemorySelection(new Set())}
+              onStartSelection={() => {
+                setMemorySelection(new Set())
+                setMemorySelectionMode(true)
+                setRevealedItem(null)
+              }}
+              onSelectAll={() => setMemorySelection(new Set(memoryVisibleIds))}
+              onCancelSelection={() => {
+                setMemorySelection(new Set())
+                setMemorySelectionMode(false)
+              }}
             />
           </div>
 
@@ -1183,7 +1454,7 @@ export default function App() {
           {!memoryBusy && !memoryError && memoryGroups.length === 0 && (
             <div className="history-empty">
               <ImagesSquare />
-              <h2>{memoryQuery ? '没有找到相关记忆' : memoryScope === 'archived' ? '还没有归档记忆' : memoryScope === 'pinned' ? '还没有标记记忆' : '还没有保存记忆'}</h2>
+              <h2>{memoryQuery ? '没有找到相关记忆' : memoryScope === 'archived' ? '还没有归档记忆' : memoryScope === 'pinned' ? '还没有置顶记忆' : '还没有保存记忆'}</h2>
               <p>{memoryQuery ? '试试搜索物品、地点或备注里的关键词。' : '视频通话时说“帮我记住这个”，我会保存当时的内容和画面。'}</p>
               {memoryQuery ? (
                 <button type="button" onClick={() => setMemoryQuery('')}>清除搜索</button>
@@ -1204,10 +1475,13 @@ export default function App() {
                       return (
                         <article
                           key={memory.id}
-                          className={`memory-card library-swipe-shell ${revealedItem === memory.id ? 'is-revealed' : ''}`}
+                          className={`memory-card library-swipe-shell has-rename ${revealedItem === memory.id ? 'is-revealed' : ''}`}
                           onPointerDown={(event) =>
                             beginLibraryGesture(event, memory.id, () =>
-                              toggleSelection(setMemorySelection, memory.id),
+                              {
+                                setMemorySelectionMode(true)
+                                toggleSelection(setMemorySelection, memory.id)
+                              },
                             )
                           }
                           onPointerMove={moveLibraryGesture}
@@ -1226,7 +1500,7 @@ export default function App() {
                                 suppressClickRef.current = false
                                 return
                               }
-                              if (memorySelection.size > 0) {
+                              if (memorySelectionMode) {
                                 toggleSelection(setMemorySelection, memory.id)
                                 return
                               }
@@ -1238,10 +1512,10 @@ export default function App() {
                             ) : (
                               <span className="memory-cover memory-text-cover"><ImagesSquare /><span>文字记忆</span></span>
                             )}
-                            {memorySelection.size > 0 && (
+                            {memorySelectionMode && (
                               <span className={`selection-check card-check ${selected ? 'is-selected' : ''}`} aria-hidden="true" />
                             )}
-                            {memory.is_pinned && <PushPin className="memory-pin" weight="fill" aria-label="已标记" />}
+                            {memory.is_pinned && <PushPin className="memory-pin" weight="fill" aria-label="已置顶" />}
                             <span className="memory-card-body">
                               <strong>{memory.user_note || '未命名记忆'}</strong>
                               <time>{formatHistoryTime(memory.captured_at ?? memory.created_at)}</time>
@@ -1251,6 +1525,7 @@ export default function App() {
                             pinned={memory.is_pinned}
                             archived={memory.archived_at !== null}
                             onAction={(action) => void optimisticMemoryAction([memory.id], action)}
+                            onRename={() => beginRenameMemory(memory)}
                           />
                         </article>
                       )
@@ -1289,7 +1564,7 @@ export default function App() {
                       <button type="button" onClick={() => { setEditingMemoryId(null); setMemoryDraft('') }}>取消</button>
                     </>
                   ) : (
-                    <button type="button" onClick={() => { setEditingMemoryId(selectedMemory.id); setMemoryDraft(selectedMemory.user_note) }}><NotePencil /> 修改</button>
+                    <button type="button" onClick={() => beginRenameMemory(selectedMemory)}><NotePencil /> 编辑名称</button>
                   )}
                   <button className="danger-action" type="button" onClick={() => setDeleteRequest({ kind: 'memory', ids: [selectedMemory.id] })}><Trash /> 删除</button>
                 </div>
@@ -1315,7 +1590,12 @@ export default function App() {
           </header>
 
           <div className="conversation-title">
-            <h2>{selectedConversation.title || '未命名对话'}</h2>
+            <div>
+              <h2>{selectedConversation.title || '未命名对话'}</h2>
+              <button className="conversation-rename" type="button" onClick={() => beginRenameConversation(selectedConversation)}>
+                <NotePencil aria-hidden="true" /> 重命名
+              </button>
+            </div>
             <time>{formatHistoryTime(selectedConversation.updated_at)}</time>
           </div>
 
@@ -1334,7 +1614,7 @@ export default function App() {
                   key={message.id}
                   className={message.role === 'user' ? 'is-user' : 'is-assistant'}
                 >
-                  <div>
+                  <div className="message-meta">
                     <strong>{message.role === 'user' ? '你' : 'Ripple'}</strong>
                     <time>{formatHistoryTime(message.created_at)}</time>
                   </div>
@@ -1541,6 +1821,43 @@ export default function App() {
             <div>
               <button type="button" onClick={() => setDeleteRequest(null)}>取消</button>
               <button className="danger-action" type="button" autoFocus onClick={() => void confirmDelete()}>确认删除</button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {renameRequest && (
+        <div className="confirm-dialog-backdrop" role="presentation">
+          <section
+            className="confirm-dialog rename-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-dialog-title"
+          >
+            <span className="confirm-dialog-mark"><NotePencil aria-hidden="true" /></span>
+            <h2 id="rename-dialog-title">重命名对话</h2>
+            <label className="visually-hidden" htmlFor="conversation-title-input">对话名称</label>
+            <input
+              id="conversation-title-input"
+              value={renameDraft}
+              maxLength={80}
+              autoFocus
+              onChange={(event) => setRenameDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void confirmRenameConversation()
+              }}
+            />
+            {renameError && <p className="form-error">{renameError}</p>}
+            <div>
+              <button type="button" disabled={renameBusy} onClick={() => setRenameRequest(null)}>取消</button>
+              <button
+                className="primary-action"
+                type="button"
+                disabled={renameBusy || !renameDraft.trim()}
+                onClick={() => void confirmRenameConversation()}
+              >
+                {renameBusy ? '正在保存' : '保存'}
+              </button>
             </div>
           </section>
         </div>

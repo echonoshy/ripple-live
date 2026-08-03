@@ -83,7 +83,7 @@ export function groupLibraryItems<T extends LibraryItem>(
     .sort((left, right) => right.timestamp - left.timestamp)
 
   if (view === 'pinned') {
-    return visible.length > 0 ? [{ label: '已标记', items: visible }] : []
+    return visible.length > 0 ? [{ label: '已置顶', items: visible }] : []
   }
 
   const groups: LibraryGroup<T>[] = []
@@ -91,7 +91,7 @@ export function groupLibraryItems<T extends LibraryItem>(
     view === 'all' ? visible.filter((item) => !item.isPinned) : visible
   if (view === 'all') {
     const pinned = visible.filter((item) => item.isPinned)
-    if (pinned.length > 0) groups.push({ label: '已标记', items: pinned })
+    if (pinned.length > 0) groups.push({ label: '已置顶', items: pinned })
   }
 
   for (const item of chronological) {

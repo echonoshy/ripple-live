@@ -1,4 +1,4 @@
-import { Archive, MagnifyingGlass, PushPin, X } from '@phosphor-icons/react'
+import { Archive, CheckSquare, MagnifyingGlass, PushPin, X } from '@phosphor-icons/react'
 import type { LibraryAction, LibraryView } from '../library'
 
 export type LibraryToolbarProps = {
@@ -6,15 +6,19 @@ export type LibraryToolbarProps = {
   query: string
   scope: LibraryView
   selectionCount: number
+  selectionMode: boolean
+  itemCount: number
   onQueryChange(value: string): void
   onScopeChange(value: LibraryView): void
   onBatchAction(action: LibraryAction): void
+  onStartSelection(): void
+  onSelectAll(): void
   onCancelSelection(): void
 }
 
 const scopes: Array<{ value: LibraryView; label: string }> = [
   { value: 'all', label: '全部' },
-  { value: 'pinned', label: '已标记' },
+  { value: 'pinned', label: '已置顶' },
   { value: 'archived', label: '已归档' },
 ]
 
@@ -23,28 +27,38 @@ export function LibraryToolbar({
   query,
   scope,
   selectionCount,
+  selectionMode,
+  itemCount,
   onQueryChange,
   onScopeChange,
   onBatchAction,
+  onStartSelection,
+  onSelectAll,
   onCancelSelection,
 }: LibraryToolbarProps) {
-  if (selectionCount > 0) {
+  if (selectionMode) {
     return (
       <div className="library-selection-bar" aria-label={`已选择 ${selectionCount} 项`}>
-        <strong>已选择 {selectionCount} 项</strong>
+        <div className="library-selection-heading">
+          <strong>{selectionCount > 0 ? `已选择 ${selectionCount} 项` : '选择要管理的项目'}</strong>
+          <button className="text-action" type="button" onClick={onSelectAll} disabled={itemCount === 0}>
+            全选
+          </button>
+        </div>
         <div>
-          <button type="button" onClick={() => onBatchAction(scope === 'pinned' ? 'unpin' : 'pin')}>
+          <button type="button" disabled={selectionCount === 0} onClick={() => onBatchAction(scope === 'pinned' ? 'unpin' : 'pin')}>
             <PushPin weight="fill" aria-hidden="true" />
-            {scope === 'pinned' ? '取消标记' : '标记'}
+            {scope === 'pinned' ? '取消置顶' : '置顶'}
           </button>
           <button
             type="button"
+            disabled={selectionCount === 0}
             onClick={() => onBatchAction(scope === 'archived' ? 'unarchive' : 'archive')}
           >
             <Archive aria-hidden="true" />
             {scope === 'archived' ? '恢复' : '归档'}
           </button>
-          <button className="danger-action" type="button" onClick={() => onBatchAction('delete')}>
+          <button className="danger-action" type="button" disabled={selectionCount === 0} onClick={() => onBatchAction('delete')}>
             删除
           </button>
           <button className="icon-only" type="button" aria-label="取消选择" onClick={onCancelSelection}>
@@ -82,6 +96,14 @@ export function LibraryToolbar({
             {item.label}
           </button>
         ))}
+      </div>
+      <div className="library-toolbar-meta">
+        <p>
+          <strong>置顶</strong>会留在最近记录并排在最前；<strong>归档</strong>会从最近记录移出{kind === '聊天历史' ? '，且不再用于回答时的上下文参考。' : '，且不再作为 Agent 的联想素材。'}
+        </p>
+        <button className="library-manage-button" type="button" onClick={onStartSelection}>
+          <CheckSquare aria-hidden="true" /> 管理
+        </button>
       </div>
     </div>
   )

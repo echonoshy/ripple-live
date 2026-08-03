@@ -167,7 +167,7 @@ export class LiveMedia {
         resumeStream: async (stream) => stream,
         positiveSpeechThreshold: 0.6,
         negativeSpeechThreshold: 0.35,
-        redemptionMs: 800,
+        redemptionMs: 500,
         minSpeechMs: 96,
         preSpeechPadMs: 0,
         ortConfig: (ort) => {

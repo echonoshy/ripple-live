@@ -20,7 +20,7 @@ use ripple_agent_gateway::{
     audio::decode_le_f32,
     config::Settings,
     context::{ContextStore, LibraryAction, LibraryScope},
-    memory::MemoryService,
+    memory::{MemoryService, TodoUpdate},
     orchestrator::AgentOrchestrator,
     protocol::{ClientEvent, VideoFrame},
 };
@@ -116,8 +116,11 @@ fn app(state: AppState) -> Router {
             "/v1/memories/{memory_id}",
             get(get_memory).patch(update_memory).delete(delete_memory),
         )
-        .route("/v1/todos", get(list_todos))
-        .route("/v1/todos/{todo_id}", axum::routing::patch(update_todo))
+        .route("/v1/todos", get(list_todos).post(create_todo))
+        .route(
+            "/v1/todos/{todo_id}",
+            axum::routing::patch(update_todo).delete(delete_todo),
+        )
         .route("/v1/assets/{asset_id}/content", get(asset_content))
         .route("/v1/responses", post(create_response))
         .route("/v1/agent/realtime", get(realtime))
@@ -153,7 +156,16 @@ struct TodoQuery {
 
 #[derive(Deserialize)]
 struct TodoPatch {
-    completed: bool,
+    title: Option<String>,
+    due_at: Option<f64>,
+    clear_due_at: Option<bool>,
+    completed: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct CreateTodoRequest {
+    title: String,
+    due_at: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -589,11 +601,58 @@ async fn update_todo(
     };
     match state
         .memories
-        .complete_todo(&user.id, &todo_id, request.completed)
+        .update_todo(
+            &user.id,
+            &todo_id,
+            TodoUpdate {
+                title: request.title,
+                due_at: if request.clear_due_at.unwrap_or(false) {
+                    Some(None)
+                } else {
+                    request.due_at.map(Some)
+                },
+                completed: request.completed,
+            },
+        )
         .await
     {
         Ok(Some(todo)) => Json(json!({"data": todo})).into_response(),
         Ok(None) => api_error(StatusCode::NOT_FOUND, "待办不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn create_todo(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateTodoRequest>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .memories
+        .create_manual_todo(&user.id, &request.title, request.due_at)
+        .await
+    {
+        Ok(todo) => (StatusCode::CREATED, Json(json!({ "data": todo }))).into_response(),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn delete_todo(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(todo_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.memories.delete_todo(&user.id, &todo_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "待办不存在"),
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
 }

@@ -12,6 +12,19 @@ resize() {
   /usr/bin/sips -z "$1" "$1" "$SOURCE" --out "$2" >/dev/null
 }
 
+resize_android_foreground() {
+  canvas_size="$1"
+  output="$2"
+  safe_size=$((canvas_size * 2 / 3))
+  temporary_directory="$(mktemp -d -t ripple-live-foreground)"
+  temporary_image="$temporary_directory/foreground.png"
+
+  /usr/bin/sips -z "$safe_size" "$safe_size" "$SOURCE" --out "$temporary_image" >/dev/null 2>&1
+  /usr/bin/sips -p "$canvas_size" "$canvas_size" --padColor 15131d \
+    "$temporary_image" --out "$output" >/dev/null 2>&1
+  rm -rf "$temporary_directory"
+}
+
 resize 32 "$ICONS/32x32.png"
 resize 64 "$ICONS/64x64.png"
 resize 128 "$ICONS/128x128.png"
@@ -28,7 +41,7 @@ done
 for density_size in mdpi:108 hdpi:162 xhdpi:216 xxhdpi:324 xxxhdpi:432; do
   density=${density_size%%:*}
   size=${density_size##*:}
-  resize "$size" "$ANDROID/mipmap-$density/ic_launcher_foreground.png"
+  resize_android_foreground "$size" "$ANDROID/mipmap-$density/ic_launcher_foreground.png"
 done
 
 while IFS=: read -r file size; do

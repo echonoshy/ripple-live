@@ -142,7 +142,7 @@ start_process gateway env \
   RIPPLE_TTS_MODEL="${RIPPLE_TTS_MODEL:-$TTS_OMNI_MODEL}" \
   RIPPLE_TTS_VOICE="${RIPPLE_TTS_VOICE:-serena}" \
   RIPPLE_TTS_LANGUAGE="${RIPPLE_TTS_LANGUAGE:-Chinese}" \
-  RIPPLE_TTS_INSTRUCTIONS="${RIPPLE_TTS_INSTRUCTIONS:-自然、温暖、亲切的中文女声。语速适中，语气平静，停顿自然，像真人助手交流，避免播音腔和夸张情绪。}" \
+  RIPPLE_TTS_INSTRUCTIONS="${RIPPLE_TTS_INSTRUCTIONS:-自然、温暖、亲切的中文女声。语速偏快但吐字清晰，语气平静连贯，停顿简洁自然，保持稳定一致的音色，像真人助手交流，避免播音腔和夸张情绪。}" \
   RIPPLE_AUDIO_CHUNK_MS="${RIPPLE_AUDIO_CHUNK_MS:-100}" \
   RIPPLE_SEARCH_PROXY="$SEARCH_PROXY" \
   RIPPLE_TAVILY_API_KEY="${RIPPLE_TAVILY_API_KEY:-}" \

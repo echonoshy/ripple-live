@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::{
     capabilities::{CliRunner, SkillRegistry},
-    memory::{CreateMemoryRequest, CreateTodoRequest, MemoryArtifact, MemoryService},
+    memory::{CreateMemoryRequest, CreateTodoRequest, MemoryArtifact, MemoryService, TodoRecord},
     protocol::VideoFrame,
 };
 
@@ -132,6 +132,9 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
             _ => None,
         };
     }
+    if is_memory_search_request(transcript) {
+        return Some("recall");
+    }
     if [
         "帮我记住",
         "请记住",
@@ -164,9 +167,37 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
         return Some("list_todos");
     }
     if [
+        "联网搜索",
+        "网上搜索",
+        "网页搜索",
+        "联网查一下",
+        "用 Tavily",
+        "使用 Tavily",
+        "最新消息",
+        "最新新闻",
+        "实时天气",
+        "实时股价",
+    ]
+    .iter()
+    .any(|needle| transcript.contains(needle))
+    {
+        return Some("web_search");
+    }
+    None
+}
+
+fn is_memory_search_request(transcript: &str) -> bool {
+    [
         "长期记忆",
         "查找记忆",
         "检索记忆",
+        "搜索记忆",
+        "记忆中",
+        "记忆里的",
+        "记忆图库",
+        "图库里的",
+        "存储的图片",
+        "保存的图片",
         "回忆工具",
         "你还记得",
         "我上次放",
@@ -177,24 +208,6 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
     ]
     .iter()
     .any(|needle| transcript.contains(needle))
-    {
-        return Some("recall");
-    }
-    if [
-        "联网搜索",
-        "网上搜索",
-        "网页搜索",
-        "搜索一下",
-        "联网查一下",
-        "用 Tavily",
-        "使用 Tavily",
-    ]
-    .iter()
-    .any(|needle| transcript.contains(needle))
-    {
-        return Some("web_search");
-    }
-    None
 }
 
 #[derive(Clone)]
@@ -229,17 +242,37 @@ impl ToolExecutor {
     }
 
     pub fn select_forced_tool(&self, transcript: &str) -> Option<String> {
+        self.forced_route(transcript).map(|route| route.name)
+    }
+
+    pub fn forced_route(&self, transcript: &str) -> Option<ToolRoute> {
         if let Some(name) = explicit_tool_name(transcript)
             && (is_builtin_tool(name) || self.registry.get(name).is_some())
         {
-            return Some(name.to_owned());
+            return Some(ToolRoute {
+                name: name.to_owned(),
+                reason: "explicit_tool",
+            });
         }
         let selected = select_forced_tool(transcript)
             .filter(|name| is_builtin_tool(name) || self.registry.get(name).is_some());
         if selected == Some("create_todo") && mentions_relative_time(transcript) {
-            return Some("get_current_time".to_owned());
+            return Some(ToolRoute {
+                name: "get_current_time".to_owned(),
+                reason: "relative_todo_time",
+            });
         }
-        selected.map(str::to_owned)
+        selected.map(|name| ToolRoute {
+            name: name.to_owned(),
+            reason: match name {
+                "recall" => "memory_scope",
+                "list_todos" => "todo_query",
+                "create_todo" => "todo_create",
+                "remember" => "memory_save",
+                "web_search" => "explicit_web_scope",
+                _ => "keyword_rule",
+            },
+        })
     }
 
     pub async fn execute(
@@ -363,12 +396,16 @@ impl ToolExecutor {
                     .memories
                     .list_todos(&execution.user_id, Some(completed), 100)
                     .await?;
-                Ok(ToolOutcome::value(json!({
-                    "ok": true,
-                    "completed": completed,
-                    "count": todos.len(),
-                    "todos": todos
-                })))
+                let artifacts = todo_artifacts(&todos);
+                Ok(ToolOutcome {
+                    value: json!({
+                        "ok": true,
+                        "completed": completed,
+                        "count": todos.len(),
+                        "todos": todos
+                    }),
+                    artifacts,
+                })
             }
             "recall" => {
                 let query = payload.get("query").and_then(Value::as_str).unwrap_or("");
@@ -403,6 +440,12 @@ pub struct ToolExecutionContext {
     pub tool_call_id: String,
     pub transcript: String,
     pub frames: Vec<VideoFrame>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolRoute {
+    pub name: String,
+    pub reason: &'static str,
 }
 
 #[derive(Clone, Debug)]
@@ -454,6 +497,10 @@ fn asks_about_todos(transcript: &str) -> bool {
         ]
         .iter()
         .any(|needle| transcript.contains(needle))
+}
+
+fn todo_artifacts(todos: &[TodoRecord]) -> Vec<MemoryArtifact> {
+    todos.iter().filter_map(|todo| todo.cover.clone()).collect()
 }
 
 fn mentions_relative_time(transcript: &str) -> bool {
@@ -730,6 +777,15 @@ mod tests {
         assert_eq!(select_forced_tool("请记住：我喜欢乌龙茶"), Some("remember"));
         assert_eq!(select_forced_tool("记一下这个位置"), Some("remember"));
         assert_eq!(select_forced_tool("我上次放哪里了"), Some("recall"));
+        assert_eq!(
+            select_forced_tool("你再帮我搜索一下记忆中有关于芦荟胶相关的图片"),
+            Some("recall")
+        );
+        assert_eq!(select_forced_tool("帮我搜索一下芦荟胶"), None);
+        assert_eq!(
+            select_forced_tool("联网搜索芦荟胶的用法"),
+            Some("web_search")
+        );
         assert_eq!(select_forced_tool("我有哪些待办"), Some("list_todos"));
         assert_eq!(
             select_forced_tool("帮我检查一下，我还有哪些代办事项"),
@@ -742,6 +798,29 @@ mod tests {
         assert_eq!(select_forced_tool("请联网搜索 OpenAI"), Some("web_search"));
         assert!(is_builtin_tool("create_todo"));
         assert!(is_builtin_tool("list_todos"));
+    }
+
+    #[test]
+    fn returns_todo_cover_as_response_artifact() {
+        let cover = MemoryArtifact {
+            id: "asset_1".to_owned(),
+            kind: "image".to_owned(),
+            memory_id: "todo_1".to_owned(),
+            caption: "买芦荟胶".to_owned(),
+            content_url: "/v1/assets/asset_1/content".to_owned(),
+        };
+        let artifacts = todo_artifacts(&[TodoRecord {
+            id: "todo_1".to_owned(),
+            memory_id: None,
+            title: "买芦荟胶".to_owned(),
+            visual_summary: String::new(),
+            due_at: None,
+            completed_at: None,
+            created_at: 0.0,
+            cover: Some(cover.clone()),
+        }]);
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].id, cover.id);
     }
 
     #[test]

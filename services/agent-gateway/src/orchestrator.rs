@@ -22,9 +22,8 @@ use crate::{
 const SYSTEM_PROMPT: &str = "你是 Ripple Live，一个运行在用户自有服务器上的中文多模态语音 Agent。
 你可以理解当前语音转写和随附的视频画面。回答应自然、简洁、适合直接朗读。
 需要外部动作或精确结果时必须使用提供的工具，不要假装已经调用。
-用户要求联网、搜索、最新信息或外部资料时必须调用 web_search，并根据返回来源作答。若工具返回 result_count 为 0，不得把自身已有知识说成搜索结果，必须明确说明本次搜索没有找到结果。
-只有用户明确要求记住某件事时才调用 remember；有当前画面时，visual_summary 必须客观描述画面中有助于以后检索的物品、位置和文字。需要查找用户过去保存的信息时调用 recall，并把 query 提炼为简洁关键词。
-只有用户明确要求记住某件事时才调用 remember；有当前画面时，visual_summary 必须客观描述画面中有助于以后检索的物品、位置和文字。需要查找用户过去保存的信息时调用 recall，并把 query 提炼为简洁关键词。
+只有用户明确要求联网、网上查询、最新信息或外部资料时才调用 web_search，并根据返回来源作答；“搜索一下”本身不表示可以联网。若用户说记忆、图库、保存的图片、历史照片等，即使带有“搜索”一词，也必须调用 recall，绝不能改为联网搜索。若工具返回 result_count 为 0，不得把自身已有知识说成搜索结果，必须明确说明本次搜索没有找到结果。
+只有用户明确要求记住某件事时才调用 remember；有当前画面时，visual_summary 必须客观描述画面中有助于以后检索的物品、位置和文字。需要查找用户过去保存的信息时调用 recall，并把 query 提炼为简洁关键词。本地记忆没有结果时，只能说明本地未找到并询问是否需要联网，不得自动调用 web_search。
 用户明确要求把当前信息做成待办或提醒时调用 create_todo；它会同时保存画面证据。未指定时间就不要设置提醒；“明天”“下周”等相对时间先用 get_current_time 获取 Asia/Shanghai 当前时间，再换算成带时区的 RFC3339 due_at。用户只要求总结时，直接给出简短摘要和不超过三条重点；只有明确说要保存时才写入记忆。
 工具返回 ok=false 时绝对不能声称操作成功，必须说明工具返回的错误；需要修正参数时，应再次调用工具，只有收到 ok=true 后才能确认已创建或已保存。不要在朗读内容中输出工具调用 JSON。";
 
@@ -39,6 +38,7 @@ fn system_prompt() -> String {
 const MIN_SPEECH_CHUNK_CHARS: usize = 40;
 const SOFT_SPEECH_CHUNK_CHARS: usize = 60;
 const MAX_SPEECH_CHUNK_CHARS: usize = 80;
+const MAX_TTS_UTTERANCE_CHARS: usize = 320;
 
 #[derive(Clone)]
 pub struct AgentOrchestrator {
@@ -98,6 +98,22 @@ impl AgentOrchestrator {
             .context
             .add_turn(conversation_id, "user", input, None)
             .await?;
+        let (routing_input, routing_turns) =
+            self.context.trailing_user_input(conversation_id, 4).await?;
+        let forced_route = self.tools.forced_route(&routing_input);
+        self.context
+            .record_event(
+                conversation_id,
+                "server.tool.routed",
+                &json!({
+                    "response_id": response_id,
+                    "tool": forced_route.as_ref().map(|route| &route.name),
+                    "reason": forced_route.as_ref().map(|route| route.reason).unwrap_or("model_auto"),
+                    "routing_turns": routing_turns,
+                    "routing_input_chars": routing_input.chars().count()
+                }),
+            )
+            .await?;
         let compiled = self.context_compiler.compile(conversation_id).await?;
         let mut messages = vec![json!({"role": "system", "content": system_prompt()})];
         messages.extend(compiled.messages);
@@ -106,8 +122,9 @@ impl AgentOrchestrator {
         let mut response_artifacts = Vec::<MemoryArtifact>::new();
         for round in 0..self.settings.max_tool_rounds {
             let tool_choice = if round == 0 {
-                self.tools
-                    .select_forced_tool(input)
+                forced_route
+                    .as_ref()
+                    .map(|route| route.name.clone())
                     .map(|name| json!({"type": "function", "function": {"name": name}}))
                     .unwrap_or_else(|| json!("auto"))
             } else {
@@ -264,6 +281,21 @@ impl AgentOrchestrator {
                 Some(&json!({"frames": frames.len()})),
             )
             .await?;
+        let (routing_input, routing_turns) =
+            self.context.trailing_user_input(session_id, 4).await?;
+        let forced_route = self.tools.forced_route(&routing_input);
+        self.record_flow_event(
+            session_id,
+            "server.tool.routed",
+            json!({
+                "response_id": response_id,
+                "tool": forced_route.as_ref().map(|route| &route.name),
+                "reason": forced_route.as_ref().map(|route| route.reason).unwrap_or("model_auto"),
+                "routing_turns": routing_turns,
+                "routing_input_chars": routing_input.chars().count()
+            }),
+        )
+        .await;
 
         let mut compiled = self.context_compiler.compile(session_id).await?;
         compiled.messages.pop();
@@ -308,7 +340,7 @@ impl AgentOrchestrator {
         );
         let generation = async move {
             let available_tools = self.tools.schemas();
-            let forced_tool = self.tools.select_forced_tool(&transcript);
+            let forced_tool = forced_route.map(|route| route.name);
             let mut final_text = String::new();
             let mut response_artifacts = Vec::<MemoryArtifact>::new();
             for round in 0..self.settings.max_tool_rounds {
@@ -707,7 +739,7 @@ impl SpeechSegmenter {
         if let Some(phrase) = self.take_pending() {
             self.ready.push(phrase);
         }
-        self.ready
+        coalesce_speech_segments(self.ready, MAX_TTS_UTTERANCE_CHARS)
     }
 
     fn take_pending(&mut self) -> Option<String> {
@@ -715,6 +747,23 @@ impl SpeechSegmenter {
         self.pending.clear();
         (!phrase.is_empty()).then_some(phrase)
     }
+}
+
+fn coalesce_speech_segments(segments: Vec<String>, max_chars: usize) -> Vec<String> {
+    let mut utterances = Vec::new();
+    let mut current = String::new();
+
+    for segment in segments {
+        if !current.is_empty() && current.chars().count() + segment.chars().count() > max_chars {
+            utterances.push(current);
+            current = String::new();
+        }
+        current.push_str(&segment);
+    }
+    if !current.is_empty() {
+        utterances.push(current);
+    }
+    utterances
 }
 
 async fn emit(send: &mpsc::Sender<Value>, event: Value) -> anyhow::Result<()> {
@@ -841,6 +890,17 @@ mod tests {
 
         assert!(segmenter.push(&sentence).is_empty());
         assert_eq!(segmenter.finish(), vec![sentence]);
+    }
+
+    #[test]
+    fn combines_adjacent_sentences_into_one_tts_utterance() {
+        let mut segmenter = SpeechSegmenter::new();
+        let first = format!("{}。", "第".repeat(40));
+        let second = format!("{}。", "二".repeat(40));
+
+        assert!(segmenter.push(&first).is_empty());
+        assert!(segmenter.push(&second).is_empty());
+        assert_eq!(segmenter.finish(), vec![format!("{first}{second}")]);
     }
 
     #[test]

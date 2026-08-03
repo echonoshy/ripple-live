@@ -105,6 +105,18 @@ test('mobile todo reminders are enabled for Android and iOS', () => {
   assert.ok(capability.permissions.includes('notification:default'))
 })
 
+test('mobile todos retain completed items in a dedicated view', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
+
+  assert.match(appSource, /const \[todoView, setTodoView\] = useState<'active' \| 'completed'>\('active'\)/)
+  assert.match(appSource, /todos\(server, accessToken, todoView === 'completed'\)/)
+  assert.match(appSource, /\n\s*已完成\n\s*<\/button>/)
+  assert.match(appSource, /完成后会归档在“已完成”中/)
+  assert.match(appSource, /完成：\$\{formatHistoryTime\(todo\.completed_at\)\}/)
+  assert.match(cssSource, /\.todo-view-switch/)
+})
+
 test('mobile home presents video as the primary call entry', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
@@ -121,24 +133,24 @@ test('mobile home presents video as the primary call entry', () => {
   assert.match(appSource, /className="launch-button call-entry is-voice"/)
   assert.match(
     cssSource,
-    /\.launch-actions\s*{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 72px/s,
+    /\.launch-actions\s*{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 68px/s,
   )
   assert.match(cssSource, /animation:\s*ripple-ready-pulse 3\.5s/)
   assert.match(cssSource, /@media \(prefers-reduced-motion: reduce\)/)
   for (const color of [
-    '#100e15',
-    '#191621',
-    '#211d2a',
-    '#35303e',
-    '#f4f1f7',
-    '#a97bff',
+    '#0f0d12',
+    '#19161d',
+    '#24202a',
+    '#302b36',
+    '#f5f2f7',
+    '#9046ff',
   ]) {
     assert.match(cssSource, new RegExp(color))
   }
   assert.match(cssSource, /@media \(max-width: 359px\)/)
   assert.match(cssSource, /\.launch-button\s*{[^}]*min-width:\s*44px/s)
-  assert.match(cssSource, /--voice-accent:\s*#b178ff/)
-  assert.match(cssSource, /--video-accent:\s*#77a7ff/)
+  assert.match(cssSource, /--voice-accent:\s*#b98aff/)
+  assert.match(cssSource, /--video-accent:\s*#e8ddff/)
   assert.match(cssSource, /\.call-entry\.is-voice/)
   assert.match(cssSource, /\.call-entry\.is-video/)
 })

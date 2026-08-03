@@ -74,7 +74,7 @@ impl Settings {
             tts_language: value("TTS_LANGUAGE", "Chinese"),
             tts_instructions: value(
                 "TTS_INSTRUCTIONS",
-                "自然、温暖、亲切的中文女声。语速适中，语气平静，停顿自然，像真人助手交流，避免播音腔和夸张情绪。",
+                "自然、温暖、亲切的中文女声。语速偏快但吐字清晰，语气平静连贯，停顿简洁自然，保持稳定一致的音色，像真人助手交流，避免播音腔和夸张情绪。",
             ),
             audio_chunk_ms: parsed("AUDIO_CHUNK_MS", 100),
             sample_rate_in: parsed("SAMPLE_RATE_IN", 16_000),

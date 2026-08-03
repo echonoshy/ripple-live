@@ -83,6 +83,13 @@ pub struct TodoRecord {
     pub cover: Option<MemoryArtifact>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TodoUpdate {
+    pub title: Option<String>,
+    pub due_at: Option<Option<f64>>,
+    pub completed: Option<bool>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateMemoryRequest {
     pub user_note: String,
@@ -400,17 +407,71 @@ impl MemoryService {
         Ok(todos)
     }
 
-    pub async fn complete_todo(
+    pub async fn create_manual_todo(
+        &self,
+        user_id: &str,
+        title: &str,
+        due_at: Option<f64>,
+    ) -> anyhow::Result<TodoRecord> {
+        let title = title.trim();
+        if title.is_empty() || title.chars().count() > 500 {
+            anyhow::bail!("待办标题不能为空且不能超过 500 个字符");
+        }
+        let todo_id = format!("todo_{}", Uuid::new_v4().simple());
+        let now = unix_time();
+        sqlx::query(
+            "INSERT INTO todos(
+                id, user_id, title, visual_summary, due_at, completed_at, created_at, updated_at
+             ) VALUES (?, ?, ?, '', ?, NULL, ?, ?)",
+        )
+        .bind(&todo_id)
+        .bind(user_id)
+        .bind(title)
+        .bind(due_at)
+        .bind(now)
+        .bind(now)
+        .execute(self.context.pool())
+        .await?;
+        self.get_todo(user_id, &todo_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("创建后的待办不存在"))
+    }
+
+    pub async fn update_todo(
         &self,
         user_id: &str,
         todo_id: &str,
-        completed: bool,
+        update: TodoUpdate,
     ) -> anyhow::Result<Option<TodoRecord>> {
+        if update.title.is_none() && update.due_at.is_none() && update.completed.is_none() {
+            anyhow::bail!("至少提供一项待办修改内容");
+        }
+        let title = update.title.as_deref().map(str::trim);
+        if let Some(title) = title {
+            if title.is_empty() || title.chars().count() > 500 {
+                anyhow::bail!("待办标题不能为空且不能超过 500 个字符");
+            }
+        }
         let now = unix_time();
+        let title_changed = title.is_some();
+        let due_changed = update.due_at.is_some();
+        let due_at = update.due_at.flatten();
+        let completed_changed = update.completed.is_some();
+        let completed_at = update.completed.filter(|completed| *completed).map(|_| now);
         let result = sqlx::query(
-            "UPDATE todos SET completed_at = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            "UPDATE todos SET
+                title = CASE WHEN ? THEN ? ELSE title END,
+                due_at = CASE WHEN ? THEN ? ELSE due_at END,
+                completed_at = CASE WHEN ? THEN ? ELSE completed_at END,
+                updated_at = ?
+             WHERE id = ? AND user_id = ?",
         )
-        .bind(if completed { Some(now) } else { None })
+        .bind(title_changed)
+        .bind(title)
+        .bind(due_changed)
+        .bind(due_at)
+        .bind(completed_changed)
+        .bind(completed_at)
         .bind(now)
         .bind(todo_id)
         .bind(user_id)
@@ -420,6 +481,32 @@ impl MemoryService {
             return Ok(None);
         }
         self.get_todo(user_id, todo_id).await
+    }
+
+    pub async fn complete_todo(
+        &self,
+        user_id: &str,
+        todo_id: &str,
+        completed: bool,
+    ) -> anyhow::Result<Option<TodoRecord>> {
+        self.update_todo(
+            user_id,
+            todo_id,
+            TodoUpdate {
+                completed: Some(completed),
+                ..TodoUpdate::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn delete_todo(&self, user_id: &str, todo_id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM todos WHERE id = ? AND user_id = ?")
+            .bind(todo_id)
+            .bind(user_id)
+            .execute(self.context.pool())
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn list(

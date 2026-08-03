@@ -70,7 +70,7 @@ test('groups active items by pin and local calendar day without duplicates', () 
 
   assert.deepEqual(
     groups.map((group) => group.label),
-    ['已标记', '今天', '昨天', '7月29日', '更早'],
+    ['已置顶', '今天', '昨天', '7月29日', '更早'],
   )
   assert.deepEqual(
     groups.flatMap((group) => group.items).map((item) => item.id),

@@ -4,6 +4,11 @@ import { viteStaticCopy } from 'vite-plugin-static-copy'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Tauri supplies TAURI_DEV_HOST when deploying to a physical device. Binding
+  // to it makes the Vite server reachable by the Android WebView for live reload.
+  server: {
+    host: process.env.TAURI_DEV_HOST ?? '127.0.0.1',
+  },
   plugins: [
     react(),
     viteStaticCopy({

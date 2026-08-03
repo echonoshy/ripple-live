@@ -60,7 +60,15 @@ export type TodoItem = {
   cover: MemoryArtifact | null
 }
 
+export type TodoPatch = {
+  title?: string
+  due_at?: number | null
+  clear_due_at?: boolean
+  completed?: boolean
+}
+
 export type LibraryPatch = {
+  title?: string
   is_pinned?: boolean
   archived?: boolean
 }
@@ -207,6 +215,15 @@ export function conversationMutation(
   })
 }
 
+export function renameConversation(
+  server: string,
+  token: string,
+  id: string,
+  title: string,
+) {
+  return updateConversation(server, token, id, { title })
+}
+
 async function batchMutation(
   server: string,
   token: string,
@@ -281,15 +298,42 @@ export async function updateTodo(
   server: string,
   token: string,
   todoId: string,
-  completed: boolean,
+  patch: TodoPatch,
 ) {
   const payload = await request<{ data: TodoItem }>(
     server,
     `/v1/todos/${encodeURIComponent(todoId)}`,
-    { method: 'PATCH', body: JSON.stringify({ completed }) },
+    { method: 'PATCH', body: JSON.stringify(patch) },
     token,
   )
   return payload.data
+}
+
+export async function createTodo(
+  server: string,
+  token: string,
+  title: string,
+  dueAt?: number,
+) {
+  const payload = await request<{ data: TodoItem }>(
+    server,
+    '/v1/todos',
+    {
+      method: 'POST',
+      body: JSON.stringify({ title, due_at: dueAt }),
+    },
+    token,
+  )
+  return payload.data
+}
+
+export function deleteTodo(server: string, token: string, todoId: string) {
+  return request<void>(
+    server,
+    `/v1/todos/${encodeURIComponent(todoId)}`,
+    { method: 'DELETE' },
+    token,
+  )
 }
 
 export async function updateMemory(

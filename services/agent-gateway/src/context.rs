@@ -884,6 +884,35 @@ impl ContextStore {
             .collect())
     }
 
+    pub async fn trailing_user_input(
+        &self,
+        session_id: &str,
+        max_turns: i64,
+    ) -> anyhow::Result<(String, usize)> {
+        let rows = sqlx::query(
+            "SELECT role, content FROM turns WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+        )
+        .bind(session_id)
+        .bind(max_turns.clamp(1, 8))
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut fragments = Vec::new();
+        for row in rows {
+            let role: String = row.get("role");
+            if role != "user" {
+                break;
+            }
+            let content: String = row.get("content");
+            if !content.trim().is_empty() {
+                fragments.push(content);
+            }
+        }
+        fragments.reverse();
+        let count = fragments.len();
+        Ok((fragments.join(" "), count))
+    }
+
     pub async fn remember(&self, session_id: &str, content: &str) -> anyhow::Result<i64> {
         let result =
             sqlx::query("INSERT INTO memories(session_id, content, created_at) VALUES (?, ?, ?)")
@@ -1013,6 +1042,42 @@ mod tests {
             store.recall("s1", "乌龙", 5).await.unwrap(),
             vec!["用户喜欢乌龙茶"]
         );
+    }
+
+    #[tokio::test]
+    async fn joins_unanswered_user_fragments_for_routing() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ContextStore::open(&directory.path().join("routing.sqlite3"))
+            .await
+            .unwrap();
+        store.touch_session("s1").await.unwrap();
+        store
+            .add_turn("s1", "user", "帮我搜索一下", None)
+            .await
+            .unwrap();
+        store
+            .add_turn("s1", "user", "记忆图库里的", None)
+            .await
+            .unwrap();
+        store
+            .add_turn("s1", "user", "芦荟胶图片", None)
+            .await
+            .unwrap();
+        let (input, turns) = store.trailing_user_input("s1", 4).await.unwrap();
+        assert_eq!(turns, 3);
+        assert_eq!(input, "帮我搜索一下 记忆图库里的 芦荟胶图片");
+
+        store
+            .add_turn("s1", "assistant", "好的", None)
+            .await
+            .unwrap();
+        store
+            .add_turn("s1", "user", "查看待办", None)
+            .await
+            .unwrap();
+        let (input, turns) = store.trailing_user_input("s1", 4).await.unwrap();
+        assert_eq!(turns, 1);
+        assert_eq!(input, "查看待办");
     }
 
     #[tokio::test]
