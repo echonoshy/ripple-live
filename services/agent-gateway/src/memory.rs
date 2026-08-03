@@ -1,10 +1,14 @@
 use std::{cmp::Ordering, collections::HashSet, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use sqlx::{QueryBuilder, Row, Sqlite};
 use uuid::Uuid;
 
-use crate::{asset_store::AssetStore, context::ContextStore, protocol::VideoFrame};
+use crate::{
+    asset_store::AssetStore,
+    context::{ContextStore, LibraryAction, LibraryScope},
+    protocol::VideoFrame,
+};
 
 #[derive(Clone)]
 pub struct MemoryService {
@@ -42,6 +46,8 @@ pub struct MemoryRecord {
     pub captured_at: Option<f64>,
     pub created_at: f64,
     pub cover: Option<MemoryArtifact>,
+    pub is_pinned: bool,
+    pub archived_at: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -198,7 +204,8 @@ impl MemoryService {
         limit: usize,
     ) -> anyhow::Result<Vec<MemorySearchResult>> {
         let rows = sqlx::query(
-            "SELECT id FROM memory_items WHERE user_id = ? ORDER BY created_at DESC LIMIT 200",
+            "SELECT id FROM memory_items WHERE user_id = ? AND archived_at IS NULL
+             ORDER BY created_at DESC LIMIT 200",
         )
         .bind(user_id)
         .fetch_all(self.context.pool())
@@ -231,11 +238,37 @@ impl MemoryService {
         Ok(results)
     }
 
-    pub async fn list(&self, user_id: &str, limit: usize) -> anyhow::Result<Vec<MemoryRecord>> {
+    pub async fn list(
+        &self,
+        user_id: &str,
+        scope: LibraryScope,
+        pinned_only: bool,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryRecord>> {
+        let scope = match scope {
+            LibraryScope::Active => 0_i64,
+            LibraryScope::Archived => 1_i64,
+            LibraryScope::All => 2_i64,
+        };
+        let query = query.trim();
+        let pattern = format!("%{query}%");
         let rows = sqlx::query(
-            "SELECT id FROM memory_items WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT id FROM memory_items WHERE user_id = ?
+               AND (? = 2 OR (? = 0 AND archived_at IS NULL)
+                    OR (? = 1 AND archived_at IS NOT NULL))
+               AND (? = 0 OR is_pinned = 1)
+               AND (? = '' OR user_note LIKE ? OR visual_summary LIKE ?)
+             ORDER BY is_pinned DESC, COALESCE(captured_at, created_at) DESC LIMIT ?",
         )
         .bind(user_id)
+        .bind(scope)
+        .bind(scope)
+        .bind(scope)
+        .bind(i64::from(pinned_only))
+        .bind(query)
+        .bind(&pattern)
+        .bind(&pattern)
         .bind(limit.clamp(1, 100) as i64)
         .fetch_all(self.context.pool())
         .await?;
@@ -255,7 +288,7 @@ impl MemoryService {
     ) -> anyhow::Result<Option<MemorySearchResult>> {
         let row = sqlx::query(
             "SELECT id, kind, user_note, visual_summary, cover_asset_id,
-                    captured_at, created_at
+                    captured_at, created_at, is_pinned, archived_at
              FROM memory_items WHERE id = ? AND user_id = ?",
         )
         .bind(memory_id)
@@ -290,6 +323,8 @@ impl MemoryService {
                 captured_at: row.get("captured_at"),
                 created_at: row.get("created_at"),
                 cover,
+                is_pinned: row.get::<i64, _>("is_pinned") != 0,
+                archived_at: row.get("archived_at"),
             },
             score: 1.0,
             assets,
@@ -314,30 +349,73 @@ impl MemoryService {
     }
 
     pub async fn delete(&self, user_id: &str, memory_id: &str) -> anyhow::Result<bool> {
-        let asset_rows = sqlx::query(
-            "SELECT a.id, a.storage_key FROM memory_assets ma
-             JOIN assets a ON a.id = ma.asset_id
-             JOIN memory_items m ON m.id = ma.memory_id
-             WHERE ma.memory_id = ? AND m.user_id = ?",
-        )
-        .bind(memory_id)
-        .bind(user_id)
-        .fetch_all(self.context.pool())
-        .await?;
-        let mut transaction = self.context.pool().begin().await?;
-        sqlx::query("DELETE FROM turn_attachments WHERE memory_id = ?")
-            .bind(memory_id)
-            .execute(&mut *transaction)
+        if self.get(user_id, memory_id).await?.is_none() {
+            return Ok(false);
+        }
+        self.mutate(user_id, &[memory_id.to_owned()], LibraryAction::Delete)
             .await?;
-        let deleted = sqlx::query("DELETE FROM memory_items WHERE id = ? AND user_id = ?")
-            .bind(memory_id)
-            .bind(user_id)
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected()
-            == 1;
+        Ok(true)
+    }
+
+    pub async fn mutate(
+        &self,
+        user_id: &str,
+        ids: &[String],
+        action: LibraryAction,
+    ) -> anyhow::Result<usize> {
+        validate_library_ids(ids)?;
+        let mut transaction = self.context.pool().begin().await?;
+        let mut ownership =
+            QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM memory_items WHERE user_id = ");
+        ownership.push_bind(user_id).push(" AND id IN (");
+        let mut separated = ownership.separated(", ");
+        for id in ids {
+            separated.push_bind(id);
+        }
+        separated.push_unseparated(")");
+        let count: i64 = ownership
+            .build_query_scalar()
+            .fetch_one(&mut *transaction)
+            .await?;
+        if count != ids.len() as i64 {
+            anyhow::bail!("记忆不存在");
+        }
+
         let mut orphaned = Vec::new();
-        if deleted {
+        if action == LibraryAction::Delete {
+            let mut assets = QueryBuilder::<Sqlite>::new(
+                "SELECT DISTINCT a.id, a.storage_key FROM memory_assets ma
+                 JOIN assets a ON a.id = ma.asset_id
+                 JOIN memory_items m ON m.id = ma.memory_id
+                 WHERE m.user_id = ",
+            );
+            assets.push_bind(user_id).push(" AND ma.memory_id IN (");
+            let mut separated = assets.separated(", ");
+            for id in ids {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(")");
+            let asset_rows = assets.build().fetch_all(&mut *transaction).await?;
+
+            let mut detach =
+                QueryBuilder::<Sqlite>::new("DELETE FROM turn_attachments WHERE memory_id IN (");
+            let mut separated = detach.separated(", ");
+            for id in ids {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(")");
+            detach.build().execute(&mut *transaction).await?;
+
+            let mut delete =
+                QueryBuilder::<Sqlite>::new("DELETE FROM memory_items WHERE user_id = ");
+            delete.push_bind(user_id).push(" AND id IN (");
+            let mut separated = delete.separated(", ");
+            for id in ids {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(")");
+            delete.build().execute(&mut *transaction).await?;
+
             for row in asset_rows {
                 let asset_id: String = row.get("id");
                 let references: i64 =
@@ -354,12 +432,32 @@ impl MemoryService {
                     orphaned.push(row.get::<String, _>("storage_key"));
                 }
             }
+        } else {
+            let mut update = QueryBuilder::<Sqlite>::new("UPDATE memory_items SET ");
+            match action {
+                LibraryAction::Pin => update.push("is_pinned = 1"),
+                LibraryAction::Unpin => update.push("is_pinned = 0"),
+                LibraryAction::Archive => {
+                    update.push("archived_at = COALESCE(archived_at, ");
+                    update.push_bind(unix_time()).push(")")
+                }
+                LibraryAction::Unarchive => update.push("archived_at = NULL"),
+                LibraryAction::Delete => unreachable!(),
+            };
+            update.push(" WHERE user_id = ");
+            update.push_bind(user_id).push(" AND id IN (");
+            let mut separated = update.separated(", ");
+            for id in ids {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(")");
+            update.build().execute(&mut *transaction).await?;
         }
         transaction.commit().await?;
         for storage_key in orphaned {
             let _ = self.assets.remove(&storage_key).await;
         }
-        Ok(deleted)
+        Ok(ids.len())
     }
 
     pub async fn asset_content(
@@ -418,6 +516,17 @@ impl MemoryService {
         .fetch_optional(self.context.pool())
         .await?)
     }
+}
+
+fn validate_library_ids(ids: &[String]) -> anyhow::Result<()> {
+    if ids.is_empty() || ids.len() > 100 {
+        anyhow::bail!("ids 必须包含 1 到 100 个项目");
+    }
+    let unique = ids.iter().collect::<HashSet<_>>();
+    if unique.len() != ids.len() || ids.iter().any(|id| id.trim().is_empty()) {
+        anyhow::bail!("ids 不能包含空值或重复项");
+    }
+    Ok(())
 }
 
 fn artifact(id: String, memory_id: &str, caption: &str) -> MemoryArtifact {
@@ -534,7 +643,13 @@ mod tests {
         let created = service.create(request.clone()).await.unwrap();
         let repeated = service.create(request).await.unwrap();
         assert_eq!(created.memory.id, repeated.memory.id);
-        assert_eq!(service.list(&user.id, 10).await.unwrap().len(), 1);
+        let active = service
+            .list(&user.id, LibraryScope::Active, false, "", 10)
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        assert!(!active[0].is_pinned);
+        assert_eq!(active[0].archived_at, None);
         assert!(
             service
                 .get(&other.id, &created.memory.id)
@@ -548,6 +663,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recalled[0].memory.id, created.memory.id);
+
+        service
+            .mutate(
+                &user.id,
+                std::slice::from_ref(&created.memory.id),
+                LibraryAction::Archive,
+            )
+            .await
+            .unwrap();
+        assert!(
+            service
+                .recall(&user.id, "蓝色转接头", 5)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            service
+                .list(&user.id, LibraryScope::Archived, false, "", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        service
+            .mutate(
+                &user.id,
+                std::slice::from_ref(&created.memory.id),
+                LibraryAction::Unarchive,
+            )
+            .await
+            .unwrap();
         let cover = created.memory.cover.clone().unwrap();
         let assistant_turn = context
             .add_turn(&conversation, "assistant", "已经记住了", None)
@@ -578,5 +725,121 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn saved_memory_survives_its_conversation_and_batch_is_atomic() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = ContextStore::open(&directory.path().join("survival.sqlite3"))
+            .await
+            .unwrap();
+        context
+            .seed_invitation_codes(
+                &["survival-invite".to_owned(), "survival-other".to_owned()],
+                1,
+                24,
+            )
+            .await
+            .unwrap();
+        let (user, _) = context
+            .register_user(
+                "survival@example.com",
+                "password-memory",
+                "survival-invite",
+                24,
+            )
+            .await
+            .unwrap();
+        let (other, _) = context
+            .register_user(
+                "survival-other@example.com",
+                "password-memory",
+                "survival-other",
+                24,
+            )
+            .await
+            .unwrap();
+        let conversation = context.create_conversation(&user.id).await.unwrap();
+        let source_turn_id = context
+            .add_turn(&conversation, "user", "记住蓝色转接头", None)
+            .await
+            .unwrap();
+        let other_conversation = context.create_conversation(&other.id).await.unwrap();
+        let other_turn_id = context
+            .add_turn(&other_conversation, "user", "记住红色转接头", None)
+            .await
+            .unwrap();
+        let service = MemoryService::new(context.clone(), directory.path().join("assets"))
+            .await
+            .unwrap();
+        let own = service
+            .create(CreateMemoryRequest {
+                user_id: user.id.clone(),
+                conversation_id: conversation.clone(),
+                source_turn_id,
+                response_id: "survival-response".to_owned(),
+                tool_call_id: "survival-call".to_owned(),
+                user_note: "蓝色转接头".to_owned(),
+                visual_summary: "蓝色转接头在抽屉里".to_owned(),
+                frames: vec![],
+            })
+            .await
+            .unwrap();
+        let foreign = service
+            .create(CreateMemoryRequest {
+                user_id: other.id.clone(),
+                conversation_id: other_conversation,
+                source_turn_id: other_turn_id,
+                response_id: "foreign-response".to_owned(),
+                tool_call_id: "foreign-call".to_owned(),
+                user_note: "红色转接头".to_owned(),
+                visual_summary: "红色转接头在桌上".to_owned(),
+                frames: vec![],
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            service
+                .mutate(
+                    &user.id,
+                    &[own.memory.id.clone(), foreign.memory.id],
+                    LibraryAction::Pin,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            !service
+                .get(&user.id, &own.memory.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .memory
+                .is_pinned
+        );
+
+        context
+            .mutate_conversations(
+                &user.id,
+                std::slice::from_ref(&conversation),
+                LibraryAction::Delete,
+            )
+            .await
+            .unwrap();
+        assert!(
+            service
+                .get(&user.id, &own.memory.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let source: (Option<String>, Option<i64>) =
+            sqlx::query_as("SELECT conversation_id, source_turn_id FROM memory_items WHERE id = ?")
+                .bind(&own.memory.id)
+                .fetch_one(context.pool())
+                .await
+                .unwrap();
+        assert_eq!(source, (None, None));
     }
 }

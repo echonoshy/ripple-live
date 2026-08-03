@@ -1,9 +1,9 @@
 use std::{path::Path, str::FromStr};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{
-    Row, SqlitePool,
+    Acquire, QueryBuilder, Row, Sqlite, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use uuid::Uuid;
@@ -19,6 +19,32 @@ pub struct ConversationSummary {
     pub preview: String,
     pub created_at: f64,
     pub updated_at: f64,
+    pub is_pinned: bool,
+    pub archived_at: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryScope {
+    Active,
+    Archived,
+    All,
+}
+
+impl Default for LibraryScope {
+    fn default() -> Self {
+        Self::Active
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryAction {
+    Pin,
+    Unpin,
+    Archive,
+    Unarchive,
+    Delete,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -103,15 +129,17 @@ impl ContextStore {
             "CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
                 title TEXT NOT NULL DEFAULT '新对话',
-                created_at REAL NOT NULL, updated_at REAL NOT NULL
+                created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                is_pinned INTEGER NOT NULL DEFAULT 0, archived_at REAL
             )",
             "CREATE TABLE IF NOT EXISTS memory_items (
                 id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
-                conversation_id TEXT NOT NULL, source_turn_id INTEGER NOT NULL,
+                conversation_id TEXT, source_turn_id INTEGER,
                 source_response_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'visual',
                 user_note TEXT NOT NULL, visual_summary TEXT NOT NULL DEFAULT '',
                 cover_asset_id TEXT, captured_at REAL,
                 created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                is_pinned INTEGER NOT NULL DEFAULT 0, archived_at REAL,
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 FOREIGN KEY(conversation_id) REFERENCES conversations(id),
                 FOREIGN KEY(source_turn_id) REFERENCES turns(id)
@@ -167,6 +195,15 @@ impl ContextStore {
         .await?;
         self.ensure_column("invitation_codes", "expires_at", "REAL")
             .await?;
+        self.ensure_column("conversations", "is_pinned", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
+        self.ensure_column("conversations", "archived_at", "REAL")
+            .await?;
+        self.ensure_column("memory_items", "is_pinned", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
+        self.ensure_column("memory_items", "archived_at", "REAL")
+            .await?;
+        self.migrate_memory_sources_nullable().await?;
         sqlx::query(
             "UPDATE invitation_codes SET use_count = 1
              WHERE used_by IS NOT NULL AND use_count = 0",
@@ -174,6 +211,79 @@ impl ContextStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn migrate_memory_sources_nullable(&self) -> anyhow::Result<()> {
+        let columns = sqlx::query("PRAGMA table_info(memory_items)")
+            .fetch_all(&self.pool)
+            .await?;
+        let requires_rebuild = columns.iter().any(|row| {
+            row.get::<String, _>("name") == "conversation_id" && row.get::<i64, _>("notnull") != 0
+        });
+        if !requires_rebuild {
+            return Ok(());
+        }
+
+        let mut connection = self.pool.acquire().await?;
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut *connection)
+            .await?;
+        let migration = async {
+            let mut transaction = connection.begin().await?;
+            sqlx::query(
+                "CREATE TABLE memory_items_new (
+                    id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                    conversation_id TEXT, source_turn_id INTEGER,
+                    source_response_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'visual',
+                    user_note TEXT NOT NULL, visual_summary TEXT NOT NULL DEFAULT '',
+                    cover_asset_id TEXT, captured_at REAL,
+                    created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                    is_pinned INTEGER NOT NULL DEFAULT 0, archived_at REAL,
+                    FOREIGN KEY(user_id) REFERENCES users(id),
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+                    FOREIGN KEY(source_turn_id) REFERENCES turns(id)
+                )",
+            )
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT INTO memory_items_new(
+                    id, user_id, conversation_id, source_turn_id, source_response_id,
+                    kind, user_note, visual_summary, cover_asset_id, captured_at,
+                    created_at, updated_at, is_pinned, archived_at
+                 ) SELECT id, user_id, conversation_id, source_turn_id, source_response_id,
+                    kind, user_note, visual_summary, cover_asset_id, captured_at,
+                    created_at, updated_at, is_pinned, archived_at
+                 FROM memory_items",
+            )
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query("DROP TABLE memory_items")
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("ALTER TABLE memory_items_new RENAME TO memory_items")
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_memory_items_user
+                 ON memory_items(user_id, created_at DESC)",
+            )
+            .execute(&mut *transaction)
+            .await?;
+            let violations = sqlx::query("PRAGMA foreign_key_check")
+                .fetch_all(&mut *transaction)
+                .await?;
+            if !violations.is_empty() {
+                anyhow::bail!("memory_items migration failed foreign key validation");
+            }
+            transaction.commit().await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *connection)
+            .await?;
+        migration
     }
 
     async fn ensure_column(
@@ -387,16 +497,40 @@ impl ContextStore {
     pub async fn list_conversations(
         &self,
         user_id: &str,
+        scope: LibraryScope,
+        pinned_only: bool,
+        query: &str,
         limit: i64,
     ) -> anyhow::Result<Vec<ConversationSummary>> {
+        let scope = match scope {
+            LibraryScope::Active => 0_i64,
+            LibraryScope::Archived => 1_i64,
+            LibraryScope::All => 2_i64,
+        };
+        let query = query.trim();
+        let pattern = format!("%{query}%");
         let rows = sqlx::query(
             "SELECT c.id, c.title, c.created_at, c.updated_at,
+                c.is_pinned, c.archived_at,
                 COALESCE((SELECT content FROM turns t WHERE t.session_id = c.id
                           ORDER BY t.id DESC LIMIT 1), '') AS preview
              FROM conversations c WHERE c.user_id = ?
-             ORDER BY c.updated_at DESC LIMIT ?",
+               AND (? = 2 OR (? = 0 AND c.archived_at IS NULL)
+                    OR (? = 1 AND c.archived_at IS NOT NULL))
+               AND (? = 0 OR c.is_pinned = 1)
+               AND (? = '' OR c.title LIKE ? OR
+                    COALESCE((SELECT content FROM turns t WHERE t.session_id = c.id
+                              ORDER BY t.id DESC LIMIT 1), '') LIKE ?)
+             ORDER BY c.is_pinned DESC, c.updated_at DESC LIMIT ?",
         )
         .bind(user_id)
+        .bind(scope)
+        .bind(scope)
+        .bind(scope)
+        .bind(i64::from(pinned_only))
+        .bind(query)
+        .bind(&pattern)
+        .bind(&pattern)
         .bind(limit.clamp(1, 100))
         .fetch_all(&self.pool)
         .await?;
@@ -408,8 +542,103 @@ impl ContextStore {
                 preview: row.get("preview"),
                 created_at: row.get("created_at"),
                 updated_at: row.get("updated_at"),
+                is_pinned: row.get::<i64, _>("is_pinned") != 0,
+                archived_at: row.get("archived_at"),
             })
             .collect())
+    }
+
+    pub async fn mutate_conversations(
+        &self,
+        user_id: &str,
+        ids: &[String],
+        action: LibraryAction,
+    ) -> anyhow::Result<usize> {
+        validate_library_ids(ids)?;
+        let mut transaction = self.pool.begin().await?;
+        let mut ownership =
+            QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM conversations WHERE user_id = ");
+        ownership.push_bind(user_id).push(" AND id IN (");
+        let mut separated = ownership.separated(", ");
+        for id in ids {
+            separated.push_bind(id);
+        }
+        separated.push_unseparated(")");
+        let count: i64 = ownership
+            .build_query_scalar()
+            .fetch_one(&mut *transaction)
+            .await?;
+        if count != ids.len() as i64 {
+            anyhow::bail!("对话不存在");
+        }
+
+        if action == LibraryAction::Delete {
+            let mut clear_sources = QueryBuilder::<Sqlite>::new(
+                "UPDATE memory_items SET conversation_id = NULL, source_turn_id = NULL WHERE user_id = ",
+            );
+            clear_sources
+                .push_bind(user_id)
+                .push(" AND conversation_id IN (");
+            let mut separated = clear_sources.separated(", ");
+            for id in ids {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(")");
+            clear_sources.build().execute(&mut *transaction).await?;
+
+            for (prefix, nested) in [
+                (
+                    "DELETE FROM turn_attachments WHERE turn_id IN (SELECT id FROM turns WHERE session_id IN (",
+                    true,
+                ),
+                ("DELETE FROM turns WHERE session_id IN (", false),
+                ("DELETE FROM events WHERE session_id IN (", false),
+                ("DELETE FROM memories WHERE session_id IN (", false),
+                ("DELETE FROM sessions WHERE id IN (", false),
+            ] {
+                let mut delete = QueryBuilder::<Sqlite>::new(prefix);
+                let mut separated = delete.separated(", ");
+                for id in ids {
+                    separated.push_bind(id);
+                }
+                separated.push_unseparated(if nested { "))" } else { ")" });
+                delete.build().execute(&mut *transaction).await?;
+            }
+        } else {
+            let mut update = QueryBuilder::<Sqlite>::new("UPDATE conversations SET ");
+            match action {
+                LibraryAction::Pin => update.push("is_pinned = 1"),
+                LibraryAction::Unpin => update.push("is_pinned = 0"),
+                LibraryAction::Archive => {
+                    update.push("archived_at = COALESCE(archived_at, ");
+                    update.push_bind(unix_time()).push(")")
+                }
+                LibraryAction::Unarchive => update.push("archived_at = NULL"),
+                LibraryAction::Delete => unreachable!(),
+            };
+            update.push(" WHERE user_id = ");
+            update.push_bind(user_id).push(" AND id IN (");
+            let mut separated = update.separated(", ");
+            for id in ids {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(")");
+            update.build().execute(&mut *transaction).await?;
+        }
+
+        if action == LibraryAction::Delete {
+            let mut delete =
+                QueryBuilder::<Sqlite>::new("DELETE FROM conversations WHERE user_id = ");
+            delete.push_bind(user_id).push(" AND id IN (");
+            let mut separated = delete.separated(", ");
+            for id in ids {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(")");
+            delete.build().execute(&mut *transaction).await?;
+        }
+        transaction.commit().await?;
+        Ok(ids.len())
     }
 
     pub async fn conversation_messages(
@@ -634,6 +863,17 @@ impl ContextStore {
     }
 }
 
+fn validate_library_ids(ids: &[String]) -> anyhow::Result<()> {
+    if ids.is_empty() || ids.len() > 100 {
+        anyhow::bail!("ids 必须包含 1 到 100 个项目");
+    }
+    let unique = ids.iter().collect::<std::collections::HashSet<_>>();
+    if unique.len() != ids.len() || ids.iter().any(|id| id.trim().is_empty()) {
+        anyhow::bail!("ids 不能包含空值或重复项");
+    }
+    Ok(())
+}
+
 async fn insert_auth_session(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user_id: &str,
@@ -665,6 +905,18 @@ fn unix_time() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn registered_user(store: &ContextStore, email: &str, invite: &str) -> AuthUser {
+        store
+            .seed_invitation_codes(&[invite.to_owned()], 1, 24)
+            .await
+            .unwrap();
+        store
+            .register_user(email, "password-library", invite, 24)
+            .await
+            .unwrap()
+            .0
+    }
 
     #[tokio::test]
     async fn stores_and_recalls_memory() {
@@ -752,6 +1004,93 @@ mod tests {
                 )
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn organizes_conversations_and_rejects_non_owned_batches_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ContextStore::open(&directory.path().join("library.sqlite3"))
+            .await
+            .unwrap();
+        let user = registered_user(&store, "library@example.com", "library-invite").await;
+        let other = registered_user(&store, "other-library@example.com", "other-invite").await;
+        let conversation = store.create_conversation(&user.id).await.unwrap();
+        let other_conversation = store.create_conversation(&other.id).await.unwrap();
+        store
+            .add_turn(&conversation, "user", "蓝色转接头放在哪里", None)
+            .await
+            .unwrap();
+
+        let active = store
+            .list_conversations(&user.id, LibraryScope::Active, false, "", 50)
+            .await
+            .unwrap();
+        assert!(!active[0].is_pinned);
+        assert_eq!(active[0].archived_at, None);
+        assert_eq!(
+            store
+                .list_conversations(&user.id, LibraryScope::Active, false, "转接头", 50)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        store
+            .mutate_conversations(
+                &user.id,
+                std::slice::from_ref(&conversation),
+                LibraryAction::Pin,
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .list_conversations(&user.id, LibraryScope::Active, false, "", 50)
+                .await
+                .unwrap()[0]
+                .is_pinned
+        );
+
+        let mixed = vec![conversation.clone(), other_conversation];
+        assert!(
+            store
+                .mutate_conversations(&user.id, &mixed, LibraryAction::Archive)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .list_conversations(&user.id, LibraryScope::Active, false, "", 50)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        store
+            .mutate_conversations(
+                &user.id,
+                std::slice::from_ref(&conversation),
+                LibraryAction::Archive,
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .list_conversations(&user.id, LibraryScope::Active, false, "", 50)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .list_conversations(&user.id, LibraryScope::Archived, false, "", 50)
+                .await
+                .unwrap()
+                .len(),
+            1
         );
     }
 }
