@@ -6,7 +6,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const sourceHash = '37eac2542f29286d0793b52a0b3fb701f89fee4a1d1cdd56bb806765073824e1'
+const sourceHash = 'a861031a55045c2b7c63c45a5de1861ca188655e38a55636a62f733b8d7123c4'
 
 function readPngSize(file) {
   const bytes = readFileSync(file)
@@ -25,7 +25,7 @@ test('mobile package has the supplied icon and iOS media permissions', () => {
   const source = path.join(appRoot, 'src-tauri/icons/ripple-live-source.png')
   const sourceBytes = readFileSync(source)
   assert.equal(createHash('sha256').update(sourceBytes).digest('hex'), sourceHash)
-  assert.deepEqual(readPngSize(source), { width: 254, height: 256 })
+  assert.deepEqual(readPngSize(source), { width: 1206, height: 1206 })
 
   expectSquare(path.join(appRoot, 'src-tauri/icons/icon.png'), 512)
   const androidRoot = path.join(
@@ -51,8 +51,12 @@ test('mobile package has the supplied icon and iOS media permissions', () => {
   const tauriConfig = JSON.parse(
     readFileSync(path.join(appRoot, 'src-tauri/tauri.conf.json'), 'utf8'),
   )
-  assert.equal(tauriConfig.identifier, 'cn.minicpm.ripplelive.debug')
-  assert.equal(tauriConfig.bundle.iOS.developmentTeam, '932QX878KY')
+  const iosConfig = JSON.parse(
+    readFileSync(path.join(appRoot, 'src-tauri/tauri.ios.conf.json'), 'utf8'),
+  )
+  assert.equal(tauriConfig.identifier, 'cn.minicpm.live')
+  assert.equal(iosConfig.identifier, 'cn.minicpm.ripplelive.debug')
+  assert.equal(iosConfig.bundle.iOS.developmentTeam, '932QX878KY')
 
   for (const plistPath of [
     path.join(appRoot, 'src-tauri/Info.ios.plist'),
