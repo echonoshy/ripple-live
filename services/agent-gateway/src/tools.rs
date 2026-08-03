@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 
 use crate::{
     capabilities::{CliRunner, SkillRegistry},
-    context::ContextStore,
+    memory::{CreateMemoryRequest, MemoryArtifact, MemoryService},
+    protocol::VideoFrame,
 };
 
 fn builtin_schemas() -> Vec<Value> {
@@ -73,10 +74,13 @@ fn builtin_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "remember",
-                "description": "把用户明确要求记住的信息保存到长期上下文。",
+                "description": "把用户明确要求记住的信息和当前画面保存到用户的长期记忆。只有用户明确要求时才能调用。",
                 "parameters": {
                     "type": "object",
-                    "properties": {"content": {"type": "string"}},
+                    "properties": {
+                        "content": {"type": "string", "description": "用户希望记住的核心信息"},
+                        "visual_summary": {"type": "string", "description": "根据当前画面生成的客观、可检索描述；没有画面时留空"}
+                    },
                     "required": ["content"],
                     "additionalProperties": false
                 }
@@ -86,7 +90,7 @@ fn builtin_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "recall",
-                "description": "检索当前会话中保存的长期信息。",
+                "description": "从当前用户所有会话保存的长期记忆中检索信息，并返回相关原始画面。query 应提炼为简洁关键词。",
                 "parameters": {
                     "type": "object",
                     "properties": {"query": {"type": "string", "default": ""}},
@@ -116,17 +120,35 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
             _ => None,
         };
     }
-    if (transcript.contains("记住：")
-        || transcript.contains("记住:")
-        || transcript.contains("记住，")
-        || transcript.contains("记住 "))
-        && (transcript.contains("请") || transcript.contains("帮我") || transcript.contains("记住"))
+    if [
+        "帮我记住",
+        "请记住",
+        "记住这个",
+        "记一下这个",
+        "保存这个画面",
+        "记住这个位置",
+        "记住：",
+        "记住:",
+    ]
+    .iter()
+    .any(|needle| transcript.contains(needle))
     {
         return Some("remember");
     }
-    if ["长期记忆", "查找记忆", "检索记忆", "回忆工具"]
-        .iter()
-        .any(|needle| transcript.contains(needle))
+    if [
+        "长期记忆",
+        "查找记忆",
+        "检索记忆",
+        "回忆工具",
+        "你还记得",
+        "我上次放",
+        "我之前放",
+        "我把它放哪",
+        "上次放哪里",
+        "之前放哪里",
+    ]
+    .iter()
+    .any(|needle| transcript.contains(needle))
     {
         return Some("recall");
     }
@@ -147,7 +169,7 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
 
 #[derive(Clone)]
 pub struct ToolExecutor {
-    context: ContextStore,
+    memories: MemoryService,
     registry: SkillRegistry,
     cli: CliRunner,
     client: reqwest::Client,
@@ -156,7 +178,7 @@ pub struct ToolExecutor {
 
 impl ToolExecutor {
     pub fn new(
-        context: ContextStore,
+        memories: MemoryService,
         skills_dir: &Path,
         max_output_bytes: usize,
         search_proxy: &str,
@@ -168,7 +190,7 @@ impl ToolExecutor {
             client = client.proxy(reqwest::Proxy::all(proxy)?);
         }
         Ok(Self {
-            context,
+            memories,
             registry: SkillRegistry::load(skills_dir)?,
             cli: CliRunner::new(max_output_bytes),
             client: client.build()?,
@@ -195,19 +217,24 @@ impl ToolExecutor {
         select_forced_tool(transcript).map(str::to_owned)
     }
 
-    pub async fn execute(&self, session_id: &str, name: &str, arguments: &str) -> Value {
-        match self.execute_inner(session_id, name, arguments).await {
-            Ok(value) => value,
-            Err(error) => json!({"ok": false, "error": format!("{error:#}")}),
+    pub async fn execute(
+        &self,
+        execution: &ToolExecutionContext,
+        name: &str,
+        arguments: &str,
+    ) -> ToolOutcome {
+        match self.execute_inner(execution, name, arguments).await {
+            Ok(outcome) => outcome,
+            Err(error) => ToolOutcome::value(json!({"ok": false, "error": format!("{error:#}")})),
         }
     }
 
     async fn execute_inner(
         &self,
-        session_id: &str,
+        execution: &ToolExecutionContext,
         name: &str,
         arguments: &str,
-    ) -> anyhow::Result<Value> {
+    ) -> anyhow::Result<ToolOutcome> {
         let payload: Value = serde_json::from_str(arguments)?;
         match name {
             "web_search" => {
@@ -232,12 +259,12 @@ impl ToolExecutor {
                     effective_query = simplified;
                     response = self.fetch_duckduckgo(&effective_query).await?;
                 }
-                Ok(format_duckduckgo_results(
+                Ok(ToolOutcome::value(format_duckduckgo_results(
                     query,
                     &effective_query,
                     &response,
                     max_results,
-                ))
+                )))
             }
             "get_current_time" => {
                 let name = payload
@@ -246,18 +273,20 @@ impl ToolExecutor {
                     .unwrap_or("Asia/Shanghai");
                 let timezone: Tz = name.parse()?;
                 let current = chrono::Utc::now().with_timezone(&timezone);
-                Ok(json!({
+                Ok(ToolOutcome::value(json!({
                     "ok": true,
                     "timezone": name,
                     "datetime": current.to_rfc3339_opts(SecondsFormat::Secs, true)
-                }))
+                })))
             }
             "calculate" => {
                 let expression = payload
                     .get("expression")
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("缺少 expression"))?;
-                Ok(json!({"ok": true, "result": safe_calculate(expression)?}))
+                Ok(ToolOutcome::value(
+                    json!({"ok": true, "result": safe_calculate(expression)?}),
+                ))
             }
             "remember" => {
                 let content = payload
@@ -266,17 +295,50 @@ impl ToolExecutor {
                     .map(str::trim)
                     .filter(|content| !content.is_empty())
                     .ok_or_else(|| anyhow::anyhow!("记忆内容不能为空"))?;
-                let memory_id = self.context.remember(session_id, content).await?;
-                Ok(json!({"ok": true, "memory_id": memory_id}))
+                let visual_summary = payload
+                    .get("visual_summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let memory = self
+                    .memories
+                    .create(CreateMemoryRequest {
+                        user_id: execution.user_id.clone(),
+                        conversation_id: execution.conversation_id.clone(),
+                        source_turn_id: execution.user_turn_id,
+                        response_id: execution.response_id.clone(),
+                        tool_call_id: execution.tool_call_id.clone(),
+                        user_note: content.to_owned(),
+                        visual_summary: visual_summary.to_owned(),
+                        frames: execution.frames.clone(),
+                    })
+                    .await?;
+                let artifacts = memory.memory.cover.clone().into_iter().collect::<Vec<_>>();
+                Ok(ToolOutcome {
+                    value: json!({
+                        "ok": true,
+                        "memory": memory.memory,
+                        "saved_frame_count": memory.assets.len()
+                    }),
+                    artifacts,
+                })
             }
             "recall" => {
                 let query = payload.get("query").and_then(Value::as_str).unwrap_or("");
-                let memories = self.context.recall(session_id, query, 5).await?;
-                Ok(json!({"ok": true, "memories": memories}))
+                let memories = self.memories.recall(&execution.user_id, query, 5).await?;
+                let artifacts = memories
+                    .iter()
+                    .filter_map(|memory| memory.memory.cover.clone())
+                    .collect();
+                Ok(ToolOutcome {
+                    value: json!({"ok": true, "memories": memories}),
+                    artifacts,
+                })
             }
             _ => match self.registry.get(name) {
-                Some(tool) => self.cli.execute(tool, &payload).await,
-                None => Ok(json!({"ok": false, "error": format!("未知工具: {name}")})),
+                Some(tool) => Ok(ToolOutcome::value(self.cli.execute(tool, &payload).await?)),
+                None => Ok(ToolOutcome::value(
+                    json!({"ok": false, "error": format!("未知工具: {name}")}),
+                )),
             },
         }
     }
@@ -349,6 +411,32 @@ impl ToolExecutor {
             );
         }
         Ok(serde_json::from_slice(&output.stdout)?)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolExecutionContext {
+    pub user_id: String,
+    pub conversation_id: String,
+    pub user_turn_id: i64,
+    pub response_id: String,
+    pub tool_call_id: String,
+    pub transcript: String,
+    pub frames: Vec<VideoFrame>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolOutcome {
+    pub value: Value,
+    pub artifacts: Vec<MemoryArtifact>,
+}
+
+impl ToolOutcome {
+    fn value(value: Value) -> Self {
+        Self {
+            value,
+            artifacts: Vec::new(),
+        }
     }
 }
 
@@ -726,6 +814,8 @@ mod tests {
             Some("calculate")
         );
         assert_eq!(select_forced_tool("请记住：我喜欢乌龙茶"), Some("remember"));
+        assert_eq!(select_forced_tool("记一下这个位置"), Some("remember"));
+        assert_eq!(select_forced_tool("我上次放哪里了"), Some("recall"));
         assert_eq!(select_forced_tool("请联网搜索 OpenAI"), Some("web_search"));
     }
 

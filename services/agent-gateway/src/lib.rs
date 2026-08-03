@@ -1,10 +1,12 @@
 pub mod adapters;
+pub mod asset_store;
 pub mod audio;
 pub mod auth;
 pub mod capabilities;
 pub mod config;
 pub mod context;
 pub mod context_compiler;
+pub mod memory;
 pub mod orchestrator;
 pub mod protocol;
 pub mod tools;

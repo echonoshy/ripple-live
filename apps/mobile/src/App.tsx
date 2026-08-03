@@ -6,11 +6,14 @@ import {
   EnvelopeSimple,
   GearSix,
   HandPalm,
+  ImagesSquare,
   LockKey,
   Microphone,
   MicrophoneSlash,
   PhoneDisconnect,
   SignOut,
+  NotePencil,
+  Trash,
   Ticket,
   VideoCamera,
   X,
@@ -19,26 +22,80 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import appIcon from '../src-tauri/icons/icon.png'
 import {
+  assetBlob,
   conversationMessages,
   conversations,
   currentUser,
+  deleteMemory,
   login,
   logout as logoutApi,
+  memories,
   register,
+  updateMemory,
   type AuthUser,
   type ConversationMessage,
   type ConversationSummary,
+  type MemoryArtifact,
+  type VisualMemory,
 } from './api'
 import { LiveMedia } from './media/LiveMedia'
 import {
   RealtimeSession,
+  type ResponseArtifact,
   type RealtimeMode,
   type SessionState,
 } from './realtime/RealtimeSession'
 
 const DEFAULT_SERVER = '140.143.229.103:8700'
 
-type Screen = 'home' | 'call' | 'settings' | 'history' | 'conversation'
+type Screen =
+  | 'home'
+  | 'call'
+  | 'settings'
+  | 'history'
+  | 'conversation'
+  | 'memories'
+
+function AuthenticatedImage({
+  server,
+  token,
+  artifact,
+  className,
+}: {
+  server: string
+  token: string
+  artifact: MemoryArtifact | ResponseArtifact
+  className?: string
+}) {
+  const [source, setSource] = useState('')
+
+  useEffect(() => {
+    let active = true
+    let objectUrl = ''
+    void assetBlob(server, token, artifact.content_url)
+      .then((blob) => {
+        if (!active) return
+        objectUrl = URL.createObjectURL(blob)
+        setSource(objectUrl)
+      })
+      .catch(() => {
+        if (active) setSource('')
+      })
+    return () => {
+      active = false
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [artifact.content_url, server, token])
+
+  if (!source) return <div className={`memory-image-placeholder ${className ?? ''}`} />
+  return (
+    <img
+      className={className}
+      src={source}
+      alt={artifact.caption || '保存的记忆画面'}
+    />
+  )
+}
 
 const stateLabels: Record<SessionState, string> = {
   idle: '准备就绪',
@@ -108,6 +165,12 @@ export default function App() {
   const [historyBusy, setHistoryBusy] = useState(false)
   const [historyError, setHistoryError] = useState('')
   const [selectedConversation, setSelectedConversation] = useState<ConversationSummary | null>(null)
+  const [memoryItems, setMemoryItems] = useState<VisualMemory[]>([])
+  const [memoryBusy, setMemoryBusy] = useState(false)
+  const [memoryError, setMemoryError] = useState('')
+  const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null)
+  const [memoryDraft, setMemoryDraft] = useState('')
+  const [liveArtifacts, setLiveArtifacts] = useState<ResponseArtifact[]>([])
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -185,6 +248,28 @@ export default function App() {
     }
   }, [accessToken, screen, selectedConversation, server])
 
+  useEffect(() => {
+    if (screen !== 'memories' || !accessToken) return
+    let active = true
+    setMemoryBusy(true)
+    setMemoryError('')
+    void memories(server, accessToken)
+      .then((items) => {
+        if (active) setMemoryItems(items)
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setMemoryError(error instanceof Error ? error.message : '无法加载视觉记忆')
+        }
+      })
+      .finally(() => {
+        if (active) setMemoryBusy(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [accessToken, screen, server])
+
   const isActive = [
     'connecting',
     'preparing',
@@ -230,6 +315,7 @@ export default function App() {
       setAssistantText('')
       setUserText('')
       setToolStatus('')
+      setLiveArtifacts([])
       setElapsed(0)
       setMuted(false)
       setSessionState('connecting')
@@ -250,10 +336,20 @@ export default function App() {
           setSessionState('error')
         },
         onAssistantText: setAssistantText,
-        onUserText: setUserText,
+        onUserText: (text) => {
+          setUserText(text)
+          setLiveArtifacts([])
+        },
         onTool: setToolStatus,
         onAudio: (audio) => media.enqueueOutput(audio),
         onAudioDone: () => media.finishOutput(),
+        onArtifact: (artifact) => {
+          setLiveArtifacts((items) =>
+            items.some((item) => item.id === artifact.id)
+              ? items
+              : [...items, artifact],
+          )
+        },
         onConversation: () => {},
         onReady: async () => {
           await media.start((audio, frame) => {
@@ -361,7 +457,34 @@ export default function App() {
     setScreen('home')
     setHistoryItems([])
     setHistoryMessages([])
+    setMemoryItems([])
     if (token) await logoutApi(server, token).catch(() => {})
+  }
+
+  const saveMemoryEdit = async (memoryId: string) => {
+    const note = memoryDraft.trim()
+    if (!note) return
+    setMemoryError('')
+    try {
+      const updated = await updateMemory(server, accessToken, memoryId, note)
+      setMemoryItems((items) =>
+        items.map((item) => (item.id === memoryId ? updated : item)),
+      )
+      setEditingMemoryId(null)
+      setMemoryDraft('')
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : '无法修改记忆')
+    }
+  }
+
+  const removeMemory = async (memoryId: string) => {
+    setMemoryError('')
+    try {
+      await deleteMemory(server, accessToken, memoryId)
+      setMemoryItems((items) => items.filter((item) => item.id !== memoryId))
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : '无法删除记忆')
+    }
   }
 
   const statusClass = useMemo(
@@ -514,6 +637,14 @@ export default function App() {
               <button
                 className="icon-button"
                 type="button"
+                aria-label="视觉记忆"
+                onClick={() => setScreen('memories')}
+              >
+                <ImagesSquare />
+              </button>
+              <button
+                className="icon-button"
+                type="button"
                 aria-label="聊天历史"
                 onClick={() => setScreen('history')}
               >
@@ -627,6 +758,128 @@ export default function App() {
         </section>
       )}
 
+      {screen === 'memories' && (
+        <section className="history-screen memory-screen">
+          <header className="screen-header">
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="返回"
+              onClick={() => setScreen('home')}
+            >
+              <ArrowLeft />
+            </button>
+            <h1>视觉记忆</h1>
+            <span className="header-spacer" />
+          </header>
+
+          <div className="history-heading">
+            <p>{user.email}</p>
+            <h2>我帮你记住的内容</h2>
+          </div>
+
+          {memoryBusy && (
+            <div className="history-skeleton" aria-label="正在加载">
+              <span />
+              <span />
+              <span />
+            </div>
+          )}
+          {memoryError && <div className="history-error">{memoryError}</div>}
+          {!memoryBusy && !memoryError && memoryItems.length === 0 && (
+            <div className="history-empty">
+              <ImagesSquare />
+              <h2>还没有保存记忆</h2>
+              <p>视频通话时说“帮我记住这个”，我会保存当时的内容和画面。</p>
+              <button type="button" onClick={() => openCall('video')}>
+                打开视频通话
+              </button>
+            </div>
+          )}
+          {!memoryBusy && memoryItems.length > 0 && (
+            <div className="memory-list">
+              {memoryItems.map((memory) => (
+                <article key={memory.id} className="memory-card">
+                  {memory.cover ? (
+                    <AuthenticatedImage
+                      server={server}
+                      token={accessToken}
+                      artifact={memory.cover}
+                      className="memory-cover"
+                    />
+                  ) : (
+                    <div className="memory-cover memory-text-cover">
+                      <ImagesSquare />
+                      <span>文字记忆</span>
+                    </div>
+                  )}
+                  <div className="memory-card-body">
+                    <time>{formatHistoryTime(memory.created_at)}</time>
+                    {editingMemoryId === memory.id ? (
+                      <textarea
+                        value={memoryDraft}
+                        maxLength={2000}
+                        autoFocus
+                        onChange={(event) => setMemoryDraft(event.target.value)}
+                      />
+                    ) : (
+                      <h2>{memory.user_note}</h2>
+                    )}
+                    {memory.visual_summary && (
+                      <p>{memory.visual_summary}</p>
+                    )}
+                    <div className="memory-actions">
+                      {editingMemoryId === memory.id ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void saveMemoryEdit(memory.id)}
+                          >
+                            保存
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingMemoryId(null)
+                              setMemoryDraft('')
+                            }}
+                          >
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingMemoryId(memory.id)
+                            setMemoryDraft(memory.user_note)
+                          }}
+                        >
+                          <NotePencil />
+                          修改
+                        </button>
+                      )}
+                      <button
+                        className="danger-action"
+                        type="button"
+                        onClick={() => {
+                          if (window.confirm('确定删除这条记忆和关联画面吗？')) {
+                            void removeMemory(memory.id)
+                          }
+                        }}
+                      >
+                        <Trash />
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
       {screen === 'conversation' && selectedConversation && (
         <section className="history-screen conversation-history-screen">
           <header className="screen-header">
@@ -667,6 +920,19 @@ export default function App() {
                     <time>{formatHistoryTime(message.created_at)}</time>
                   </div>
                   <p>{message.content}</p>
+                  {message.attachments.length > 0 && (
+                    <div className="message-attachments">
+                      {message.attachments.map((artifact) => (
+                        <AuthenticatedImage
+                          key={artifact.id}
+                          server={server}
+                          token={accessToken}
+                          artifact={artifact}
+                          className="message-attachment"
+                        />
+                      ))}
+                    </div>
+                  )}
                 </article>
               ))}
             </div>
@@ -790,6 +1056,19 @@ export default function App() {
                         ? '正在回答'
                         : '正在建立实时连接')}
                 </p>
+                {liveArtifacts.length > 0 && (
+                  <div className="live-artifacts">
+                    {liveArtifacts.map((artifact) => (
+                      <AuthenticatedImage
+                        key={artifact.id}
+                        server={server}
+                        token={accessToken}
+                        artifact={artifact}
+                        className="live-artifact"
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
               {errorMessage && (
                 <div className="error-message">

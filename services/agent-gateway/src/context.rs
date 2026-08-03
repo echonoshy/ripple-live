@@ -27,6 +27,16 @@ pub struct ConversationMessage {
     pub role: String,
     pub content: String,
     pub created_at: f64,
+    pub attachments: Vec<ConversationAttachment>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ConversationAttachment {
+    pub id: String,
+    pub kind: String,
+    pub memory_id: Option<String>,
+    pub caption: String,
+    pub content_url: String,
 }
 
 #[derive(Clone)]
@@ -95,11 +105,55 @@ impl ContextStore {
                 title TEXT NOT NULL DEFAULT '新对话',
                 created_at REAL NOT NULL, updated_at REAL NOT NULL
             )",
+            "CREATE TABLE IF NOT EXISTS memory_items (
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL, source_turn_id INTEGER NOT NULL,
+                source_response_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'visual',
+                user_note TEXT NOT NULL, visual_summary TEXT NOT NULL DEFAULT '',
+                cover_asset_id TEXT, captured_at REAL,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+                FOREIGN KEY(source_turn_id) REFERENCES turns(id)
+            )",
+            "CREATE TABLE IF NOT EXISTS assets (
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL, sha256 TEXT NOT NULL,
+                mime_type TEXT NOT NULL, storage_key TEXT NOT NULL,
+                width INTEGER NOT NULL, height INTEGER NOT NULL,
+                size_bytes INTEGER NOT NULL, captured_at REAL, created_at REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                UNIQUE(user_id, sha256)
+            )",
+            "CREATE TABLE IF NOT EXISTS memory_assets (
+                memory_id TEXT NOT NULL, asset_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL, is_cover INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(memory_id, asset_id),
+                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE CASCADE,
+                FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+            )",
+            "CREATE TABLE IF NOT EXISTS turn_attachments (
+                turn_id INTEGER NOT NULL, asset_id TEXT NOT NULL,
+                memory_id TEXT, caption TEXT NOT NULL DEFAULT '',
+                ordinal INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(turn_id, asset_id),
+                FOREIGN KEY(turn_id) REFERENCES turns(id) ON DELETE CASCADE,
+                FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE SET NULL
+            )",
+            "CREATE TABLE IF NOT EXISTS memory_tool_executions (
+                response_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
+                memory_id TEXT NOT NULL,
+                PRIMARY KEY(response_id, tool_call_id),
+                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE CASCADE
+            )",
             "CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, id)",
             "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, id)",
             "CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id, id)",
             "CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_memory_items_user ON memory_items(user_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_memory_assets_memory ON memory_assets(memory_id, ordinal)",
+            "CREATE INDEX IF NOT EXISTS idx_turn_attachments_turn ON turn_attachments(turn_id, ordinal)",
         ] {
             sqlx::query(statement).execute(&self.pool).await?;
         }
@@ -378,16 +432,39 @@ impl ContextStore {
         .bind(limit.clamp(1, 1000))
         .fetch_all(&self.pool)
         .await?;
-        Ok(Some(
-            rows.into_iter()
-                .map(|row| ConversationMessage {
-                    id: row.get("id"),
-                    role: row.get("role"),
-                    content: row.get("content"),
-                    created_at: row.get("created_at"),
-                })
-                .collect(),
-        ))
+        let mut messages = Vec::with_capacity(rows.len());
+        for row in rows {
+            let turn_id: i64 = row.get("id");
+            let attachment_rows = sqlx::query(
+                "SELECT a.id, ta.memory_id, ta.caption
+                 FROM turn_attachments ta JOIN assets a ON a.id = ta.asset_id
+                 WHERE ta.turn_id = ? AND a.user_id = ? ORDER BY ta.ordinal ASC",
+            )
+            .bind(turn_id)
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await?;
+            messages.push(ConversationMessage {
+                id: turn_id,
+                role: row.get("role"),
+                content: row.get("content"),
+                created_at: row.get("created_at"),
+                attachments: attachment_rows
+                    .into_iter()
+                    .map(|attachment| {
+                        let id: String = attachment.get("id");
+                        ConversationAttachment {
+                            content_url: format!("/v1/assets/{id}/content"),
+                            id,
+                            kind: "image".to_owned(),
+                            memory_id: attachment.get("memory_id"),
+                            caption: attachment.get("caption"),
+                        }
+                    })
+                    .collect(),
+            });
+        }
+        Ok(Some(messages))
     }
 
     pub async fn touch_session(&self, session_id: &str) -> anyhow::Result<()> {
@@ -436,9 +513,9 @@ impl ContextStore {
         role: &str,
         content: &str,
         metadata: Option<&Value>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<i64> {
         let now = unix_time();
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO turns(session_id, role, content, metadata, created_at)
              VALUES (?, ?, ?, ?, ?)",
         )
@@ -463,7 +540,11 @@ impl ContextStore {
         .bind(session_id)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.last_insert_rowid())
+    }
+
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     pub async fn recent_messages(

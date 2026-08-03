@@ -21,4 +21,6 @@ pub struct ClientEvent {
 pub struct VideoFrame {
     pub bytes: Vec<u8>,
     pub mime_type: String,
+    pub captured_at_ms: Option<i64>,
+    pub received_at_ms: i64,
 }

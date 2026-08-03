@@ -25,6 +25,15 @@ type RealtimeEvent = {
   name?: string
   result?: unknown
   response_id?: string
+  artifact?: ResponseArtifact
+}
+
+export type ResponseArtifact = {
+  id: string
+  kind: 'image' | string
+  memory_id?: string
+  caption: string
+  content_url: string
 }
 
 type Transport = {
@@ -44,6 +53,7 @@ type SessionOptions = {
   onTool: (label: string) => void
   onAudio: (audio: Float32Array) => void
   onAudioDone: () => void
+  onArtifact: (artifact: ResponseArtifact) => void
   onReady: () => Promise<void>
   onConversation: (conversationId: string) => void
 }
@@ -279,6 +289,10 @@ export class RealtimeSession {
         this.outputActive = true
         this.options.onAudio(base64ToFloat32(event.audio))
         this.options.onState('speaking')
+        break
+      case 'ripple.response.artifact.added':
+        if (!this.isCurrentResponse(event) || !event.artifact) return
+        this.options.onArtifact(event.artifact)
         break
       case 'response.done':
         if (!this.isCurrentResponse(event)) return

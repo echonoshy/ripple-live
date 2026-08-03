@@ -714,6 +714,121 @@ button {
   white-space: pre-wrap;
 }
 
+.message-attachments {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.message-attachment,
+.memory-image-placeholder.message-attachment {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 12px;
+  background: var(--surface-strong);
+  object-fit: cover;
+}
+
+.memory-list {
+  display: grid;
+  gap: 14px;
+  padding-bottom: 24px;
+}
+
+.memory-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface-raised);
+}
+
+.memory-cover,
+.memory-image-placeholder.memory-cover {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: var(--surface-strong);
+  object-fit: cover;
+}
+
+.memory-text-cover {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.memory-text-cover svg {
+  color: var(--accent-strong);
+  font-size: 25px;
+}
+
+.memory-card-body {
+  padding: 16px;
+}
+
+.memory-card-body time {
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.memory-card-body h2 {
+  margin: 8px 0 0;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.memory-card-body p {
+  margin: 8px 0 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.memory-card-body textarea {
+  width: 100%;
+  min-height: 86px;
+  margin-top: 10px;
+  padding: 11px 12px;
+  resize: vertical;
+  border: 1px solid rgba(155, 108, 255, 0.38);
+  border-radius: 12px;
+  outline: none;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.5;
+}
+
+.memory-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 15px;
+}
+
+.memory-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-strong);
+  color: var(--ink-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.memory-actions .danger-action {
+  margin-left: auto;
+  border-color: rgba(232, 93, 103, 0.28);
+  color: #ffadb3;
+}
+
 .account-panel {
   display: flex;
   align-items: center;
@@ -982,6 +1097,24 @@ button {
 .user-utterance p {
   color: var(--ink-muted);
   font-size: 14px;
+}
+
+.live-artifacts {
+  display: grid;
+  grid-column: 2;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.live-artifact,
+.memory-image-placeholder.live-artifact {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 12px;
+  background: var(--surface-strong);
+  object-fit: cover;
 }
 
 .has-video .conversation {

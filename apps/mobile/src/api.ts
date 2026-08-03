@@ -22,6 +22,25 @@ export type ConversationMessage = {
   role: 'user' | 'assistant' | string
   content: string
   created_at: number
+  attachments: MemoryArtifact[]
+}
+
+export type MemoryArtifact = {
+  id: string
+  kind: 'image' | string
+  memory_id?: string
+  caption: string
+  content_url: string
+}
+
+export type VisualMemory = {
+  id: string
+  kind: 'visual' | 'text' | string
+  user_note: string
+  visual_summary: string
+  captured_at?: number | null
+  created_at: number
+  cover?: MemoryArtifact | null
 }
 
 function httpBase(server: string) {
@@ -115,4 +134,54 @@ export async function conversationMessages(
     token,
   )
   return payload.data
+}
+
+export async function memories(server: string, token: string) {
+  const payload = await request<{ data: VisualMemory[] }>(
+    server,
+    '/v1/memories?limit=100',
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function updateMemory(
+  server: string,
+  token: string,
+  memoryId: string,
+  userNote: string,
+) {
+  const payload = await request<{ data: VisualMemory }>(
+    server,
+    `/v1/memories/${encodeURIComponent(memoryId)}`,
+    { method: 'PATCH', body: JSON.stringify({ user_note: userNote }) },
+    token,
+  )
+  return payload.data
+}
+
+export function deleteMemory(
+  server: string,
+  token: string,
+  memoryId: string,
+) {
+  return request<void>(
+    server,
+    `/v1/memories/${encodeURIComponent(memoryId)}`,
+    { method: 'DELETE' },
+    token,
+  )
+}
+
+export async function assetBlob(
+  server: string,
+  token: string,
+  contentUrl: string,
+) {
+  const response = await fetch(`${httpBase(server)}${contentUrl}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!response.ok) throw new Error(`图片加载失败 (${response.status})`)
+  return response.blob()
 }

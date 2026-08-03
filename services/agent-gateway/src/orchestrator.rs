@@ -12,15 +12,16 @@ use crate::{
     config::Settings,
     context::ContextStore,
     context_compiler::ContextCompiler,
+    memory::{MemoryArtifact, MemoryService},
     protocol::VideoFrame,
-    tools::ToolExecutor,
+    tools::{ToolExecutionContext, ToolExecutor},
 };
 
 const SYSTEM_PROMPT: &str = "你是 Ripple Live，一个运行在用户自有服务器上的中文多模态语音 Agent。
 你可以理解当前语音转写和随附的视频画面。回答应自然、简洁、适合直接朗读。
 需要外部动作或精确结果时必须使用提供的工具，不要假装已经调用。
 用户要求联网、搜索、最新信息或外部资料时必须调用 web_search，并根据返回来源作答。若工具返回 result_count 为 0，不得把自身已有知识说成搜索结果，必须明确说明本次搜索没有找到结果。
-只有用户明确要求记住某件事时才调用 remember；需要历史记忆时调用 recall。
+只有用户明确要求记住某件事时才调用 remember；有当前画面时，visual_summary 必须客观描述画面中有助于以后检索的物品、位置和文字。需要查找用户过去保存的信息时调用 recall，并把 query 提炼为简洁关键词。
 工具失败时如实说明。不要在朗读内容中输出工具调用 JSON。";
 
 const MIN_SPEECH_CHUNK_CHARS: usize = 40;
@@ -32,6 +33,7 @@ pub struct AgentOrchestrator {
     settings: Arc<Settings>,
     context: ContextStore,
     context_compiler: ContextCompiler,
+    memories: MemoryService,
     adapters: ModelAdapters,
     tools: ToolExecutor,
 }
@@ -41,6 +43,7 @@ impl AgentOrchestrator {
         settings: Arc<Settings>,
         context: ContextStore,
         adapters: ModelAdapters,
+        memories: MemoryService,
     ) -> anyhow::Result<Self> {
         let context_compiler = ContextCompiler::new(
             context.clone(),
@@ -48,7 +51,7 @@ impl AgentOrchestrator {
             settings.context_max_chars,
         );
         let tools = ToolExecutor::new(
-            context.clone(),
+            memories.clone(),
             &settings.skills_dir,
             settings.cli_max_output_bytes,
             &settings.search_proxy,
@@ -59,6 +62,7 @@ impl AgentOrchestrator {
             tools,
             context,
             context_compiler,
+            memories,
             adapters,
         })
     }
@@ -69,14 +73,17 @@ impl AgentOrchestrator {
 
     pub async fn run_text_response(
         &self,
+        user_id: &str,
         conversation_id: &str,
         input: &str,
+        response_id: &str,
     ) -> anyhow::Result<String> {
         let input = input.trim();
         if input.is_empty() {
             anyhow::bail!("input 不能为空");
         }
-        self.context
+        let user_turn_id = self
+            .context
             .add_turn(conversation_id, "user", input, None)
             .await?;
         let compiled = self.context_compiler.compile(conversation_id).await?;
@@ -84,6 +91,7 @@ impl AgentOrchestrator {
         messages.extend(compiled.messages);
         let tools = self.tools.schemas();
 
+        let mut response_artifacts = Vec::<MemoryArtifact>::new();
         for round in 0..self.settings.max_tool_rounds {
             let tool_choice = if round == 0 {
                 self.tools
@@ -103,8 +111,12 @@ impl AgentOrchestrator {
                 if output.is_empty() {
                     anyhow::bail!("模型没有生成回复");
                 }
-                self.context
+                let assistant_turn_id = self
+                    .context
                     .add_turn(conversation_id, "assistant", &output, None)
+                    .await?;
+                self.memories
+                    .attach_to_turn(assistant_turn_id, &response_artifacts)
                     .await?;
                 return Ok(output);
             }
@@ -112,10 +124,24 @@ impl AgentOrchestrator {
                 anyhow::bail!("模型同时返回了文本和工具调用");
             }
             for call in reply.tool_calls {
-                let result = self
+                let outcome = self
                     .tools
-                    .execute(conversation_id, &call.name, &call.arguments)
+                    .execute(
+                        &ToolExecutionContext {
+                            user_id: user_id.to_owned(),
+                            conversation_id: conversation_id.to_owned(),
+                            user_turn_id,
+                            response_id: response_id.to_owned(),
+                            tool_call_id: call.id.clone(),
+                            transcript: input.to_owned(),
+                            frames: Vec::new(),
+                        },
+                        &call.name,
+                        &call.arguments,
+                    )
                     .await;
+                let result = outcome.value;
+                response_artifacts.extend(outcome.artifacts);
                 self.context
                     .record_event(
                         conversation_id,
@@ -134,8 +160,10 @@ impl AgentOrchestrator {
         anyhow::bail!("工具调用轮次超过限制")
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_turn(
         &self,
+        user_id: &str,
         session_id: &str,
         send: &mpsc::Sender<Value>,
         audio: Vec<f32>,
@@ -208,7 +236,8 @@ impl AgentOrchestrator {
             json!({"type": "input.transcript.final", "text": transcript}),
         )
         .await?;
-        self.context
+        let user_turn_id = self
+            .context
             .add_turn(
                 session_id,
                 "user",
@@ -262,6 +291,7 @@ impl AgentOrchestrator {
             let available_tools = self.tools.schemas();
             let forced_tool = self.tools.select_forced_tool(&transcript);
             let mut final_text = String::new();
+            let mut response_artifacts = Vec::<MemoryArtifact>::new();
             for round in 0..self.settings.max_tool_rounds {
                 let tool_choice = if round == 0 {
                     forced_tool
@@ -379,10 +409,35 @@ impl AgentOrchestrator {
                         }),
                     )
                     .await?;
-                    let result = self
+                    let outcome = self
                         .tools
-                        .execute(session_id, &call.name, &call.arguments)
+                        .execute(
+                            &ToolExecutionContext {
+                                user_id: user_id.to_owned(),
+                                conversation_id: session_id.to_owned(),
+                                user_turn_id,
+                                response_id: response_id.to_owned(),
+                                tool_call_id: call.id.clone(),
+                                transcript: transcript.clone(),
+                                frames: frames.clone(),
+                            },
+                            &call.name,
+                            &call.arguments,
+                        )
                         .await;
+                    let result = outcome.value;
+                    for artifact in outcome.artifacts {
+                        emit_response(
+                            send,
+                            response_id,
+                            json!({
+                                "type": "ripple.response.artifact.added",
+                                "artifact": artifact
+                            }),
+                        )
+                        .await?;
+                        response_artifacts.push(artifact);
+                    }
                     self.context
                         .record_event(
                             session_id,
@@ -421,13 +476,17 @@ impl AgentOrchestrator {
             if final_text.is_empty() {
                 anyhow::bail!("工具调用轮次超过限制或模型没有生成回复");
             }
-            anyhow::Ok(final_text)
+            anyhow::Ok((final_text, response_artifacts))
         };
         let (generation_result, speech_result) = tokio::join!(generation, speech);
-        let final_text = generation_result?;
+        let (final_text, response_artifacts) = generation_result?;
         speech_result?;
-        self.context
+        let assistant_turn_id = self
+            .context
             .add_turn(session_id, "assistant", &final_text, None)
+            .await?;
+        self.memories
+            .attach_to_turn(assistant_turn_id, &response_artifacts)
             .await?;
         let total_ms = turn_started.elapsed().as_millis();
         info!(
@@ -462,6 +521,7 @@ impl AgentOrchestrator {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_speech(
     adapters: ModelAdapters,
     send: mpsc::Sender<Value>,

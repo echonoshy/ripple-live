@@ -20,6 +20,7 @@ use ripple_agent_gateway::{
     audio::decode_le_f32,
     config::Settings,
     context::ContextStore,
+    memory::{MemoryService, UpdateMemoryRequest},
     orchestrator::AgentOrchestrator,
     protocol::{ClientEvent, VideoFrame},
 };
@@ -37,6 +38,7 @@ use uuid::Uuid;
 struct AppState {
     settings: Arc<Settings>,
     context: ContextStore,
+    memories: MemoryService,
     orchestrator: AgentOrchestrator,
 }
 
@@ -66,15 +68,22 @@ async fn main() -> anyhow::Result<()> {
         warn!("registration is disabled because RIPPLE_INVITE_CODES is empty");
     }
     let adapters = ModelAdapters::new((*settings).clone())?;
-    let orchestrator = AgentOrchestrator::new(Arc::clone(&settings), context.clone(), adapters)?;
+    let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets")).await?;
+    let orchestrator = AgentOrchestrator::new(
+        Arc::clone(&settings),
+        context.clone(),
+        adapters,
+        memories.clone(),
+    )?;
     let state = AppState {
         settings: Arc::clone(&settings),
         context,
+        memories,
         orchestrator,
     };
     let cors = CorsLayer::new()
         .allow_origin(HeaderValue::from_static("*"))
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
         .allow_headers(tower_http::cors::Any);
     let app = Router::new()
         .route("/health", get(health))
@@ -87,6 +96,12 @@ async fn main() -> anyhow::Result<()> {
             "/v1/conversations/{conversation_id}/messages",
             get(conversation_messages),
         )
+        .route("/v1/memories", get(list_memories))
+        .route(
+            "/v1/memories/{memory_id}",
+            get(get_memory).patch(update_memory).delete(delete_memory),
+        )
+        .route("/v1/assets/{asset_id}/content", get(asset_content))
         .route("/v1/responses", post(create_response))
         .route("/v1/agent/realtime", get(realtime))
         .layer(cors)
@@ -242,6 +257,121 @@ async fn conversation_messages(
     }
 }
 
+async fn list_memories(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .memories
+        .list(&user.id, query.limit.unwrap_or(50).clamp(1, 100) as usize)
+        .await
+    {
+        Ok(memories) => Json(json!({"data": memories})).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn get_memory(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(memory_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.memories.get(&user.id, &memory_id).await {
+        Ok(Some(memory)) => {
+            Json(json!({"data": memory.memory, "assets": memory.assets})).into_response()
+        }
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "记忆不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn update_memory(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(memory_id): Path<String>,
+    Json(request): Json<UpdateMemoryRequest>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .memories
+        .update(&user.id, &memory_id, &request.user_note)
+        .await
+    {
+        Ok(true) => match state.memories.get(&user.id, &memory_id).await {
+            Ok(Some(memory)) => Json(json!({"data": memory.memory})).into_response(),
+            Ok(None) => api_error(StatusCode::NOT_FOUND, "记忆不存在"),
+            Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        },
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "记忆不存在"),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn delete_memory(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(memory_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.memories.delete(&user.id, &memory_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "记忆不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn asset_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let content = match state.memories.asset_content(&user.id, &asset_id).await {
+        Ok(Some(content)) => content,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "图片不存在"),
+        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    match tokio::fs::read(content.path).await {
+        Ok(bytes) => match HeaderValue::from_str(&content.mime_type) {
+            Ok(content_type) => (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, content_type),
+                    (
+                        axum::http::header::CACHE_CONTROL,
+                        HeaderValue::from_static("private, max-age=3600"),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response(),
+            Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            api_error(StatusCode::NOT_FOUND, "图片不存在")
+        }
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
 async fn create_response(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -284,13 +414,13 @@ async fn create_response(
             Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         },
     };
+    let response_id = format!("resp_{}", Uuid::new_v4().simple());
     match state
         .orchestrator
-        .run_text_response(&conversation_id, &input)
+        .run_text_response(&user.id, &conversation_id, &input, &response_id)
         .await
     {
         Ok(output) => {
-            let response_id = format!("resp_{}", Uuid::new_v4().simple());
             let message_id = format!("msg_{}", Uuid::new_v4().simple());
             let completed_at = unix_timestamp();
             Json(json!({
@@ -406,6 +536,13 @@ fn unix_timestamp() -> i64 {
         .as_secs() as i64
 }
 
+fn unix_timestamp_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
 async fn realtime(
     websocket: WebSocketUpgrade,
     Query(query): Query<HashMap<String, String>>,
@@ -431,11 +568,11 @@ async fn realtime(
         },
     };
     websocket
-        .on_upgrade(move |socket| handle_socket(socket, state, conversation_id))
+        .on_upgrade(move |socket| handle_socket(socket, state, user.id, conversation_id))
         .into_response()
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
+async fn handle_socket(socket: WebSocket, state: AppState, user_id: String, session_id: String) {
     if let Err(error) = state.context.touch_session(&session_id).await {
         error!(%session_id, %error, "failed to initialize session");
         return;
@@ -581,15 +718,36 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     .ok_or_else(|| anyhow::anyhow!("视频帧缺少 image"))
                     .and_then(|encoded| STANDARD.decode(encoded).map_err(Into::into))
                 {
-                    Ok(bytes) => {
-                        if frames.len() == state.settings.max_frames {
-                            frames.pop_front();
+                    Ok(bytes) if bytes.len() <= 2 * 1024 * 1024 => {
+                        let mime_type = event.mime_type.unwrap_or_else(|| "image/jpeg".to_owned());
+                        if mime_type != "image/jpeg" {
+                            send_event(
+                                &event_sender,
+                                json!({"type": "error", "message": "当前只支持 JPEG 视频帧"}),
+                            )
+                            .await
+                        } else {
+                            if frames.len() == state.settings.max_frames {
+                                frames.pop_front();
+                            }
+                            frames.push_back(VideoFrame {
+                                bytes,
+                                mime_type,
+                                captured_at_ms: event
+                                    .extra
+                                    .get("captured_at")
+                                    .and_then(Value::as_i64),
+                                received_at_ms: unix_timestamp_millis(),
+                            });
+                            Ok(())
                         }
-                        frames.push_back(VideoFrame {
-                            bytes,
-                            mime_type: event.mime_type.unwrap_or_else(|| "image/jpeg".to_owned()),
-                        });
-                        Ok(())
+                    }
+                    Ok(_) => {
+                        send_event(
+                            &event_sender,
+                            json!({"type": "error", "message": "视频帧不能超过 2MB"}),
+                        )
+                        .await
                     }
                     Err(error) => {
                         send_event(
@@ -657,6 +815,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 active_response = Some(spawn_turn(
                     state.orchestrator.clone(),
                     state.context.clone(),
+                    user_id.clone(),
                     session_id.clone(),
                     event_sender.clone(),
                     captured_audio,
@@ -695,6 +854,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 active_response = Some(spawn_turn(
                     state.orchestrator.clone(),
                     state.context.clone(),
+                    user_id.clone(),
                     session_id.clone(),
                     event_sender.clone(),
                     Vec::new(),
@@ -773,9 +933,11 @@ fn keep_pre_roll(audio: &mut Vec<f32>, limit: usize) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_turn(
     orchestrator: AgentOrchestrator,
     context: ContextStore,
+    user_id: String,
     session_id: String,
     sender: mpsc::Sender<Value>,
     audio: Vec<f32>,
@@ -787,6 +949,7 @@ fn spawn_turn(
     let handle = tokio::spawn(async move {
         if let Err(error) = orchestrator
             .run_turn(
+                &user_id,
                 &session_id,
                 &sender,
                 audio,
