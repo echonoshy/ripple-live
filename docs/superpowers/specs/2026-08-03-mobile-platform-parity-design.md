@@ -10,7 +10,7 @@ Android and iOS already run the React application under `apps/android/src` and t
 
 ## Constraints
 
-- Keep bundle identifier `cn.minicpm.live` to overwrite the existing phone app.
+- Keep bundle identifier `cn.minicpm.ripplelive.debug`, which is the existing Ripple Live app on the paired phone, to overwrite it.
 - Do not change the realtime service, its endpoint, credentials, or signing identity.
 - Do not fork a separate Swift UI; audio, video, camera switching, mute, real-time text/audio, settings, and WebSocket behavior remain in the shared code path.
 

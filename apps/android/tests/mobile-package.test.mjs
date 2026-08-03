@@ -48,10 +48,20 @@ test('mobile package has the supplied icon and iOS media permissions', () => {
     expectSquare(path.join(appleRoot, image.filename), Math.round(points * scale))
   }
 
-  const plist = readFileSync(
-    path.join(appRoot, 'src-tauri/gen/apple/ripple-live_iOS/Info.plist'),
-    'utf8',
+  const tauriConfig = JSON.parse(
+    readFileSync(path.join(appRoot, 'src-tauri/tauri.conf.json'), 'utf8'),
   )
-  assert.match(plist, /<key>NSCameraUsageDescription<\/key>/)
-  assert.match(plist, /<key>NSMicrophoneUsageDescription<\/key>/)
+  assert.equal(tauriConfig.identifier, 'cn.minicpm.ripplelive.debug')
+  assert.equal(tauriConfig.bundle.iOS.developmentTeam, '932QX878KY')
+
+  for (const plistPath of [
+    path.join(appRoot, 'src-tauri/Info.ios.plist'),
+    path.join(appRoot, 'src-tauri/gen/apple/ripple-live_iOS/Info.plist'),
+  ]) {
+    const plist = readFileSync(plistPath, 'utf8')
+    assert.match(plist, /<key>NSCameraUsageDescription<\/key>/)
+    assert.match(plist, /<key>NSMicrophoneUsageDescription<\/key>/)
+    assert.match(plist, /Ripple Live 使用相机进行实时视频通话。/)
+    assert.match(plist, /Ripple Live 使用麦克风进行实时语音通话。/)
+  }
 })

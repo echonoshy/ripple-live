@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Ripple Live uses the microphone to capture your voice during real-time conversations.</string>
+  <string>Ripple Live 使用麦克风进行实时语音通话。</string>
   <key>NSCameraUsageDescription</key>
-  <string>Ripple Live uses the camera to capture video during real-time conversations.</string>
+  <string>Ripple Live 使用相机进行实时视频通话。</string>
 </dict>
 </plist>

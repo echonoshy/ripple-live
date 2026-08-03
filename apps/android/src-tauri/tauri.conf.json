@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Ripple Live",
   "version": "0.1.1",
-  "identifier": "cn.minicpm.live",
+  "identifier": "cn.minicpm.ripplelive.debug",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -38,6 +38,9 @@
     "android": {
       "debugApplicationIdSuffix": ".debug",
       "minSdkVersion": 24
+    },
+    "iOS": {
+      "developmentTeam": "932QX878KY"
     }
   }
 }

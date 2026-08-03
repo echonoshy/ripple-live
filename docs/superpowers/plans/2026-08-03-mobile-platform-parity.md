@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Use the supplied icon without redrawing or adding text.
-- Keep bundle identifier `cn.minicpm.live`.
+- Keep bundle identifier `cn.minicpm.ripplelive.debug` to overwrite the existing paired-phone app.
 - Do not alter remote services, credentials, or signing identities.
 
 ---
