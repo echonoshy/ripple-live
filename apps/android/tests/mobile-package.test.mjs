@@ -6,28 +6,37 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const sourceHash = 'a861031a55045c2b7c63c45a5de1861ca188655e38a55636a62f733b8d7123c4'
+const sourceHash = 'f52273c5c3e08ff85e5afd8ae5de8ab2014951fd03619d769b42537db1885872'
 
-function readPngSize(file) {
+function readPngInfo(file) {
   const bytes = readFileSync(file)
   assert.equal(bytes.toString('ascii', 1, 4), 'PNG', `${file} must be a PNG`)
   return {
     width: bytes.readUInt32BE(16),
     height: bytes.readUInt32BE(20),
+    colorType: bytes[25],
   }
 }
 
 function expectSquare(file, size) {
-  assert.deepEqual(readPngSize(file), { width: size, height: size }, file)
+  const { width, height } = readPngInfo(file)
+  assert.deepEqual({ width, height }, { width: size, height: size }, file)
+}
+
+function expectRgba(file) {
+  assert.equal(readPngInfo(file).colorType, 6, `${file} must be RGBA`)
 }
 
 test('mobile package has the supplied icon and iOS media permissions', () => {
   const source = path.join(appRoot, 'src-tauri/icons/ripple-live-source.png')
   const sourceBytes = readFileSync(source)
   assert.equal(createHash('sha256').update(sourceBytes).digest('hex'), sourceHash)
-  assert.deepEqual(readPngSize(source), { width: 1206, height: 1206 })
+  const { width, height } = readPngInfo(source)
+  assert.deepEqual({ width, height }, { width: 1206, height: 1206 })
+  expectRgba(source)
 
   expectSquare(path.join(appRoot, 'src-tauri/icons/icon.png'), 512)
+  expectRgba(path.join(appRoot, 'src-tauri/icons/32x32.png'))
   const androidRoot = path.join(
     appRoot,
     'src-tauri/gen/android/app/src/main/res/mipmap-xxxhdpi',
