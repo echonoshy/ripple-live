@@ -5,9 +5,12 @@ import base64
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import time
 import uuid
 from typing import Optional
+from pathlib import Path
 from urllib.parse import urlencode
 
 REALTIME_PROTOCOL_VERSION = 3
@@ -24,6 +27,52 @@ SMOKE_JPEG_BASE64 = (
     "AwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAI"
     "AQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z"
 )
+
+
+def smoke_runtime_candidates(
+    repository_root: Path, configured_python: str
+) -> list[Path]:
+    candidates = [Path(configured_python)] if configured_python else []
+    candidates.extend(
+        [
+            Path(sys.executable),
+            repository_root / ".venv-qwen3-asr-1.7b/bin/python",
+            repository_root / ".venv-qwen3-tts-12hz-1.7b-customvoice/bin/python",
+            repository_root / ".venv-qwen3.5-35b-a3b/bin/python",
+        ]
+    )
+    return list(dict.fromkeys(candidates))
+
+
+def smoke_runtime_has_dependencies(python: Path) -> bool:
+    if not python.is_file():
+        return False
+    result = subprocess.run(
+        [str(python), "-c", "import httpx, numpy, websockets"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def ensure_smoke_runtime() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    candidates = smoke_runtime_candidates(
+        repository_root, os.environ.get("RIPPLE_SMOKE_PYTHON", "").strip()
+    )
+    if smoke_runtime_has_dependencies(candidates[0]):
+        return
+    for candidate in candidates[1:]:
+        if smoke_runtime_has_dependencies(candidate):
+            os.execv(
+                str(candidate),
+                [str(candidate), str(Path(__file__).resolve()), *sys.argv[1:]],
+            )
+    raise RuntimeError(
+        "smoke test needs httpx, numpy, and websockets; set RIPPLE_SMOKE_PYTHON "
+        "to a Python runtime that provides them"
+    )
 
 
 def require_function_call(payload: dict) -> dict:
@@ -473,6 +522,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    ensure_smoke_runtime()
     parser = argparse.ArgumentParser()
     parser.add_argument("--responses-only", action="store_true")
     arguments = parser.parse_args()

@@ -84,6 +84,14 @@ class SmokeContractTests(unittest.TestCase):
             "ws://127.0.0.1:8700/v1/agent/realtime?access_token=a%2Bb%2Fc%3D",
         )
 
+    def test_smoke_runtime_prefers_an_explicit_python(self) -> None:
+        candidates = SMOKE.smoke_runtime_candidates(
+            Path("/repo"), "/custom/smoke-python"
+        )
+
+        self.assertEqual(candidates[0], Path("/custom/smoke-python"))
+        self.assertIn(Path("/repo/.venv-qwen3-asr-1.7b/bin/python"), candidates)
+
     def test_voice_turn_events_reuse_one_turn_id(self) -> None:
         events = SMOKE.voice_turn_events("turn-7", b"\0\0\0\0")
 
