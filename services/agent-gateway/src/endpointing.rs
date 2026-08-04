@@ -87,9 +87,10 @@ pub fn deterministic_decision(text: &str) -> Option<EndpointDecision> {
         "这个",
         "那个",
     ];
+    let without_terminal_particle = normalized.trim_end_matches(['吗', '呢', '吧', '呀', '啊']);
     if INCOMPLETE_ENDINGS
         .iter()
-        .any(|ending| normalized.ends_with(ending))
+        .any(|ending| without_terminal_particle.ends_with(ending))
     {
         return Some(EndpointDecision::Continue);
     }
@@ -116,12 +117,12 @@ pub fn parse_classifier_decision(text: &str) -> Option<(EndpointDecision, f32)> 
         "continue" => EndpointDecision::Continue,
         _ => return None,
     };
-    let confidence = value.get("confidence")?.as_f64()? as f32;
+    let confidence = value.get("confidence")?.as_f64()?;
     if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
         return None;
     }
 
-    Some((decision, confidence))
+    Some((decision, confidence as f32))
 }
 
 fn is_separator(character: char) -> bool {
@@ -182,6 +183,14 @@ mod tests {
             Some(EndpointDecision::Continue)
         );
         assert_eq!(
+            deterministic_decision("如果啊"),
+            Some(EndpointDecision::Continue)
+        );
+        assert_eq!(
+            deterministic_decision("我想啊"),
+            Some(EndpointDecision::Continue)
+        );
+        assert_eq!(
             deterministic_decision("今天天气怎么样？"),
             Some(EndpointDecision::Complete)
         );
@@ -203,6 +212,10 @@ mod tests {
             Some((EndpointDecision::Complete, 0.5))
         );
         assert_eq!(parse_classifier_decision("answer now"), None);
+        assert_eq!(
+            parse_classifier_decision(r#"{\"decision\":\"complete\",\"confidence\":1.00000001}"#),
+            None
+        );
     }
 
     #[test]
