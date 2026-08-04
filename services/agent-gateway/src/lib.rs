@@ -1,3 +1,4 @@
+pub mod activation;
 pub mod adapters;
 pub mod asset_store;
 pub mod audio;

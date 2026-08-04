@@ -13,6 +13,8 @@ pub struct ClientEvent {
     pub mime_type: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
+    #[serde(default)]
+    pub response_id: Option<String>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }

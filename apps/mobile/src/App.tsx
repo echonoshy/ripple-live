@@ -465,13 +465,16 @@ export default function App() {
       setMuted(false)
       setSessionState('connecting')
 
+      let session: RealtimeSession
       const media = new LiveMedia({
         video: videoRef.current,
         canvas: canvasRef.current,
         withVideo: nextMode === 'video',
         facingMode: cameraFacing,
+        onPlaybackStarted: (bufferedMs) =>
+          session.outputPlaybackStarted(bufferedMs),
       })
-      const session = new RealtimeSession({
+      session = new RealtimeSession({
         server,
         accessToken,
         mode: nextMode,
@@ -480,6 +483,7 @@ export default function App() {
           setErrorMessage(message)
           setSessionState('error')
         },
+        onResponseFailed: setErrorMessage,
         onAssistantText: setAssistantText,
         onUserText: (text) => {
           setUserText(text)
@@ -488,6 +492,8 @@ export default function App() {
         onTool: setToolStatus,
         onAudio: (audio) => media.enqueueOutput(audio),
         onAudioDone: () => media.finishOutput(),
+        onInterrupted: () => media.clearOutput(),
+        onFrameRequested: () => media.captureFrame(),
         onArtifact: (artifact) => {
           setLiveArtifacts((items) =>
             items.some((item) => item.id === artifact.id)
@@ -497,10 +503,9 @@ export default function App() {
         },
         onConversation: () => {},
         onReady: async () => {
-          await media.start((audio, frame) => {
-            void session.sendInput(audio, frame)
+          await media.start((audio) => {
+            void session.sendInput(audio)
           }, () => {
-            media.clearOutput()
             void session.speechStarted()
           }, () => {
             void session.commitInput()
@@ -548,6 +553,7 @@ export default function App() {
     const next = !muted
     setMuted(next)
     mediaRef.current?.setMuted(next)
+    if (next) sessionRef.current?.discardInput()
   }
 
   const flipCamera = async () => {
@@ -1681,7 +1687,7 @@ export default function App() {
 
           <header className="call-header">
             <span className="call-mode">
-              {mode === 'video' ? '视频通话' : '语音通话'}
+              {mode === 'video' ? '视频' : '语音'} · 智能响应
             </span>
             <div className={`call-status ${statusClass}`}>
               <span aria-hidden="true" />

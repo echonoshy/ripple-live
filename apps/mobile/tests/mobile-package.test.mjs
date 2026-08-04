@@ -89,6 +89,35 @@ test('mobile app keeps the service address out of visible forms', () => {
   assert.doesNotMatch(appSource, /htmlFor="server">服务地址/)
 })
 
+test('mobile uses protocol v3 continuous model-gated turns', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const mediaSource = readFileSync(
+    path.join(appRoot, 'src/media/LiveMedia.ts'),
+    'utf8',
+  )
+  const realtimeSource = readFileSync(
+    path.join(appRoot, 'src/realtime/RealtimeSession.ts'),
+    'utf8',
+  )
+
+  assert.doesNotMatch(appSource, /ripple-activation-mode/)
+  assert.doesNotMatch(appSource, /静默唤醒/)
+  assert.doesNotMatch(appSource, /ActivationMode/)
+  assert.match(mediaSource, /private preRoll: Float32Array\[\]/)
+  assert.match(mediaSource, /if \(this\.speechActive\) \{\s*onChunk\(audio, null\)/s)
+  assert.doesNotMatch(mediaSource, /onChunk\(audio, this\.captureFrame\(\)\)/)
+  assert.doesNotMatch(realtimeSource, /input\.activation/)
+  assert.doesNotMatch(realtimeSource, /session\.wake/)
+  assert.doesNotMatch(realtimeSource, /forceWake/)
+  assert.match(realtimeSource, /case 'input\.frame\.requested'/)
+  assert.match(realtimeSource, /'high'/)
+  assert.match(realtimeSource, /onInterrupted: \(\) => void/)
+  assert.match(appSource, /onInterrupted: \(\) => media\.clearOutput\(\)/)
+  assert.match(mediaSource, /width: \{ ideal: 1280 \}/)
+  assert.match(mediaSource, /height: \{ ideal: 720 \}/)
+  assert.doesNotMatch(mediaSource, /lowPower/)
+})
+
 test('mobile todo reminders are enabled for Android and iOS', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const reminderSource = readFileSync(path.join(appRoot, 'src/reminders.ts'), 'utf8')

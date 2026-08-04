@@ -140,6 +140,9 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
         "请记住",
         "记住这个",
         "记一下这个",
+        "记录一下",
+        "记录这个",
+        "保存一下",
         "保存这个画面",
         "记住这个位置",
         "记住：",
@@ -776,6 +779,7 @@ mod tests {
         );
         assert_eq!(select_forced_tool("请记住：我喜欢乌龙茶"), Some("remember"));
         assert_eq!(select_forced_tool("记一下这个位置"), Some("remember"));
+        assert_eq!(select_forced_tool("把这个记录一下"), Some("remember"));
         assert_eq!(select_forced_tool("我上次放哪里了"), Some("recall"));
         assert_eq!(
             select_forced_tool("你再帮我搜索一下记忆中有关于芦荟胶相关的图片"),

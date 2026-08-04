@@ -1,7 +1,12 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core'
 import type { Message as TauriMessage } from '@tauri-apps/plugin-websocket'
+import {
+  createRequestedFrameEvents,
+  createSessionStart,
+} from './protocol'
+import type { RealtimeMode } from './protocol'
 
-export type RealtimeMode = 'audio' | 'video'
+export type { RealtimeMode } from './protocol'
 export type SessionState =
   | 'idle'
   | 'connecting'
@@ -22,10 +27,13 @@ type RealtimeEvent = {
   audio?: string
   sample_rate?: number
   message?: string
+  code?: string
   name?: string
   result?: unknown
   response_id?: string
   artifact?: ResponseArtifact
+  reason?: string
+  needs_frame?: boolean
 }
 
 export type ResponseArtifact = {
@@ -41,6 +49,14 @@ type Transport = {
   close(): Promise<void>
 }
 
+type SendPriority = 'normal' | 'high'
+
+type QueuedSend = {
+  messages: string[]
+  resolve: () => void
+  reject: (error: unknown) => void
+}
+
 type SessionOptions = {
   server: string
   accessToken: string
@@ -48,12 +64,15 @@ type SessionOptions = {
   mode: RealtimeMode
   onState: (state: SessionState) => void
   onError: (message: string) => void
+  onResponseFailed: (message: string) => void
   onAssistantText: (text: string) => void
   onUserText: (text: string) => void
   onTool: (label: string) => void
   onAudio: (audio: Float32Array) => void
   onAudioDone: () => void
+  onInterrupted: () => void
   onArtifact: (artifact: ResponseArtifact) => void
+  onFrameRequested: () => string | null
   onReady: () => Promise<void>
   onConversation: (conversationId: string) => void
 }
@@ -140,10 +159,13 @@ export class RealtimeSession {
   private ready = false
   private closed = false
   private assistantText = ''
-  private outputActive = false
   private interruptPending = false
   private currentResponseId: string | null = null
-  private sendQueue: Promise<void> = Promise.resolve()
+  private playbackStartedReported = false
+  private normalSends: QueuedSend[] = []
+  private highPrioritySends: QueuedSend[] = []
+  private sending = false
+  private sendIdleWaiters: Array<() => void> = []
 
   constructor(options: SessionOptions) {
     this.options = options
@@ -198,18 +220,71 @@ export class RealtimeSession {
   private async startSession() {
     if (!this.transport) return
     this.options.onState('preparing')
-    await this.sendEvent({
-        type: 'session.start',
-        mode: this.options.mode,
+    await this.sendEvent(
+      createSessionStart(this.options.mode),
+    )
+  }
+
+  private sendEvent(
+    event: Record<string, unknown>,
+    priority: SendPriority = 'normal',
+  ) {
+    return this.sendEvents([event], priority)
+  }
+
+  private sendEvents(
+    events: Record<string, unknown>[],
+    priority: SendPriority = 'normal',
+  ) {
+    if (!this.transport || this.closed) return Promise.resolve()
+    return new Promise<void>((resolve, reject) => {
+      const queue = priority === 'high' ? this.highPrioritySends : this.normalSends
+      queue.push({
+        messages: events.map((event) => JSON.stringify(event)),
+        resolve,
+        reject,
+      })
+      void this.drainSendQueue()
     })
   }
 
-  private sendEvent(event: Record<string, unknown>) {
-    this.sendQueue = this.sendQueue.then(async () => {
-      if (!this.transport || this.closed) return
-      await this.transport.send(JSON.stringify(event))
-    })
-    return this.sendQueue
+  private async drainSendQueue() {
+    if (this.sending) return
+    this.sending = true
+    try {
+      while (this.highPrioritySends.length || this.normalSends.length) {
+        const item = this.highPrioritySends.shift() ?? this.normalSends.shift()
+        if (!item) continue
+        try {
+          if (this.transport) {
+            for (const message of item.messages) {
+              await this.transport.send(message)
+            }
+          }
+          item.resolve()
+        } catch (error) {
+          item.reject(error)
+        }
+      }
+    } finally {
+      this.sending = false
+      if (!this.highPrioritySends.length && !this.normalSends.length) {
+        this.sendIdleWaiters.splice(0).forEach((resolve) => resolve())
+      } else {
+        void this.drainSendQueue()
+      }
+    }
+  }
+
+  private waitForSendIdle() {
+    if (
+      !this.sending &&
+      !this.highPrioritySends.length &&
+      !this.normalSends.length
+    ) {
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => this.sendIdleWaiters.push(resolve))
   }
 
   private handleTauriMessage(message: TauriMessage) {
@@ -254,13 +329,26 @@ export class RealtimeSession {
       case 'input.speech_started':
         this.options.onState('listening')
         break
+      case 'input.frame.requested': {
+        const frame = this.options.onFrameRequested()
+        const responseId = event.response_id
+        if (!responseId) {
+          this.options.onError('服务端没有提供画面请求标识')
+          break
+        }
+        void this.sendEvents(
+          createRequestedFrameEvents(responseId, frame, Date.now()),
+          'high',
+        )
+        break
+      }
       case 'input.transcript.final':
         this.options.onUserText(event.text?.trim() ?? '')
         break
       case 'response.created':
         this.currentResponseId = event.response_id ?? null
+        this.playbackStartedReported = false
         this.assistantText = ''
-        this.outputActive = false
         this.interruptPending = false
         this.options.onTool('')
         this.options.onState('thinking')
@@ -278,7 +366,6 @@ export class RealtimeSession {
       case 'response.text.delta':
         if (!this.isCurrentResponse(event)) return
         if (this.interruptPending || !event.delta) return
-        this.outputActive = true
         this.assistantText += event.delta
         this.options.onAssistantText(this.assistantText)
         this.options.onState('speaking')
@@ -286,7 +373,6 @@ export class RealtimeSession {
       case 'response.audio.delta':
         if (!this.isCurrentResponse(event)) return
         if (this.interruptPending || !event.audio) return
-        this.outputActive = true
         this.options.onAudio(base64ToFloat32(event.audio))
         this.options.onState('speaking')
         break
@@ -296,20 +382,18 @@ export class RealtimeSession {
         break
       case 'response.done':
         if (!this.isCurrentResponse(event)) return
-        this.options.onAudioDone()
-        this.currentResponseId = null
-        this.outputActive = false
-        this.interruptPending = false
-        this.options.onTool('')
-        this.options.onState('listening')
+        this.finishResponse('done')
         break
       case 'response.cancelled':
         if (!this.isCurrentResponse(event)) return
-        this.currentResponseId = null
-        this.outputActive = false
-        this.interruptPending = false
-        this.options.onTool('')
-        this.options.onState('listening')
+        this.finishResponse('cancelled')
+        break
+      case 'response.failed':
+        if (!this.isCurrentResponse(event)) return
+        this.finishResponse(
+          'failed',
+          event.message ?? '本次处理失败，请重试',
+        )
         break
       case 'error':
         console.error('[Ripple Live] session error', {
@@ -326,20 +410,54 @@ export class RealtimeSession {
     return !event.response_id || event.response_id === this.currentResponseId
   }
 
+  private finishResponse(
+    outcome: 'done' | 'cancelled' | 'failed',
+    message?: string,
+  ) {
+    if (outcome === 'done') {
+      this.options.onAudioDone()
+    } else {
+      this.options.onInterrupted()
+      this.assistantText = ''
+      this.options.onAssistantText('')
+    }
+    this.currentResponseId = null
+    this.playbackStartedReported = false
+    this.interruptPending = false
+    this.options.onTool('')
+    this.options.onState('listening')
+    if (outcome === 'failed') {
+      this.options.onResponseFailed(message ?? '本次处理失败，请重试')
+    }
+  }
+
+  outputPlaybackStarted(bufferedMs: number) {
+    if (!this.currentResponseId || this.playbackStartedReported) return
+    this.playbackStartedReported = true
+    void this.sendEvent({
+      type: 'output.playback.started',
+      response_id: this.currentResponseId,
+      buffered_ms: bufferedMs,
+    })
+  }
+
   async speechStarted() {
     if (!this.transport || !this.ready || this.closed) return
-    const hadOutput = this.outputActive
-    this.outputActive = false
-    this.currentResponseId = null
-    this.interruptPending = hadOutput
-    this.assistantText = ''
-    this.options.onAssistantText('')
-    this.options.onTool('')
+    if (this.currentResponseId) {
+      this.currentResponseId = null
+      this.interruptPending = true
+      this.assistantText = ''
+      this.playbackStartedReported = false
+      this.options.onInterrupted()
+      this.options.onAssistantText('')
+      this.options.onTool('')
+      await this.sendEvent({ type: 'response.cancel' })
+    }
     this.options.onState('listening')
     await this.sendEvent({ type: 'input.speech_started' })
   }
 
-  async sendInput(audio: Float32Array, frame: string | null) {
+  async sendInput(audio: Float32Array) {
     if (!this.transport || !this.ready || this.closed) return
     try {
       await this.sendEvent({
@@ -347,14 +465,6 @@ export class RealtimeSession {
         audio: float32ToBase64(audio),
         sample_rate: 16000,
       })
-      if (this.options.mode === 'video' && frame) {
-        await this.sendEvent({
-          type: 'input.video.frame',
-          image: frame,
-          mime_type: 'image/jpeg',
-          captured_at: Date.now(),
-        })
-      }
     } catch (error) {
       this.ready = false
       this.closed = true
@@ -374,9 +484,13 @@ export class RealtimeSession {
     await this.sendEvent({ type: 'input.commit' })
   }
 
+  discardInput() {
+    if (!this.transport || !this.ready || this.closed) return
+    void this.sendEvent({ type: 'input.clear' })
+  }
+
   forceListen() {
     if (!this.transport || this.closed) return false
-    this.outputActive = false
     this.currentResponseId = null
     this.interruptPending = true
     this.options.onTool('')
@@ -390,7 +504,7 @@ export class RealtimeSession {
     this.closed = true
     if (this.transport) {
       try {
-        await this.sendQueue.catch(() => {})
+        await this.waitForSendIdle()
         await this.transport.send(JSON.stringify({ type: 'session.close' }))
       } catch {
         // A disconnected socket still counts as closed.

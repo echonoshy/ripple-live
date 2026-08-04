@@ -21,10 +21,14 @@ independent app implementations.
 
 The app supports:
 
-- VAD-delimited voice turns with 16 kHz mono float32 transport;
-- camera frames sampled at one frame per second during a video turn;
+- VAD-delimited voice turns with a one-second local pre-roll and 16 kHz mono
+  float32 transport; idle audio is not uploaded;
+- a continuous model-gated flow where each completed speech turn is evaluated
+  by the server before the Agent decides whether to respond;
+- on-demand camera capture only after the server accepts a video turn;
 - server-side structured tool calls and visible tool status;
-- response interruption when the user starts speaking;
+- response interruption only after the model accepts a new turn, so unrelated
+  speech does not stop playback;
 - continuous 24 kHz float32 response playback through an AudioWorklet ring
   buffer, with 450 ms startup buffering and underrun recovery;
 - a new session ID for every voice or video call so separate calls never share
@@ -36,6 +40,10 @@ The default endpoint is:
 ```text
 ws://YOUR_SERVER_IP:8700/v1/agent/realtime
 ```
+
+Realtime sessions use protocol v3. Wake words and manual wake state are not part
+of the client protocol; the server model decides whether each speech turn needs
+a response.
 
 Every time the user starts a call, the client creates a fresh UUID and sends it
 as the WebSocket `session_id`. Reconnecting by starting another call therefore

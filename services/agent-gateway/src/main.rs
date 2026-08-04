@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -16,6 +17,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::{SinkExt, StreamExt};
 use ripple_agent_gateway::{
+    activation::{ActivationMode, evaluate as evaluate_activation},
     adapters::ModelAdapters,
     audio::decode_le_f32,
     config::Settings,
@@ -45,6 +47,17 @@ struct AppState {
 struct ActiveResponse {
     id: String,
     handle: JoinHandle<()>,
+}
+
+struct PendingTurn {
+    response_id: String,
+    transcript: String,
+}
+
+impl PendingTurn {
+    fn matches_response(&self, response_id: Option<&str>) -> bool {
+        response_id.is_some_and(|response_id| response_id == self.response_id)
+    }
 }
 
 #[tokio::main]
@@ -911,14 +924,23 @@ async fn realtime(
         },
     };
     websocket
-        .on_upgrade(move |socket| handle_socket(socket, state, user.id, conversation_id))
+        .on_upgrade(move |socket| async move {
+            if let Err(error) = handle_socket(socket, state, user.id, conversation_id).await {
+                warn!(%error, "realtime session ended with an error");
+            }
+        })
         .into_response()
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, user_id: String, session_id: String) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: AppState,
+    user_id: String,
+    session_id: String,
+) -> anyhow::Result<()> {
     if let Err(error) = state.context.touch_session(&session_id).await {
         error!(%session_id, %error, "failed to initialize session");
-        return;
+        return Ok(());
     }
     info!(%session_id, "session connected");
     record_event_best_effort(
@@ -955,13 +977,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: String, sess
     .is_err()
     {
         writer.abort();
-        return;
+        return Ok(());
     }
 
     let mut audio = Vec::<f32>::new();
     let mut frames = VecDeque::<VideoFrame>::with_capacity(state.settings.max_frames);
     let mut speech_active = false;
     let mut active_response: Option<ActiveResponse> = None;
+    let mut activation_mode = ActivationMode::Continuous;
+    let mut session_mode = "audio".to_owned();
+    let mut awake_until: Option<Instant> = None;
+    let mut pending_turn: Option<PendingTurn> = None;
 
     while let Some(message) = ws_receiver.next().await {
         let text = match message {
@@ -1020,9 +1046,25 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: String, sess
 
         let result = match event.kind.as_str() {
             "session.start" => {
+                activation_mode = ActivationMode::parse(
+                    event.extra.get("activation_mode").and_then(Value::as_str),
+                );
+                session_mode = event
+                    .extra
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("audio")
+                    .to_owned();
                 let result = send_event(
                     &event_sender,
-                    json!({"type": "session.ready", "session_id": session_id}),
+                    json!({
+                        "type": "session.ready",
+                        "session_id": session_id,
+                        "activation_mode": match activation_mode {
+                            ActivationMode::Wake => "wake",
+                            ActivationMode::Continuous => "continuous",
+                        }
+                    }),
                 )
                 .await;
                 if result.is_ok() {
@@ -1055,6 +1097,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: String, sess
                 }
             }
             "input.video.frame" => {
+                if activation_mode == ActivationMode::Wake
+                    && !pending_turn.as_ref().is_some_and(|pending| {
+                        pending.matches_response(event.response_id.as_deref())
+                    })
+                {
+                    warn!(
+                        %session_id,
+                        response_id = event.response_id.as_deref().unwrap_or("missing"),
+                        "stale video frame ignored"
+                    );
+                    continue;
+                }
                 match event
                     .image
                     .as_deref()
@@ -1123,6 +1177,149 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: String, sess
                 send_event(&event_sender, json!({"type": "input.speech_started"})).await
             }
             "input.commit" => {
+                speech_active = false;
+                let captured_audio = std::mem::take(&mut audio);
+                let response_id = Uuid::new_v4().to_string();
+                if activation_mode == ActivationMode::Wake {
+                    send_event(
+                        &event_sender,
+                        json!({
+                            "type": "input.activation.checking",
+                            "response_id": response_id
+                        }),
+                    )
+                    .await?;
+                    let transcript = match state
+                        .orchestrator
+                        .transcribe_candidate(&captured_audio)
+                        .await
+                    {
+                        Ok(transcript) => transcript,
+                        Err(error) => {
+                            warn!(%session_id, %response_id, %error, "activation transcription rejected");
+                            record_event_best_effort(
+                                &state.context,
+                                &session_id,
+                                "server.activation.rejected",
+                                &json!({"response_id": response_id, "reason": "asr_error"}),
+                            )
+                            .await;
+                            send_event(
+                                &event_sender,
+                                json!({
+                                    "type": "input.activation.rejected",
+                                    "response_id": response_id,
+                                    "reason": "asr_error"
+                                }),
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
+                    let follow_up_window_open =
+                        awake_until.is_some_and(|deadline| deadline > Instant::now());
+                    let decision = evaluate_activation(&transcript, follow_up_window_open);
+                    if decision.reason == "sleep_command" {
+                        awake_until = None;
+                    }
+                    record_event_best_effort(
+                        &state.context,
+                        &session_id,
+                        if decision.accepted {
+                            "server.activation.accepted"
+                        } else {
+                            "server.activation.rejected"
+                        },
+                        &json!({
+                            "response_id": response_id,
+                            "reason": decision.reason,
+                            "text_chars": transcript.chars().count()
+                        }),
+                    )
+                    .await;
+                    if !decision.accepted {
+                        frames.clear();
+                        send_event(
+                            &event_sender,
+                            json!({
+                                "type": "input.activation.rejected",
+                                "response_id": response_id,
+                                "reason": decision.reason
+                            }),
+                        )
+                        .await?;
+                        continue;
+                    }
+                    cancel_response(
+                        &mut active_response,
+                        &event_sender,
+                        &state.context,
+                        &session_id,
+                        "activation_accepted",
+                    )
+                    .await;
+                    awake_until = Some(Instant::now() + Duration::from_secs(30));
+                    send_event(
+                        &event_sender,
+                        json!({
+                            "type": "input.activation.accepted",
+                            "response_id": response_id,
+                            "text": transcript,
+                            "reason": decision.reason,
+                            "needs_frame": session_mode == "video"
+                        }),
+                    )
+                    .await?;
+                    if session_mode == "video" {
+                        if let Some(superseded) = pending_turn.take() {
+                            record_event_best_effort(
+                                &state.context,
+                                &session_id,
+                                "server.response.cancelled",
+                                &json!({
+                                    "response_id": superseded.response_id,
+                                    "reason": "superseded_before_frame"
+                                }),
+                            )
+                            .await;
+                            send_event(
+                                &event_sender,
+                                json!({
+                                    "type": "response.cancelled",
+                                    "response_id": superseded.response_id,
+                                    "reason": "superseded_before_frame"
+                                }),
+                            )
+                            .await?;
+                        }
+                        frames.clear();
+                        pending_turn = Some(PendingTurn {
+                            response_id: response_id.clone(),
+                            transcript,
+                        });
+                        send_event(
+                            &event_sender,
+                            json!({
+                                "type": "input.frame.requested",
+                                "response_id": response_id
+                            }),
+                        )
+                        .await?;
+                    } else {
+                        active_response = Some(spawn_turn(
+                            state.orchestrator.clone(),
+                            state.context.clone(),
+                            user_id.clone(),
+                            session_id.clone(),
+                            event_sender.clone(),
+                            Vec::new(),
+                            Vec::new(),
+                            Some(transcript),
+                            response_id,
+                        ));
+                    }
+                    continue;
+                }
                 cancel_response(
                     &mut active_response,
                     &event_sender,
@@ -1131,10 +1328,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: String, sess
                     "new_audio_commit",
                 )
                 .await;
-                speech_active = false;
-                let captured_audio = std::mem::take(&mut audio);
                 let captured_frames: Vec<_> = frames.drain(..).collect();
-                let response_id = Uuid::new_v4().to_string();
                 info!(
                     %session_id,
                     %response_id,
@@ -1165,6 +1359,44 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: String, sess
                     captured_frames,
                     None,
                     response_id,
+                ));
+                Ok(())
+            }
+            "input.clear" => {
+                speech_active = false;
+                audio.clear();
+                frames.clear();
+                pending_turn = None;
+                Ok(())
+            }
+            "input.video.commit" => {
+                let Some(pending) = pending_turn.as_ref() else {
+                    warn!(%session_id, "video commit received without a pending activated turn");
+                    continue;
+                };
+                if !pending.matches_response(event.response_id.as_deref()) {
+                    warn!(
+                        %session_id,
+                        response_id = event.response_id.as_deref().unwrap_or("missing"),
+                        expected_response_id = %pending.response_id,
+                        "stale video commit ignored"
+                    );
+                    continue;
+                }
+                let pending = pending_turn
+                    .take()
+                    .expect("pending turn was checked immediately before take");
+                let captured_frames: Vec<_> = frames.drain(..).collect();
+                active_response = Some(spawn_turn(
+                    state.orchestrator.clone(),
+                    state.context.clone(),
+                    user_id.clone(),
+                    session_id.clone(),
+                    event_sender.clone(),
+                    Vec::new(),
+                    captured_frames,
+                    Some(pending.transcript),
+                    pending.response_id,
                 ));
                 Ok(())
             }
@@ -1218,6 +1450,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: String, sess
                 .await;
                 Ok(())
             }
+            "session.wake" => {
+                awake_until = Some(Instant::now() + Duration::from_secs(30));
+                send_event(
+                    &event_sender,
+                    json!({"type": "session.awake", "expires_in_seconds": 30}),
+                )
+                .await
+            }
             "session.close" => break,
             _ => {
                 warn!(kind = %event.kind, extra = ?event.extra, "unknown client event");
@@ -1247,6 +1487,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: String, sess
     .await;
     drop(event_sender);
     let _ = writer.await;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1261,6 +1502,18 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[test]
+    fn pending_video_turn_only_accepts_its_own_response_id() {
+        let pending = PendingTurn {
+            response_id: "response-current".to_owned(),
+            transcript: "看一下这个设备".to_owned(),
+        };
+
+        assert!(pending.matches_response(Some("response-current")));
+        assert!(!pending.matches_response(Some("response-stale")));
+        assert!(!pending.matches_response(None));
+    }
 
     async fn test_state() -> (TempDir, AppState, String, String, String) {
         let directory = tempfile::tempdir().unwrap();

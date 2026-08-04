@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "test:library": "tsc src/library.ts --outDir .test-dist --module nodenext --moduleResolution nodenext --target es2022 --ignoreConfig && node --test tests/library.test.mjs; task_status=$?; rm -f .test-dist/library.js; rmdir .test-dist 2>/dev/null || true; exit $task_status",
     "test:mobile": "node --test tests/mobile-package.test.mjs && npm run test:library",
+    "test:realtime": "tsx --test tests/realtime-session.test.ts",
     "lint": "oxlint",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -38,6 +39,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "oxlint": "^1.71.0",
+    "tsx": "^4.23.5",
     "typescript": "~6.0.2",
     "vite": "^8.1.1",
     "vite-plugin-static-copy": "^4.1.1"

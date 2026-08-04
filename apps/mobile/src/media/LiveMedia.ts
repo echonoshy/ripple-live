@@ -5,6 +5,7 @@ type LiveMediaOptions = {
   canvas: HTMLCanvasElement
   withVideo: boolean
   facingMode: 'user' | 'environment'
+  onPlaybackStarted: (bufferedMs: number) => void
 }
 
 type AudioChunkMessage = {
@@ -66,10 +67,12 @@ export class LiveMedia {
   private muted = false
   private running = false
   private facingMode: 'user' | 'environment'
-  private lastFrameAt = 0
   private fallbackVad = false
   private fallbackSpeaking = false
   private fallbackSilenceChunks = 0
+  private speechActive = false
+  private preRoll: Float32Array[] = []
+  private preRollSamples = 0
 
   constructor(options: LiveMediaOptions) {
     this.options = options
@@ -133,6 +136,19 @@ export class LiveMedia {
       const audio = this.muted
         ? new Float32Array(resampled.length)
         : resampled
+      const beginSpeech = () => {
+        if (this.speechActive || this.muted) return
+        this.speechActive = true
+        onSpeechStart()
+        for (const buffered of this.preRoll) onChunk(buffered, null)
+        this.preRoll = []
+        this.preRollSamples = 0
+      }
+      const endSpeech = () => {
+        if (!this.speechActive) return
+        this.speechActive = false
+        onSpeechEnd()
+      }
       if (this.fallbackVad && !this.muted) {
         let squareSum = 0
         for (const sample of audio) squareSum += sample * sample
@@ -140,18 +156,30 @@ export class LiveMedia {
         if (!this.fallbackSpeaking && rms >= 0.02) {
           this.fallbackSpeaking = true
           this.fallbackSilenceChunks = 0
-          onSpeechStart()
+          beginSpeech()
         } else if (this.fallbackSpeaking) {
           this.fallbackSilenceChunks =
             rms < 0.012 ? this.fallbackSilenceChunks + 1 : 0
           if (this.fallbackSilenceChunks >= 8) {
             this.fallbackSpeaking = false
             this.fallbackSilenceChunks = 0
-            onSpeechEnd()
+            endSpeech()
           }
         }
       }
-      onChunk(audio, this.captureFrame())
+      if (this.speechActive) {
+        onChunk(audio, null)
+      } else if (!this.muted) {
+        this.preRoll.push(audio)
+        this.preRollSamples += audio.length
+        const maxPreRollSamples = 16_000
+        while (
+          this.preRollSamples > maxPreRollSamples &&
+          this.preRoll.length > 1
+        ) {
+          this.preRollSamples -= this.preRoll.shift()?.length ?? 0
+        }
+      }
     }
 
     try {
@@ -174,10 +202,19 @@ export class LiveMedia {
           ort.env.wasm.numThreads = 1
         },
         onSpeechRealStart: () => {
-          if (this.running && !this.muted) onSpeechStart()
+          if (this.running && !this.muted && !this.speechActive) {
+            this.speechActive = true
+            onSpeechStart()
+            for (const buffered of this.preRoll) onChunk(buffered, null)
+            this.preRoll = []
+            this.preRollSamples = 0
+          }
         },
         onSpeechEnd: () => {
-          if (this.running && !this.muted) onSpeechEnd()
+          if (this.running && !this.muted && this.speechActive) {
+            this.speechActive = false
+            onSpeechEnd()
+          }
         },
       })
     } catch (error) {
@@ -189,6 +226,11 @@ export class LiveMedia {
 
   setMuted(muted: boolean) {
     this.muted = muted
+    if (muted) {
+      this.speechActive = false
+      this.preRoll = []
+      this.preRollSamples = 0
+    }
   }
 
   async setFacingMode(facingMode: 'user' | 'environment') {
@@ -223,6 +265,9 @@ export class LiveMedia {
     this.fallbackVad = false
     this.fallbackSpeaking = false
     this.fallbackSilenceChunks = 0
+    this.speechActive = false
+    this.preRoll = []
+    this.preRollSamples = 0
     const vad = this.vad
     this.vad = null
     void vad?.destroy().catch(() => {})
@@ -271,6 +316,7 @@ export class LiveMedia {
           count: event.data.count,
         })
       } else if (event.data.type === 'playback-started') {
+        this.options.onPlaybackStarted(event.data.bufferedMs ?? 0)
         console.info('[Ripple Live] buffered playback started', {
           bufferedMs: event.data.bufferedMs,
           sampleRate: this.playbackContext?.sampleRate,
@@ -305,9 +351,7 @@ export class LiveMedia {
     this.options.video.srcObject = null
   }
 
-  private captureFrame() {
-    const now = performance.now()
-    if (now - this.lastFrameAt < 1000) return null
+  captureFrame() {
     if (
       !this.options.withVideo ||
       !this.options.video.videoWidth ||
@@ -325,7 +369,6 @@ export class LiveMedia {
     const context = this.options.canvas.getContext('2d')
     if (!context) return null
     context.drawImage(this.options.video, 0, 0, width, height)
-    this.lastFrameAt = now
     return this.options.canvas.toDataURL('image/jpeg', 0.7).split(',')[1] ?? null
   }
 }
