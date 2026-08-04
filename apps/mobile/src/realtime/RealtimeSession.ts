@@ -465,7 +465,28 @@ export class RealtimeSession {
     this.clearEndpointTimer()
     this.pendingTurnId = null
     this.currentTurnId = null
-    void this.sendEvent({ type: 'input.commit', turn_id: turnId })
+    this.sendEndpointEvent({ type: 'input.commit', turn_id: turnId })
+  }
+
+  private sendEndpointEvent(event: Record<string, unknown>) {
+    void this.sendEvent(event).catch((error: unknown) => {
+      void this.handleSendFailure(error)
+    })
+  }
+
+  private async handleSendFailure(error: unknown) {
+    if (this.closed) return
+    this.clearEndpointState()
+    this.ready = false
+    this.closed = true
+    this.options.onError(
+      error instanceof Error ? error.message : '实时音视频发送失败',
+    )
+    try {
+      await this.transport?.close()
+    } catch {
+      // The socket may already be gone.
+    }
   }
 
   private finishResponse(
@@ -542,17 +563,7 @@ export class RealtimeSession {
         sample_rate: 16000,
       })
     } catch (error) {
-      this.clearEndpointState()
-      this.ready = false
-      this.closed = true
-      this.options.onError(
-        error instanceof Error ? error.message : '实时音视频发送失败',
-      )
-      try {
-        await this.transport.close()
-      } catch {
-        // The socket may already be gone.
-      }
+      await this.handleSendFailure(error)
     }
   }
 
@@ -560,7 +571,10 @@ export class RealtimeSession {
     if (!this.transport || !this.ready || this.closed || !this.currentTurnId) return
     this.clearEndpointTimer()
     this.pendingTurnId = this.currentTurnId
-    void this.sendEvent({ type: 'input.turn.pause', turn_id: this.currentTurnId })
+    this.sendEndpointEvent({
+      type: 'input.turn.pause',
+      turn_id: this.currentTurnId,
+    })
   }
 
   discardInput() {
