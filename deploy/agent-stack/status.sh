@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_DIR="$SCRIPT_DIR/run"
 
-for name in asr agent tts-omni gateway; do
+for name in asr agent tts gateway; do
   unit="ripple-agent-$name.service"
   if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
     pid="$(systemctl --user show "$unit" --property=MainPID --value)"
@@ -18,6 +18,18 @@ for name in asr agent tts-omni gateway; do
     echo "$name: stopped"
   fi
 done
+
+echo
+if curl --silent --fail --max-time 2 "http://127.0.0.1:8700/health" >/dev/null; then
+  echo "gateway liveness: ok"
+else
+  echo "gateway liveness: unavailable"
+fi
+if curl --silent --fail --max-time 2 "http://127.0.0.1:8700/ready" >/dev/null; then
+  echo "gateway readiness: ok"
+else
+  echo "gateway readiness: unavailable"
+fi
 
 echo
 for endpoint in \

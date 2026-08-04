@@ -7,10 +7,12 @@ pub struct Settings {
     pub asr_backend: String,
     pub asr_url: String,
     pub asr_model: String,
+    pub asr_readiness_url: String,
     pub agent_backend: String,
     pub agent_url: String,
     pub agent_model: String,
     pub agent_api_key: String,
+    pub agent_readiness_url: String,
     pub agent_temperature: f64,
     pub agent_max_tokens: u32,
     pub tts_backend: String,
@@ -19,6 +21,7 @@ pub struct Settings {
     pub tts_voice: String,
     pub tts_language: String,
     pub tts_instructions: String,
+    pub tts_readiness_url: String,
     pub audio_chunk_ms: usize,
     pub sample_rate_in: u32,
     pub sample_rate_out: u32,
@@ -35,6 +38,8 @@ pub struct Settings {
     pub invite_ttl_hours: i64,
     pub auth_token_ttl_hours: i64,
     pub request_timeout: Duration,
+    pub gate_timeout: Duration,
+    pub readiness_timeout: Duration,
 }
 
 fn value(name: &str, default: &str) -> String {
@@ -51,24 +56,47 @@ where
         .unwrap_or(default)
 }
 
+fn readiness_url(name: &str, service_url: &str, default_path: &str) -> String {
+    let override_name = format!("RIPPLE_{name}_READINESS_URL");
+    if let Ok(value) = env::var(override_name)
+        && !value.trim().is_empty()
+    {
+        return value;
+    }
+    reqwest::Url::parse(service_url)
+        .map(|mut url| {
+            url.set_path(default_path);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        })
+        .unwrap_or_else(|_| service_url.to_owned())
+}
+
 impl Settings {
     pub fn from_env() -> anyhow::Result<Self> {
         let host = value("HOST", "0.0.0.0");
         let port: u16 = parsed("PORT", 8700);
+        let asr_url = value("ASR_URL", "http://127.0.0.1:8711/v1/audio/transcriptions");
+        let agent_url = value("AGENT_URL", "http://127.0.0.1:8712/v1/responses");
+        let tts_url = value("TTS_URL", "http://127.0.0.1:8723/v1/audio/speech");
         Ok(Self {
             address: format!("{host}:{port}").parse()?,
-            data_dir: PathBuf::from(value("DATA_DIR", ".cache/agent-gateway")),
+            data_dir: PathBuf::from(value("DATA_DIR", "runtime-data/agent-gateway")),
             asr_backend: value("ASR_BACKEND", "openai"),
-            asr_url: value("ASR_URL", "http://127.0.0.1:8711/v1/audio/transcriptions"),
-            asr_model: value("ASR_MODEL", "Qwen3-ASR-0.6B"),
+            asr_readiness_url: readiness_url("ASR", &asr_url, "/health"),
+            asr_url,
+            asr_model: value("ASR_MODEL", "Qwen3-ASR-1.7B"),
             agent_backend: value("AGENT_BACKEND", "openai"),
-            agent_url: value("AGENT_URL", "http://127.0.0.1:8712/v1/chat/completions"),
-            agent_model: value("AGENT_MODEL", "Qwen3-VL-8B-Instruct"),
+            agent_readiness_url: readiness_url("AGENT", &agent_url, "/v1/models"),
+            agent_url,
+            agent_model: value("AGENT_MODEL", "Qwen3.5-35B-A3B"),
             agent_api_key: value("AGENT_API_KEY", "EMPTY"),
             agent_temperature: parsed("AGENT_TEMPERATURE", 0.2),
             agent_max_tokens: parsed("AGENT_MAX_TOKENS", 1024),
             tts_backend: value("TTS_BACKEND", "qwen"),
-            tts_url: value("TTS_URL", "http://127.0.0.1:8723/v1/audio/speech"),
+            tts_readiness_url: readiness_url("TTS", &tts_url, "/health"),
+            tts_url,
             tts_model: value("TTS_MODEL", "Qwen3-TTS-12Hz-1.7B-CustomVoice"),
             tts_voice: value("TTS_VOICE", "serena"),
             tts_language: value("TTS_LANGUAGE", "Chinese"),
@@ -97,6 +125,8 @@ impl Settings {
             invite_ttl_hours: parsed("INVITE_TTL_HOURS", 24 * 7),
             auth_token_ttl_hours: parsed("AUTH_TOKEN_TTL_HOURS", 24 * 30),
             request_timeout: Duration::from_secs(parsed("REQUEST_TIMEOUT_SECONDS", 180)),
+            gate_timeout: Duration::from_millis(parsed("GATE_TIMEOUT_MS", 3_000)),
+            readiness_timeout: Duration::from_secs(2),
         })
     }
 

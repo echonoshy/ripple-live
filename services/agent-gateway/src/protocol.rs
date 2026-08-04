@@ -6,6 +6,8 @@ pub struct ClientEvent {
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
     pub audio: Option<String>,
     #[serde(default)]
     pub image: Option<String>,

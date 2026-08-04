@@ -1,7 +1,9 @@
 # Runtime assets (kept locally, never committed)
 /.cache/
-/.venv-qwen-vllm/
-/.venv-vllm-omni-024/
+/runtime-data/
+/.venv-qwen3-asr-1.7b/
+/.venv-qwen3.5-35b-a3b/
+/.venv-qwen3-tts-12hz-1.7b-customvoice/
 /services/agent-gateway/target/
 __pycache__/
 *.py[cod]
