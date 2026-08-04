@@ -27,7 +27,7 @@ use ripple_agent_gateway::{
     memory::{MemoryService, TodoUpdate},
     orchestrator::AgentOrchestrator,
     protocol::{ClientEvent, VideoFrame},
-    response_gate::GateDecision,
+    response_gate::{GateDecision, GateOutcome},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -39,7 +39,7 @@ use tower_http::{
 use tracing::{Level, error, info, warn};
 use uuid::Uuid;
 
-const REALTIME_PROTOCOL_VERSION: u32 = 3;
+const REALTIME_PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Clone)]
 struct AppState {
@@ -76,7 +76,7 @@ struct EndpointState {
     active_turn_id: Option<String>,
     phase: Option<EndpointPhase>,
     audio: Vec<f32>,
-    transcript: Option<String>,
+    evaluation: Option<EndpointEvaluation>,
 }
 
 impl EndpointState {
@@ -86,7 +86,7 @@ impl EndpointState {
             active_turn_id: Some(turn_id.to_owned()),
             phase: Some(EndpointPhase::Speaking),
             audio: Vec::new(),
-            transcript: None,
+            evaluation: None,
         }
     }
 
@@ -94,7 +94,7 @@ impl EndpointState {
         keep_pre_roll(&mut self.audio, pre_roll_limit);
         self.active_turn_id = Some(turn_id.to_owned());
         self.phase = Some(EndpointPhase::Speaking);
-        self.transcript = None;
+        self.evaluation = None;
     }
 
     fn append_audio(&mut self, encoded: Option<&str>, settings: &Settings) -> anyhow::Result<()> {
@@ -111,7 +111,7 @@ impl EndpointState {
             return false;
         }
         self.phase = Some(EndpointPhase::Paused);
-        self.transcript = None;
+        self.evaluation = None;
         true
     }
 
@@ -120,7 +120,7 @@ impl EndpointState {
             return false;
         }
         self.phase = Some(EndpointPhase::Speaking);
-        self.transcript = None;
+        self.evaluation = None;
         true
     }
 
@@ -128,21 +128,21 @@ impl EndpointState {
         self.active_turn_id.as_deref() == Some(turn_id) && self.phase == Some(EndpointPhase::Paused)
     }
 
-    fn store_transcript(&mut self, turn_id: &str, transcript: String) -> bool {
+    fn store_evaluation(&mut self, turn_id: &str, evaluation: EndpointEvaluation) -> bool {
         if !self.accepts_result(turn_id) {
             return false;
         }
-        self.transcript = (!transcript.is_empty()).then_some(transcript);
+        self.evaluation = Some(evaluation);
         true
     }
 
-    fn take_commit(&mut self, turn_id: &str) -> Option<(Vec<f32>, Option<String>)> {
+    fn take_commit(&mut self, turn_id: &str) -> Option<(Vec<f32>, Option<EndpointEvaluation>)> {
         if self.active_turn_id.as_deref() != Some(turn_id) {
             return None;
         }
         self.active_turn_id = None;
         self.phase = None;
-        Some((std::mem::take(&mut self.audio), self.transcript.take()))
+        Some((std::mem::take(&mut self.audio), self.evaluation.take()))
     }
 
     fn consume_stop(&mut self, turn_id: &str, transcript: &str) -> bool {
@@ -157,7 +157,7 @@ impl EndpointState {
         self.active_turn_id = None;
         self.phase = None;
         self.audio.clear();
-        self.transcript = None;
+        self.evaluation = None;
     }
 }
 
@@ -171,7 +171,7 @@ struct EndpointTaskResult {
     turn_id: String,
     generation: u64,
     evaluation: EndpointEvaluation,
-    duration_ms: u128,
+    audio_duration_ms: u128,
 }
 
 struct PendingTranscription {
@@ -188,9 +188,25 @@ struct TranscriptionTaskResult {
     transcript: Result<String, String>,
 }
 
+struct PendingGate {
+    turn_id: String,
+    generation: u64,
+    response_id: String,
+    handle: JoinHandle<()>,
+}
+
+struct GateTaskResult {
+    turn_id: String,
+    generation: u64,
+    response_id: String,
+    transcript: String,
+    gate: GateOutcome,
+}
+
 enum RealtimeInput<T> {
     Endpoint(EndpointTaskResult),
     Transcription(TranscriptionTaskResult),
+    Gate(GateTaskResult),
     Socket(Option<T>),
 }
 
@@ -198,6 +214,7 @@ async fn next_realtime_input<S>(
     socket: &mut S,
     endpoint_results: &mut mpsc::Receiver<EndpointTaskResult>,
     transcription_results: &mut mpsc::Receiver<TranscriptionTaskResult>,
+    gate_results: &mut mpsc::Receiver<GateTaskResult>,
 ) -> RealtimeInput<S::Item>
 where
     S: Stream + Unpin,
@@ -205,6 +222,7 @@ where
     tokio::select! {
         Some(result) = endpoint_results.recv() => RealtimeInput::Endpoint(result),
         Some(result) = transcription_results.recv() => RealtimeInput::Transcription(result),
+        Some(result) = gate_results.recv() => RealtimeInput::Gate(result),
         message = socket.next() => RealtimeInput::Socket(message),
     }
 }
@@ -259,6 +277,69 @@ fn cancel_transcription(pending: &mut Option<PendingTranscription>) {
     }
 }
 
+fn spawn_gate_task<F>(
+    turn_id: String,
+    generation: u64,
+    response_id: String,
+    transcript: String,
+    results: mpsc::Sender<GateTaskResult>,
+    gate: F,
+) -> PendingGate
+where
+    F: Future<Output = GateOutcome> + Send + 'static,
+{
+    let task_turn_id = turn_id.clone();
+    let task_response_id = response_id.clone();
+    let handle = tokio::spawn(async move {
+        let gate = gate.await;
+        let _ = results
+            .send(GateTaskResult {
+                turn_id: task_turn_id,
+                generation,
+                response_id: task_response_id,
+                transcript,
+                gate,
+            })
+            .await;
+    });
+    PendingGate {
+        turn_id,
+        generation,
+        response_id,
+        handle,
+    }
+}
+
+fn spawn_voice_gate(
+    orchestrator: AgentOrchestrator,
+    session_id: String,
+    turn_id: String,
+    generation: u64,
+    response_id: String,
+    transcript: String,
+    results: mpsc::Sender<GateTaskResult>,
+) -> PendingGate {
+    let gate_transcript = transcript.clone();
+    let gate = async move {
+        orchestrator
+            .gate_transcript(&session_id, &gate_transcript)
+            .await
+    };
+    spawn_gate_task(turn_id, generation, response_id, transcript, results, gate)
+}
+
+fn cancel_gate(pending: &mut Option<PendingGate>) {
+    if let Some(pending) = pending.take() {
+        pending.handle.abort();
+    }
+}
+
+fn gate_result_matches(pending: &PendingGate, result: &GateTaskResult) -> bool {
+    pending.turn_id == result.turn_id
+        && pending.generation == result.generation
+        && pending.response_id == result.response_id
+}
+
 fn transcription_result_matches(
     pending_turn_id: &str,
     pending_generation: u64,
@@ -306,10 +387,130 @@ fn correlate_pending_frame(
     }
 }
 
+fn client_protocol_version(event: &ClientEvent) -> Option<u32> {
+    event
+        .extra
+        .get("protocol_version")
+        .and_then(Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+}
+
 fn validate_protocol_version(version: Option<u32>) -> Result<(), ()> {
     (version == Some(REALTIME_PROTOCOL_VERSION))
         .then_some(())
         .ok_or(())
+}
+
+fn audio_duration_ms(sample_count: usize, sample_rate: u32) -> u128 {
+    if sample_rate == 0 {
+        return 0;
+    }
+    sample_count as u128 * 1_000 / sample_rate as u128
+}
+
+fn endpoint_evaluated_payload(
+    turn_id: &str,
+    audio_duration_ms: u128,
+    evaluation: &EndpointEvaluation,
+) -> Value {
+    json!({
+        "turn_id": turn_id,
+        "audio_duration_ms": audio_duration_ms,
+        "transcript_chars": evaluation.transcript.chars().count(),
+        "decision": evaluation.decision.as_str(),
+        "reason": evaluation.reason,
+        "classifier_latency_ms": evaluation.classifier_latency_ms
+    })
+}
+
+fn endpoint_committed_payload(
+    turn_id: &str,
+    audio_duration_ms: u128,
+    evaluation: Option<&EndpointEvaluation>,
+    client_fallback_finalized: bool,
+) -> Value {
+    json!({
+        "turn_id": turn_id,
+        "audio_duration_ms": audio_duration_ms,
+        "transcript_chars": evaluation.map(|item| item.transcript.chars().count()),
+        "decision": evaluation.map(|item| item.decision.as_str()),
+        "reason": evaluation.map(|item| item.reason),
+        "classifier_latency_ms": evaluation.and_then(|item| item.classifier_latency_ms),
+        "client_fallback_finalized": client_fallback_finalized
+    })
+}
+
+fn stop_command_payload(turn_id: &str, transcript: &str) -> Value {
+    json!({
+        "turn_id": turn_id,
+        "command": "stop",
+        "transcript_chars": transcript.chars().count()
+    })
+}
+
+fn client_endpoint_fallback(event: &ClientEvent) -> bool {
+    event
+        .extra
+        .get("endpoint_fallback")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn clear_input_state(
+    endpoint_state: &mut EndpointState,
+    pending_endpoint: &mut Option<PendingEndpoint>,
+    pending_transcription: &mut Option<PendingTranscription>,
+    pending_gate: &mut Option<PendingGate>,
+    frames: &mut VecDeque<VideoFrame>,
+    pending_turn: &mut Option<PendingTurn>,
+) {
+    cancel_endpoint(pending_endpoint);
+    cancel_transcription(pending_transcription);
+    cancel_gate(pending_gate);
+    endpoint_state.clear();
+    frames.clear();
+    *pending_turn = None;
+}
+
+fn take_pending_video_turn(
+    pending_turn: &mut Option<PendingTurn>,
+    frames: &mut VecDeque<VideoFrame>,
+) -> Option<PendingTurn> {
+    let pending = pending_turn.take();
+    if pending.is_some() {
+        frames.clear();
+    }
+    pending
+}
+
+async fn cancel_pending_video_turn(
+    pending_turn: &mut Option<PendingTurn>,
+    frames: &mut VecDeque<VideoFrame>,
+    sender: &mpsc::Sender<Value>,
+    context: &ContextStore,
+    session_id: &str,
+    reason: &str,
+) {
+    let Some(pending) = take_pending_video_turn(pending_turn, frames) else {
+        return;
+    };
+    info!(%session_id, response_id = %pending.response_id, %reason, "pending video response cancelled");
+    record_event_best_effort(
+        context,
+        session_id,
+        "server.response.cancelled",
+        &json!({"response_id": pending.response_id, "reason": reason}),
+    )
+    .await;
+    let _ = send_event(
+        sender,
+        json!({
+            "type": "response.cancelled",
+            "response_id": pending.response_id,
+            "reason": reason
+        }),
+    )
+    .await;
 }
 
 fn normalize_playback_started(
@@ -1268,16 +1469,20 @@ async fn handle_socket(
     let mut pending_turn: Option<PendingTurn> = None;
     let mut pending_endpoint: Option<PendingEndpoint> = None;
     let mut pending_transcription: Option<PendingTranscription> = None;
+    let mut pending_gate: Option<PendingGate> = None;
     let mut endpoint_generation = 0_u64;
+    let mut gate_generation = 0_u64;
     let (endpoint_results, mut endpoint_results_rx) = mpsc::channel::<EndpointTaskResult>(4);
     let (transcription_results, mut transcription_results_rx) =
         mpsc::channel::<TranscriptionTaskResult>(4);
+    let (gate_results, mut gate_results_rx) = mpsc::channel::<GateTaskResult>(4);
 
     loop {
         let message = match next_realtime_input(
             &mut ws_receiver,
             &mut endpoint_results_rx,
             &mut transcription_results_rx,
+            &mut gate_results_rx,
         )
         .await
         {
@@ -1304,20 +1509,13 @@ async fn handle_socket(
                     turn_id,
                     generation: _,
                     evaluation,
-                    duration_ms,
+                    audio_duration_ms,
                 } = result;
                 record_event_best_effort(
                     &state.context,
                     &session_id,
                     "server.input.endpoint_evaluated",
-                    &json!({
-                        "turn_id": turn_id,
-                        "duration_ms": duration_ms,
-                        "transcript_chars": evaluation.transcript.chars().count(),
-                        "decision": evaluation.decision.as_str(),
-                        "reason": evaluation.reason,
-                        "classifier_latency_ms": evaluation.classifier_latency_ms
-                    }),
+                    &endpoint_evaluated_payload(&turn_id, audio_duration_ms, &evaluation),
                 )
                 .await;
                 if endpoint_state.consume_stop(&turn_id, &evaluation.transcript) {
@@ -1335,10 +1533,7 @@ async fn handle_socket(
                         &state.context,
                         &session_id,
                         "server.input.stop_command_handled",
-                        &json!({
-                            "turn_id": turn_id,
-                            "transcript_chars": evaluation.transcript.chars().count()
-                        }),
+                        &stop_command_payload(&turn_id, &evaluation.transcript),
                     )
                     .await;
                     send_event(
@@ -1352,15 +1547,18 @@ async fn handle_socket(
                     .await?;
                     continue;
                 }
-                endpoint_state.store_transcript(&turn_id, evaluation.transcript);
+                let decision = evaluation.decision;
+                let reason = evaluation.reason;
+                let classifier_latency_ms = evaluation.classifier_latency_ms;
+                endpoint_state.store_evaluation(&turn_id, evaluation);
                 send_event(
                     &event_sender,
                     json!({
                         "type": "input.turn.decision",
                         "turn_id": turn_id,
-                        "decision": evaluation.decision.as_str(),
-                        "reason": evaluation.reason,
-                        "classifier_latency_ms": evaluation.classifier_latency_ms
+                        "decision": decision.as_str(),
+                        "reason": reason,
+                        "classifier_latency_ms": classifier_latency_ms
                     }),
                 )
                 .await?;
@@ -1395,9 +1593,8 @@ async fn handle_socket(
                 } = result;
                 match transcript {
                     Ok(transcript) => {
-                        handle_voice_transcript(
+                        queue_voice_transcript(
                             &state,
-                            &user_id,
                             &session_id,
                             &event_sender,
                             &mut active_response,
@@ -1409,6 +1606,9 @@ async fn handle_socket(
                             &turn_id,
                             response_id,
                             transcript,
+                            &mut pending_gate,
+                            &mut gate_generation,
+                            &gate_results,
                         )
                         .await?;
                     }
@@ -1430,6 +1630,100 @@ async fn handle_socket(
                         )
                         .await?;
                     }
+                }
+                continue;
+            }
+            RealtimeInput::Gate(result) => {
+                let is_current = pending_gate
+                    .as_ref()
+                    .is_some_and(|pending| gate_result_matches(pending, &result));
+                if !is_current {
+                    warn!(
+                        %session_id,
+                        turn_id = %result.turn_id,
+                        response_id = %result.response_id,
+                        "stale response gate result ignored"
+                    );
+                    continue;
+                }
+                pending_gate.take();
+                let GateTaskResult {
+                    turn_id: _,
+                    generation: _,
+                    response_id,
+                    transcript,
+                    gate,
+                } = result;
+                record_event_best_effort(
+                    &state.context,
+                    &session_id,
+                    "server.gate.completed",
+                    &json!({
+                        "response_id": response_id,
+                        "transcript": transcript,
+                        "gate_decision": gate.decision.as_str(),
+                        "gate_reason": gate.reason,
+                        "gate_latency_ms": gate.latency_ms,
+                        "gate_fallback": gate.fallback
+                    }),
+                )
+                .await;
+                if gate.decision == GateDecision::Ignore {
+                    frames.clear();
+                    continue;
+                }
+                cancel_response(
+                    &mut active_response,
+                    &event_sender,
+                    &state.context,
+                    &session_id,
+                    "gate_respond",
+                )
+                .await;
+                if session_mode == "video" {
+                    if let Some(superseded) = pending_turn.take() {
+                        record_event_best_effort(
+                            &state.context,
+                            &session_id,
+                            "server.response.cancelled",
+                            &json!({
+                                "response_id": superseded.response_id,
+                                "reason": "superseded_before_frame"
+                            }),
+                        )
+                        .await;
+                        send_event(
+                            &event_sender,
+                            json!({
+                                "type": "response.cancelled",
+                                "response_id": superseded.response_id,
+                                "reason": "superseded_before_frame"
+                            }),
+                        )
+                        .await?;
+                    }
+                    frames.clear();
+                    pending_turn = Some(PendingTurn {
+                        response_id: response_id.clone(),
+                        transcript,
+                    });
+                    send_event(
+                        &event_sender,
+                        json!({"type": "input.frame.requested", "response_id": response_id}),
+                    )
+                    .await?;
+                } else {
+                    active_response = Some(spawn_turn(
+                        state.orchestrator.clone(),
+                        state.context.clone(),
+                        user_id.clone(),
+                        session_id.clone(),
+                        event_sender.clone(),
+                        Vec::new(),
+                        Vec::new(),
+                        Some(transcript),
+                        response_id,
+                    ));
                 }
                 continue;
             }
@@ -1496,7 +1790,7 @@ async fn handle_socket(
                 json!({
                     "type": "error",
                     "code": "unsupported_protocol",
-                    "message": "必须先使用协议 v3 初始化会话"
+                    "message": "必须先使用协议 v4 初始化会话"
                 }),
             )
             .await;
@@ -1508,18 +1802,14 @@ async fn handle_socket(
                 activation_mode = ActivationMode::parse(
                     event.extra.get("activation_mode").and_then(Value::as_str),
                 );
-                let protocol_version = event
-                    .extra
-                    .get("protocol_version")
-                    .and_then(Value::as_u64)
-                    .and_then(|version| u32::try_from(version).ok());
+                let protocol_version = client_protocol_version(&event);
                 if validate_protocol_version(protocol_version).is_err() {
                     send_event(
                         &event_sender,
                         json!({
                             "type": "error",
                             "code": "unsupported_protocol",
-                            "message": "客户端与服务端协议版本不一致，需要使用协议 v3"
+                            "message": "客户端与服务端协议版本不一致，需要使用协议 v4"
                         }),
                     )
                     .await?;
@@ -1642,8 +1932,18 @@ async fn handle_socket(
                     "speech_started",
                 )
                 .await;
+                cancel_pending_video_turn(
+                    &mut pending_turn,
+                    &mut frames,
+                    &event_sender,
+                    &state.context,
+                    &session_id,
+                    "speech_started",
+                )
+                .await;
                 cancel_endpoint(&mut pending_endpoint);
                 cancel_transcription(&mut pending_transcription);
+                cancel_gate(&mut pending_gate);
                 let Some(turn_id) = event
                     .turn_id
                     .as_deref()
@@ -1708,10 +2008,11 @@ async fn handle_socket(
                 let endpoint_orchestrator = state.orchestrator.clone();
                 let endpoint_results = endpoint_results.clone();
                 let task_turn_id = turn_id.to_owned();
+                let task_audio_duration_ms =
+                    audio_duration_ms(captured_audio.len(), state.settings.sample_rate_in);
                 endpoint_generation += 1;
                 let task_generation = endpoint_generation;
                 let handle = tokio::spawn(async move {
-                    let started = Instant::now();
                     let evaluation = endpoint_orchestrator
                         .evaluate_turn_end(&captured_audio)
                         .await;
@@ -1720,7 +2021,7 @@ async fn handle_socket(
                             turn_id: task_turn_id,
                             generation: task_generation,
                             evaluation,
-                            duration_ms: started.elapsed().as_millis(),
+                            audio_duration_ms: task_audio_duration_ms,
                         })
                         .await;
                 });
@@ -1740,18 +2041,35 @@ async fn handle_socket(
                     warn!(%session_id, "audio commit without turn id ignored");
                     continue;
                 };
-                let Some((captured_audio, reusable_transcript)) =
+                let Some((captured_audio, reusable_evaluation)) =
                     endpoint_state.take_commit(turn_id)
                 else {
                     warn!(%session_id, %turn_id, "stale audio commit ignored");
                     continue;
                 };
+                let client_fallback_finalized = client_endpoint_fallback(&event);
+                let committed_audio_duration_ms =
+                    audio_duration_ms(captured_audio.len(), state.settings.sample_rate_in);
+                record_event_best_effort(
+                    &state.context,
+                    &session_id,
+                    "server.input.endpoint_committed",
+                    &endpoint_committed_payload(
+                        turn_id,
+                        committed_audio_duration_ms,
+                        reusable_evaluation.as_ref(),
+                        client_fallback_finalized,
+                    ),
+                )
+                .await;
                 cancel_endpoint(&mut pending_endpoint);
+                cancel_gate(&mut pending_gate);
                 let response_id = Uuid::new_v4().to_string();
-                if let Some(transcript) = reusable_transcript {
-                    handle_voice_transcript(
+                if let Some(evaluation) =
+                    reusable_evaluation.filter(|item| !item.transcript.is_empty())
+                {
+                    queue_voice_transcript(
                         &state,
-                        &user_id,
                         &session_id,
                         &event_sender,
                         &mut active_response,
@@ -1762,7 +2080,10 @@ async fn handle_socket(
                         &mut pending_turn,
                         turn_id,
                         response_id,
-                        transcript,
+                        evaluation.transcript,
+                        &mut pending_gate,
+                        &mut gate_generation,
+                        &gate_results,
                     )
                     .await?;
                 } else {
@@ -1781,11 +2102,14 @@ async fn handle_socket(
                 continue;
             }
             "input.clear" => {
-                cancel_endpoint(&mut pending_endpoint);
-                cancel_transcription(&mut pending_transcription);
-                endpoint_state.clear();
-                frames.clear();
-                pending_turn = None;
+                clear_input_state(
+                    &mut endpoint_state,
+                    &mut pending_endpoint,
+                    &mut pending_transcription,
+                    &mut pending_gate,
+                    &mut frames,
+                    &mut pending_turn,
+                );
                 Ok(())
             }
             "input.video.commit" => {
@@ -1825,7 +2149,17 @@ async fn handle_socket(
             "input.text.commit" => {
                 cancel_endpoint(&mut pending_endpoint);
                 cancel_transcription(&mut pending_transcription);
+                cancel_gate(&mut pending_gate);
                 endpoint_state.clear();
+                cancel_pending_video_turn(
+                    &mut pending_turn,
+                    &mut frames,
+                    &event_sender,
+                    &state.context,
+                    &session_id,
+                    "new_text_commit",
+                )
+                .await;
                 cancel_response(
                     &mut active_response,
                     &event_sender,
@@ -1886,6 +2220,16 @@ async fn handle_socket(
             }
             "response.cancel" => {
                 cancel_transcription(&mut pending_transcription);
+                cancel_gate(&mut pending_gate);
+                cancel_pending_video_turn(
+                    &mut pending_turn,
+                    &mut frames,
+                    &event_sender,
+                    &state.context,
+                    &session_id,
+                    "client_request",
+                )
+                .await;
                 cancel_response(
                     &mut active_response,
                     &event_sender,
@@ -1907,6 +2251,7 @@ async fn handle_socket(
             "session.close" => {
                 cancel_endpoint(&mut pending_endpoint);
                 cancel_transcription(&mut pending_transcription);
+                cancel_gate(&mut pending_gate);
                 break;
             }
             _ => {
@@ -1921,6 +2266,7 @@ async fn handle_socket(
 
     cancel_endpoint(&mut pending_endpoint);
     cancel_transcription(&mut pending_transcription);
+    cancel_gate(&mut pending_gate);
     cancel_response(
         &mut active_response,
         &event_sender,
@@ -1943,9 +2289,8 @@ async fn handle_socket(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_voice_transcript(
+async fn queue_voice_transcript(
     state: &AppState,
-    user_id: &str,
     session_id: &str,
     event_sender: &mpsc::Sender<Value>,
     active_response: &mut Option<ActiveResponse>,
@@ -1957,6 +2302,9 @@ async fn handle_voice_transcript(
     turn_id: &str,
     response_id: String,
     transcript: String,
+    pending_gate: &mut Option<PendingGate>,
+    gate_generation: &mut u64,
+    gate_results: &mpsc::Sender<GateTaskResult>,
 ) -> anyhow::Result<()> {
     if is_stop_command(&transcript) {
         frames.clear();
@@ -1973,10 +2321,7 @@ async fn handle_voice_transcript(
             &state.context,
             session_id,
             "server.input.stop_command_handled",
-            &json!({
-                "turn_id": turn_id,
-                "transcript_chars": transcript.chars().count()
-            }),
+            &stop_command_payload(turn_id, &transcript),
         )
         .await;
         send_event(
@@ -2042,84 +2387,17 @@ async fn handle_voice_transcript(
         )
         .await?;
     }
-    let gate = state
-        .orchestrator
-        .gate_transcript(session_id, &transcript)
-        .await;
-    record_event_best_effort(
-        &state.context,
-        session_id,
-        "server.gate.completed",
-        &json!({
-            "response_id": response_id,
-            "transcript": transcript,
-            "gate_decision": gate.decision.as_str(),
-            "gate_reason": gate.reason,
-            "gate_latency_ms": gate.latency_ms,
-            "gate_fallback": gate.fallback
-        }),
-    )
-    .await;
-    if gate.decision == GateDecision::Ignore {
-        frames.clear();
-        return Ok(());
-    }
-    cancel_response(
-        active_response,
-        event_sender,
-        &state.context,
-        session_id,
-        "gate_respond",
-    )
-    .await;
-    if session_mode == "video" {
-        if let Some(superseded) = pending_turn.take() {
-            record_event_best_effort(
-                &state.context,
-                session_id,
-                "server.response.cancelled",
-                &json!({
-                    "response_id": superseded.response_id,
-                    "reason": "superseded_before_frame"
-                }),
-            )
-            .await;
-            send_event(
-                event_sender,
-                json!({
-                    "type": "response.cancelled",
-                    "response_id": superseded.response_id,
-                    "reason": "superseded_before_frame"
-                }),
-            )
-            .await?;
-        }
-        frames.clear();
-        *pending_turn = Some(PendingTurn {
-            response_id: response_id.clone(),
-            transcript,
-        });
-        send_event(
-            event_sender,
-            json!({
-                "type": "input.frame.requested",
-                "response_id": response_id
-            }),
-        )
-        .await?;
-    } else {
-        *active_response = Some(spawn_turn(
-            state.orchestrator.clone(),
-            state.context.clone(),
-            user_id.to_owned(),
-            session_id.to_owned(),
-            event_sender.clone(),
-            Vec::new(),
-            Vec::new(),
-            Some(transcript),
-            response_id,
-        ));
-    }
+    cancel_gate(pending_gate);
+    *gate_generation += 1;
+    *pending_gate = Some(spawn_voice_gate(
+        state.orchestrator.clone(),
+        session_id.to_owned(),
+        turn_id.to_owned(),
+        *gate_generation,
+        response_id,
+        transcript,
+        gate_results.clone(),
+    ));
     Ok(())
 }
 
@@ -2178,6 +2456,7 @@ mod tests {
     async fn blocking_fallback_asr_does_not_block_client_input() {
         let (_endpoint_sender, mut endpoint_results) = mpsc::channel(1);
         let (transcription_sender, mut transcription_results) = mpsc::channel(1);
+        let (_gate_sender, mut gate_results) = mpsc::channel(1);
         let mut pending = Some(spawn_transcription_task(
             "turn-2".to_owned(),
             7,
@@ -2193,6 +2472,7 @@ mod tests {
                 &mut client_events,
                 &mut endpoint_results,
                 &mut transcription_results,
+                &mut gate_results,
             ),
         )
         .await
@@ -2201,6 +2481,125 @@ mod tests {
         assert!(matches!(event, RealtimeInput::Socket(Some("input.clear"))));
         assert!(!pending.as_ref().unwrap().handle.is_finished());
         cancel_transcription(&mut pending);
+    }
+
+    #[tokio::test]
+    async fn blocking_gate_does_not_block_cancel_or_clear_input() {
+        let (_endpoint_sender, mut endpoint_results) = mpsc::channel(1);
+        let (_transcription_sender, mut transcription_results) = mpsc::channel(1);
+        let (gate_sender, mut gate_results) = mpsc::channel(1);
+        let mut pending = Some(spawn_gate_task(
+            "turn-gate".to_owned(),
+            9,
+            "response-gate".to_owned(),
+            "请继续".to_owned(),
+            gate_sender,
+            std::future::pending(),
+        ));
+        let mut client_events = futures_util::stream::iter(["response.cancel", "input.clear"]);
+
+        for expected in ["response.cancel", "input.clear"] {
+            let event = tokio::time::timeout(
+                Duration::from_millis(50),
+                next_realtime_input(
+                    &mut client_events,
+                    &mut endpoint_results,
+                    &mut transcription_results,
+                    &mut gate_results,
+                ),
+            )
+            .await
+            .expect("client input must remain responsive while the gate is pending");
+            assert!(matches!(event, RealtimeInput::Socket(Some(kind)) if kind == expected));
+        }
+
+        assert!(!pending.as_ref().unwrap().handle.is_finished());
+        cancel_gate(&mut pending);
+    }
+
+    #[tokio::test]
+    async fn clear_input_aborts_speaking_turn_fallback_and_clears_captured_media() {
+        let mut endpoint_state = EndpointState::speaking("turn-speaking");
+        endpoint_state.audio = vec![0.1; 3200];
+        let fallback_handle = tokio::spawn(std::future::pending::<()>());
+        let fallback_abort = fallback_handle.abort_handle();
+        let mut pending_transcription = Some(PendingTranscription {
+            turn_id: "turn-speaking".to_owned(),
+            generation: 4,
+            response_id: "response-speaking".to_owned(),
+            handle: fallback_handle,
+        });
+        let mut pending_endpoint = None;
+        let gate_handle = tokio::spawn(std::future::pending::<()>());
+        let gate_abort = gate_handle.abort_handle();
+        let mut pending_gate = Some(PendingGate {
+            turn_id: "turn-speaking".to_owned(),
+            generation: 5,
+            response_id: "response-speaking".to_owned(),
+            handle: gate_handle,
+        });
+        let mut frames = VecDeque::from([VideoFrame {
+            bytes: vec![1, 2, 3],
+            mime_type: "image/jpeg".to_owned(),
+            captured_at_ms: None,
+            received_at_ms: 0,
+        }]);
+        let mut pending_turn = Some(PendingTurn {
+            response_id: "response-speaking".to_owned(),
+            transcript: "旧请求".to_owned(),
+        });
+
+        clear_input_state(
+            &mut endpoint_state,
+            &mut pending_endpoint,
+            &mut pending_transcription,
+            &mut pending_gate,
+            &mut frames,
+            &mut pending_turn,
+        );
+        tokio::task::yield_now().await;
+
+        assert!(endpoint_state.audio.is_empty());
+        assert!(endpoint_state.active_turn_id.is_none());
+        assert!(pending_transcription.is_none());
+        assert!(fallback_abort.is_finished());
+        assert!(pending_gate.is_none());
+        assert!(gate_abort.is_finished());
+        assert!(frames.is_empty());
+        assert!(pending_turn.is_none());
+    }
+
+    #[tokio::test]
+    async fn clear_input_aborts_pause_evaluation_and_clears_captured_media() {
+        let mut endpoint_state = EndpointState::speaking("turn-paused");
+        endpoint_state.audio = vec![0.1; 2400];
+        assert!(endpoint_state.pause("turn-paused"));
+        let endpoint_handle = tokio::spawn(std::future::pending::<()>());
+        let endpoint_abort = endpoint_handle.abort_handle();
+        let mut pending_endpoint = Some(PendingEndpoint {
+            turn_id: "turn-paused".to_owned(),
+            generation: 5,
+            handle: endpoint_handle,
+        });
+        let mut pending_transcription = None;
+        let mut pending_gate = None;
+        let mut frames = VecDeque::new();
+        let mut pending_turn = None;
+
+        clear_input_state(
+            &mut endpoint_state,
+            &mut pending_endpoint,
+            &mut pending_transcription,
+            &mut pending_gate,
+            &mut frames,
+            &mut pending_turn,
+        );
+        tokio::task::yield_now().await;
+
+        assert!(endpoint_state.audio.is_empty());
+        assert!(endpoint_state.active_turn_id.is_none());
+        assert!(pending_endpoint.is_none());
+        assert!(endpoint_abort.is_finished());
     }
 
     #[test]
@@ -2246,7 +2645,71 @@ mod tests {
 
         assert!(state.consume_stop("turn-2", "不要说了"));
         assert!(state.audio.is_empty());
-        assert!(state.transcript.is_none());
+        assert!(state.evaluation.is_none());
+    }
+
+    #[test]
+    fn endpoint_observability_records_audio_decision_latency_and_client_fallback() {
+        let evaluation = EndpointEvaluation {
+            transcript: "请继续".to_owned(),
+            decision: ripple_agent_gateway::endpointing::EndpointDecision::Complete,
+            reason: "classifier",
+            classifier_latency_ms: Some(12),
+        };
+        let audio_ms = audio_duration_ms(2400, 16_000);
+
+        let evaluated = endpoint_evaluated_payload("turn-observed", audio_ms, &evaluation);
+        assert_eq!(evaluated["audio_duration_ms"], 150);
+        assert_eq!(evaluated["decision"], "complete");
+        assert_eq!(evaluated["reason"], "classifier");
+        assert_eq!(evaluated["classifier_latency_ms"], 12);
+
+        let committed =
+            endpoint_committed_payload("turn-observed", audio_ms, Some(&evaluation), true);
+        assert_eq!(committed["audio_duration_ms"], 150);
+        assert_eq!(committed["decision"], "complete");
+        assert_eq!(committed["reason"], "classifier");
+        assert_eq!(committed["classifier_latency_ms"], 12);
+        assert_eq!(committed["client_fallback_finalized"], true);
+    }
+
+    #[test]
+    fn client_commit_fallback_marker_and_stop_command_kind_are_explicit() {
+        let fallback_commit: ClientEvent = serde_json::from_value(json!({
+            "type": "input.commit",
+            "turn_id": "turn-fallback",
+            "endpoint_fallback": true
+        }))
+        .unwrap();
+        assert!(client_endpoint_fallback(&fallback_commit));
+
+        let stop = stop_command_payload("turn-stop", "停一下");
+        assert_eq!(stop["turn_id"], "turn-stop");
+        assert_eq!(stop["command"], "stop");
+        assert_eq!(stop["transcript_chars"], 3);
+    }
+
+    #[test]
+    fn cancelling_pending_video_turn_clears_frames_and_correlation() {
+        let mut pending_turn = Some(PendingTurn {
+            response_id: "response-video-old".to_owned(),
+            transcript: "看一下这个".to_owned(),
+        });
+        let mut frames = VecDeque::from([VideoFrame {
+            bytes: vec![1, 2, 3],
+            mime_type: "image/jpeg".to_owned(),
+            captured_at_ms: None,
+            received_at_ms: 0,
+        }]);
+
+        let cancelled = take_pending_video_turn(&mut pending_turn, &mut frames);
+
+        assert_eq!(
+            cancelled.map(|turn| turn.response_id),
+            Some("response-video-old".to_owned())
+        );
+        assert!(pending_turn.is_none());
+        assert!(frames.is_empty());
     }
 
     #[test]
@@ -2345,15 +2808,23 @@ mod tests {
     }
 
     #[test]
-    fn protocol_three_requires_exact_version() {
-        assert!(validate_protocol_version(Some(3)).is_ok());
+    fn mobile_protocol_v4_start_is_accepted_exactly() {
+        let mobile_start: ClientEvent = serde_json::from_value(json!({
+            "type": "session.start",
+            "protocol_version": 4,
+            "client_build": "android-contract-test",
+            "mode": "audio"
+        }))
+        .unwrap();
+
+        assert!(validate_protocol_version(client_protocol_version(&mobile_start)).is_ok());
         assert!(validate_protocol_version(None).is_err());
         assert!(validate_protocol_version(Some(2)).is_err());
-        assert!(validate_protocol_version(Some(4)).is_err());
+        assert!(validate_protocol_version(Some(3)).is_err());
     }
 
     #[test]
-    fn protocol_three_requires_exact_pending_frame_response_id() {
+    fn pending_frame_requires_exact_response_id() {
         assert_eq!(
             correlate_pending_frame("response-current", Some("response-current")),
             FrameCorrelation::Matched("response-current".to_owned())

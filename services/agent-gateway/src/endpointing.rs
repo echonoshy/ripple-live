@@ -96,7 +96,7 @@ pub fn deterministic_decision(text: &str) -> Option<EndpointDecision> {
     None
 }
 
-pub fn parse_classifier_decision(text: &str) -> Option<(EndpointDecision, f32)> {
+pub fn parse_classifier_decision(text: &str) -> Option<(EndpointDecision, f64)> {
     let value: Value = serde_json::from_str(text)
         .or_else(|_| serde_json::from_str(&text.replace("\\\"", "\"")))
         .ok()?;
@@ -109,7 +109,7 @@ pub fn parse_classifier_decision(text: &str) -> Option<(EndpointDecision, f32)> 
     if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
         return None;
     }
-    Some((decision, confidence as f32))
+    Some((decision, confidence))
 }
 
 fn is_separator(character: char) -> bool {

@@ -1132,7 +1132,7 @@ mod tests {
     async fn endpoint_evaluation_rejects_below_threshold_classifier_result() {
         let (_directory, orchestrator, _) = endpointing_orchestrator(
             Ok("今天天气"),
-            Ok(r#"{"decision":"complete","confidence":0.749}"#),
+            Ok(r#"{"decision":"complete","confidence":0.7499999999999999}"#),
         )
         .await;
 

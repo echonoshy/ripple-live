@@ -13,7 +13,7 @@ from typing import Optional
 from pathlib import Path
 from urllib.parse import urlencode
 
-REALTIME_PROTOCOL_VERSION = 3
+REALTIME_PROTOCOL_VERSION = 4
 
 
 TERMINAL_TYPES = {"response.done", "response.cancelled", "response.failed"}
@@ -527,7 +527,7 @@ async def main() -> None:
         ),
         response_id,
     )
-    print("protocol 3: ok")
+    print("protocol 4: ok")
     print("model Gate ignored unrelated speech: ok")
     print("on-demand JPEG video frame: ok")
     print("first-result milestones: ok")

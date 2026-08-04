@@ -56,10 +56,11 @@ class SmokeContractTests(unittest.TestCase):
         self.assertIn('"RIPPLE_SMOKE_EVENTS_DB", "runtime-data/agent-gateway/context.sqlite3"', smoke_script)
         self.assertIn('value("DATA_DIR", "runtime-data/agent-gateway")', gateway_config)
 
-    def test_realtime_smoke_uses_protocol_three(self) -> None:
-        self.assertEqual(SMOKE.REALTIME_PROTOCOL_VERSION, 3)
+    def test_realtime_smoke_uses_protocol_four(self) -> None:
+        self.assertEqual(SMOKE.REALTIME_PROTOCOL_VERSION, 4)
         smoke_source = (ROOT / "smoke-test.py").read_text(encoding="utf-8")
-        self.assertNotIn("protocol 2", smoke_source)
+        self.assertIn('print("protocol 4: ok")', smoke_source)
+        self.assertNotIn('print("protocol 3: ok")', smoke_source)
 
     def test_responses_tool_call_rejects_tagged_arguments(self) -> None:
         item = SMOKE.require_function_call(
