@@ -161,6 +161,7 @@ export class RealtimeSession {
   private assistantText = ''
   private interruptPending = false
   private currentResponseId: string | null = null
+  private playbackActive = false
   private playbackStartedReported = false
   private normalSends: QueuedSend[] = []
   private highPrioritySends: QueuedSend[] = []
@@ -373,6 +374,7 @@ export class RealtimeSession {
       case 'response.audio.delta':
         if (!this.isCurrentResponse(event)) return
         if (this.interruptPending || !event.audio) return
+        this.playbackActive = true
         this.options.onAudio(base64ToFloat32(event.audio))
         this.options.onState('speaking')
         break
@@ -433,6 +435,7 @@ export class RealtimeSession {
 
   outputPlaybackStarted(bufferedMs: number) {
     if (!this.currentResponseId || this.playbackStartedReported) return
+    this.playbackActive = true
     this.playbackStartedReported = true
     void this.sendEvent({
       type: 'output.playback.started',
@@ -443,18 +446,23 @@ export class RealtimeSession {
 
   async speechStarted() {
     if (!this.transport || !this.ready || this.closed) return
-    if (this.currentResponseId) {
+    if (this.currentResponseId || this.playbackActive) {
       this.currentResponseId = null
       this.interruptPending = true
+      this.playbackActive = false
       this.assistantText = ''
       this.playbackStartedReported = false
       this.options.onInterrupted()
       this.options.onAssistantText('')
       this.options.onTool('')
-      await this.sendEvent({ type: 'response.cancel' })
+      await this.sendEvent({ type: 'response.cancel' }, 'high')
     }
     this.options.onState('listening')
-    await this.sendEvent({ type: 'input.speech_started' })
+    await this.sendEvent({ type: 'input.speech_started' }, 'high')
+  }
+
+  outputPlaybackEnded() {
+    this.playbackActive = false
   }
 
   async sendInput(audio: Float32Array) {
@@ -491,12 +499,14 @@ export class RealtimeSession {
 
   forceListen() {
     if (!this.transport || this.closed) return false
+    const hasActiveOutput = this.currentResponseId !== null || this.playbackActive
     this.currentResponseId = null
     this.interruptPending = true
+    this.playbackActive = false
     this.options.onTool('')
     this.options.onState('listening')
-    void this.sendEvent({ type: 'response.cancel' })
-    return true
+    void this.sendEvent({ type: 'response.cancel' }, 'high')
+    return hasActiveOutput
   }
 
   async close() {

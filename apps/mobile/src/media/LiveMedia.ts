@@ -6,6 +6,7 @@ type LiveMediaOptions = {
   withVideo: boolean
   facingMode: 'user' | 'environment'
   onPlaybackStarted: (bufferedMs: number) => void
+  onPlaybackEnded: () => void
 }
 
 type AudioChunkMessage = {
@@ -20,7 +21,7 @@ type AudioLevelMessage = {
 }
 
 type PlaybackStateMessage = {
-  type: 'playback-started' | 'playback-underrun'
+  type: 'playback-started' | 'playback-ended' | 'playback-underrun'
   bufferedMs?: number
   count?: number
 }
@@ -321,6 +322,8 @@ export class LiveMedia {
           bufferedMs: event.data.bufferedMs,
           sampleRate: this.playbackContext?.sampleRate,
         })
+      } else if (event.data.type === 'playback-ended') {
+        this.options.onPlaybackEnded()
       }
     }
     this.playbackNode.connect(this.playbackContext.destination)

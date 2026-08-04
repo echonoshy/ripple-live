@@ -14,6 +14,7 @@ class StreamPlaybackProcessor extends AudioWorkletProcessor {
     this.started = false
     this.playing = false
     this.ending = false
+    this.playbackEnded = false
     this.underruns = 0
 
     this.port.onmessage = (event) => {
@@ -23,6 +24,7 @@ class StreamPlaybackProcessor extends AudioWorkletProcessor {
           this.chunks.push(samples)
           this.queuedSamples += samples.length
           this.ending = false
+          this.playbackEnded = false
         }
       } else if (event.data?.type === 'end') {
         this.ending = true
@@ -33,6 +35,7 @@ class StreamPlaybackProcessor extends AudioWorkletProcessor {
         this.started = false
         this.playing = false
         this.ending = false
+        this.playbackEnded = false
       }
     }
   }
@@ -76,13 +79,21 @@ class StreamPlaybackProcessor extends AudioWorkletProcessor {
 
     if (outputOffset < output.length) {
       this.playing = false
-      if (!this.ending) {
+      if (this.ending && !this.playbackEnded) {
+        this.playbackEnded = true
+        this.port.postMessage({ type: 'playback-ended' })
+      } else if (!this.ending) {
         this.underruns += 1
         this.port.postMessage({
           type: 'playback-underrun',
           count: this.underruns,
         })
       }
+    }
+    if (this.ending && !this.queuedSamples && !this.playbackEnded) {
+      this.playbackEnded = true
+      this.playing = false
+      this.port.postMessage({ type: 'playback-ended' })
     }
     return true
   }
