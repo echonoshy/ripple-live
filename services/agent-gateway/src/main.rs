@@ -456,6 +456,14 @@ fn client_endpoint_fallback(event: &ClientEvent) -> bool {
         .unwrap_or(false)
 }
 
+fn client_cancel_clears_input(event: &ClientEvent) -> bool {
+    event
+        .extra
+        .get("clear_input")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn clear_input_state(
     endpoint_state: &mut EndpointState,
     pending_endpoint: &mut Option<PendingEndpoint>,
@@ -2230,6 +2238,16 @@ async fn handle_socket(
                     "client_request",
                 )
                 .await;
+                if client_cancel_clears_input(&event) {
+                    clear_input_state(
+                        &mut endpoint_state,
+                        &mut pending_endpoint,
+                        &mut pending_transcription,
+                        &mut pending_gate,
+                        &mut frames,
+                        &mut pending_turn,
+                    );
+                }
                 cancel_response(
                     &mut active_response,
                     &event_sender,
@@ -2687,6 +2705,33 @@ mod tests {
         assert_eq!(stop["turn_id"], "turn-stop");
         assert_eq!(stop["command"], "stop");
         assert_eq!(stop["transcript_chars"], 3);
+    }
+
+    #[test]
+    fn force_cancel_invalidates_input_before_a_queued_commit_arrives() {
+        let force_cancel: ClientEvent = serde_json::from_value(json!({
+            "type": "response.cancel",
+            "clear_input": true
+        }))
+        .unwrap();
+        let mut endpoint_state = EndpointState::speaking("turn-queued");
+        endpoint_state.audio = vec![0.1; 1600];
+        let mut pending_endpoint = None;
+        let mut pending_transcription = None;
+        let mut pending_gate = None;
+        let mut frames = VecDeque::new();
+        let mut pending_turn = None;
+
+        assert!(client_cancel_clears_input(&force_cancel));
+        clear_input_state(
+            &mut endpoint_state,
+            &mut pending_endpoint,
+            &mut pending_transcription,
+            &mut pending_gate,
+            &mut frames,
+            &mut pending_turn,
+        );
+        assert!(endpoint_state.take_commit("turn-queued").is_none());
     }
 
     #[test]
