@@ -22,6 +22,7 @@ use ripple_agent_gateway::{
     audio::decode_le_f32,
     config::Settings,
     context::{ContextStore, LibraryAction, LibraryScope},
+    endpointing::{EndpointEvaluation, is_stop_command},
     memory::{MemoryService, TodoUpdate},
     orchestrator::AgentOrchestrator,
     protocol::{ClientEvent, VideoFrame},
@@ -60,6 +61,122 @@ struct PendingTurn {
 impl PendingTurn {
     fn matches_response(&self, response_id: Option<&str>) -> bool {
         response_id.is_some_and(|response_id| response_id == self.response_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EndpointPhase {
+    Speaking,
+    Paused,
+}
+
+#[derive(Debug, Default)]
+struct EndpointState {
+    active_turn_id: Option<String>,
+    phase: Option<EndpointPhase>,
+    audio: Vec<f32>,
+    transcript: Option<String>,
+}
+
+impl EndpointState {
+    #[cfg(test)]
+    fn speaking(turn_id: &str) -> Self {
+        Self {
+            active_turn_id: Some(turn_id.to_owned()),
+            phase: Some(EndpointPhase::Speaking),
+            audio: Vec::new(),
+            transcript: None,
+        }
+    }
+
+    fn start(&mut self, turn_id: &str, pre_roll_limit: usize) {
+        keep_pre_roll(&mut self.audio, pre_roll_limit);
+        self.active_turn_id = Some(turn_id.to_owned());
+        self.phase = Some(EndpointPhase::Speaking);
+        self.transcript = None;
+    }
+
+    fn pause(&mut self, turn_id: &str) -> bool {
+        if self.active_turn_id.as_deref() != Some(turn_id) {
+            return false;
+        }
+        self.phase = Some(EndpointPhase::Paused);
+        self.transcript = None;
+        true
+    }
+
+    fn resume(&mut self, turn_id: &str) -> bool {
+        if self.active_turn_id.as_deref() != Some(turn_id) {
+            return false;
+        }
+        self.phase = Some(EndpointPhase::Speaking);
+        self.transcript = None;
+        true
+    }
+
+    fn accepts_result(&self, turn_id: &str) -> bool {
+        self.active_turn_id.as_deref() == Some(turn_id) && self.phase == Some(EndpointPhase::Paused)
+    }
+
+    fn store_transcript(&mut self, turn_id: &str, transcript: String) -> bool {
+        if !self.accepts_result(turn_id) {
+            return false;
+        }
+        self.transcript = (!transcript.is_empty()).then_some(transcript);
+        true
+    }
+
+    fn take_commit(&mut self, turn_id: &str) -> Option<(Vec<f32>, Option<String>)> {
+        if self.active_turn_id.as_deref() != Some(turn_id) {
+            return None;
+        }
+        self.active_turn_id = None;
+        self.phase = None;
+        Some((std::mem::take(&mut self.audio), self.transcript.take()))
+    }
+
+    fn consume_stop(&mut self, turn_id: &str, transcript: &str) -> bool {
+        if self.active_turn_id.as_deref() != Some(turn_id) || !is_stop_command(transcript) {
+            return false;
+        }
+        self.clear();
+        true
+    }
+
+    fn clear(&mut self) {
+        self.active_turn_id = None;
+        self.phase = None;
+        self.audio.clear();
+        self.transcript = None;
+    }
+}
+
+struct PendingEndpoint {
+    turn_id: String,
+    generation: u64,
+    handle: JoinHandle<()>,
+}
+
+struct EndpointTaskResult {
+    turn_id: String,
+    generation: u64,
+    evaluation: EndpointEvaluation,
+    duration_ms: u128,
+}
+
+fn endpoint_result_matches(
+    pending_turn_id: &str,
+    pending_generation: u64,
+    result_turn_id: &str,
+    result_generation: u64,
+    state_accepts: bool,
+) -> bool {
+    pending_turn_id == result_turn_id && pending_generation == result_generation && state_accepts
+}
+
+fn cancel_endpoint(pending: &mut Option<PendingEndpoint>) {
+    if let Some(pending) = pending.take() {
+        pending.handle.abort();
     }
 }
 
@@ -1033,7 +1150,7 @@ async fn handle_socket(
         return Ok(());
     }
 
-    let mut audio = Vec::<f32>::new();
+    let mut endpoint_state = EndpointState::default();
     let mut frames = VecDeque::<VideoFrame>::with_capacity(state.settings.max_frames);
     let mut speech_active = false;
     let mut active_response: Option<ActiveResponse> = None;
@@ -1042,8 +1159,102 @@ async fn handle_socket(
     let mut session_mode = "audio".to_owned();
     let mut session_ready = false;
     let mut pending_turn: Option<PendingTurn> = None;
+    let mut pending_endpoint: Option<PendingEndpoint> = None;
+    let mut endpoint_generation = 0_u64;
+    let (endpoint_results, mut endpoint_results_rx) = mpsc::channel::<EndpointTaskResult>(4);
 
-    while let Some(message) = ws_receiver.next().await {
+    loop {
+        let message = tokio::select! {
+            Some(result) = endpoint_results_rx.recv() => {
+                let is_current = pending_endpoint.as_ref().is_some_and(|pending| {
+                    endpoint_result_matches(
+                        &pending.turn_id,
+                        pending.generation,
+                        &result.turn_id,
+                        result.generation,
+                        endpoint_state.accepts_result(&result.turn_id),
+                    )
+                });
+                if !is_current {
+                    warn!(
+                        %session_id,
+                        turn_id = %result.turn_id,
+                        "stale endpoint evaluation ignored"
+                    );
+                    continue;
+                }
+                pending_endpoint.take();
+                let EndpointTaskResult {
+                    turn_id,
+                    generation: _,
+                    evaluation,
+                    duration_ms,
+                } = result;
+                record_event_best_effort(
+                    &state.context,
+                    &session_id,
+                    "server.input.endpoint_evaluated",
+                    &json!({
+                        "turn_id": turn_id,
+                        "duration_ms": duration_ms,
+                        "transcript_chars": evaluation.transcript.chars().count(),
+                        "decision": evaluation.decision.as_str(),
+                        "reason": evaluation.reason,
+                        "classifier_latency_ms": evaluation.classifier_latency_ms
+                    }),
+                )
+                .await;
+                if endpoint_state.consume_stop(&turn_id, &evaluation.transcript) {
+                    frames.clear();
+                    pending_turn = None;
+                    cancel_response(
+                        &mut active_response,
+                        &event_sender,
+                        &state.context,
+                        &session_id,
+                        "stop_command",
+                    )
+                    .await;
+                    record_event_best_effort(
+                        &state.context,
+                        &session_id,
+                        "server.input.stop_command_handled",
+                        &json!({
+                            "turn_id": turn_id,
+                            "transcript_chars": evaluation.transcript.chars().count()
+                        }),
+                    )
+                    .await;
+                    send_event(
+                        &event_sender,
+                        json!({
+                            "type": "input.command.handled",
+                            "turn_id": turn_id,
+                            "command": "stop"
+                        }),
+                    )
+                    .await?;
+                    continue;
+                }
+                endpoint_state.store_transcript(&turn_id, evaluation.transcript);
+                send_event(
+                    &event_sender,
+                    json!({
+                        "type": "input.turn.decision",
+                        "turn_id": turn_id,
+                        "decision": evaluation.decision.as_str(),
+                        "reason": evaluation.reason,
+                        "classifier_latency_ms": evaluation.classifier_latency_ms
+                    }),
+                )
+                .await?;
+                continue;
+            }
+            message = ws_receiver.next() => match message {
+                Some(message) => message,
+                None => break,
+            },
+        };
         let text = match message {
             Ok(Message::Text(text)) => text,
             Ok(Message::Close(_)) | Err(_) => break,
@@ -1170,7 +1381,7 @@ async fn handle_socket(
             }
             "input.audio.append" => {
                 let result = append_audio(
-                    &mut audio,
+                    &mut endpoint_state.audio,
                     event.audio.as_deref(),
                     speech_active,
                     &state.settings,
@@ -1255,22 +1466,176 @@ async fn handle_socket(
                     "speech_started",
                 )
                 .await;
+                cancel_endpoint(&mut pending_endpoint);
+                let Some(turn_id) = event
+                    .turn_id
+                    .as_deref()
+                    .filter(|turn_id| !turn_id.is_empty())
+                else {
+                    warn!(%session_id, "speech start without turn id ignored");
+                    continue;
+                };
                 speech_active = true;
-                keep_pre_roll(&mut audio, state.settings.sample_rate_in as usize / 2);
-                info!(%session_id, pre_roll_samples = audio.len(), "speech started");
+                endpoint_state.start(turn_id, state.settings.sample_rate_in as usize / 2);
+                info!(%session_id, %turn_id, pre_roll_samples = endpoint_state.audio.len(), "speech started");
                 record_event_best_effort(
                     &state.context,
                     &session_id,
                     "server.input.speech_started",
-                    &json!({"pre_roll_samples": audio.len()}),
+                    &json!({
+                        "turn_id": turn_id,
+                        "pre_roll_samples": endpoint_state.audio.len()
+                    }),
                 )
                 .await;
-                send_event(&event_sender, json!({"type": "input.speech_started"})).await
+                send_event(
+                    &event_sender,
+                    json!({"type": "input.speech_started", "turn_id": turn_id}),
+                )
+                .await
+            }
+            "input.speech_resumed" => {
+                let Some(turn_id) = event
+                    .turn_id
+                    .as_deref()
+                    .filter(|turn_id| !turn_id.is_empty())
+                else {
+                    warn!(%session_id, "speech resume without turn id ignored");
+                    continue;
+                };
+                if !endpoint_state.resume(turn_id) {
+                    warn!(%session_id, %turn_id, "stale speech resume ignored");
+                    continue;
+                }
+                cancel_endpoint(&mut pending_endpoint);
+                speech_active = true;
+                send_event(
+                    &event_sender,
+                    json!({"type": "input.speech_resumed", "turn_id": turn_id}),
+                )
+                .await
+            }
+            "input.turn.pause" => {
+                let Some(turn_id) = event
+                    .turn_id
+                    .as_deref()
+                    .filter(|turn_id| !turn_id.is_empty())
+                else {
+                    warn!(%session_id, "turn pause without turn id ignored");
+                    continue;
+                };
+                if !endpoint_state.pause(turn_id) {
+                    warn!(%session_id, %turn_id, "stale turn pause ignored");
+                    continue;
+                }
+                cancel_endpoint(&mut pending_endpoint);
+                speech_active = false;
+                let captured_audio = endpoint_state.audio.clone();
+                let endpoint_orchestrator = state.orchestrator.clone();
+                let endpoint_results = endpoint_results.clone();
+                let task_turn_id = turn_id.to_owned();
+                endpoint_generation += 1;
+                let task_generation = endpoint_generation;
+                let handle = tokio::spawn(async move {
+                    let started = Instant::now();
+                    let evaluation = endpoint_orchestrator
+                        .evaluate_turn_end(&captured_audio)
+                        .await;
+                    let _ = endpoint_results
+                        .send(EndpointTaskResult {
+                            turn_id: task_turn_id,
+                            generation: task_generation,
+                            evaluation,
+                            duration_ms: started.elapsed().as_millis(),
+                        })
+                        .await;
+                });
+                pending_endpoint = Some(PendingEndpoint {
+                    turn_id: turn_id.to_owned(),
+                    generation: task_generation,
+                    handle,
+                });
+                Ok(())
             }
             "input.commit" => {
+                let Some(turn_id) = event
+                    .turn_id
+                    .as_deref()
+                    .filter(|turn_id| !turn_id.is_empty())
+                else {
+                    warn!(%session_id, "audio commit without turn id ignored");
+                    continue;
+                };
+                let Some((captured_audio, reusable_transcript)) =
+                    endpoint_state.take_commit(turn_id)
+                else {
+                    warn!(%session_id, %turn_id, "stale audio commit ignored");
+                    continue;
+                };
+                cancel_endpoint(&mut pending_endpoint);
                 speech_active = false;
-                let captured_audio = std::mem::take(&mut audio);
                 let response_id = Uuid::new_v4().to_string();
+                let transcript = match reusable_transcript {
+                    Some(transcript) => transcript,
+                    None => match state
+                        .orchestrator
+                        .transcribe_candidate(&captured_audio)
+                        .await
+                    {
+                        Ok(transcript) => transcript,
+                        Err(error) => {
+                            warn!(%session_id, %response_id, %error, "audio transcription failed");
+                            record_event_best_effort(
+                                &state.context,
+                                &session_id,
+                                "server.transcript.failed",
+                                &json!({"response_id": response_id, "reason": "asr_error"}),
+                            )
+                            .await;
+                            send_event(
+                                &event_sender,
+                                failed_response_event(
+                                    &response_id,
+                                    &anyhow::anyhow!("ASR_FAILED: {error}"),
+                                ),
+                            )
+                            .await?;
+                            continue;
+                        }
+                    },
+                };
+                if is_stop_command(&transcript) {
+                    frames.clear();
+                    pending_turn = None;
+                    cancel_response(
+                        &mut active_response,
+                        &event_sender,
+                        &state.context,
+                        &session_id,
+                        "stop_command",
+                    )
+                    .await;
+                    record_event_best_effort(
+                        &state.context,
+                        &session_id,
+                        "server.input.stop_command_handled",
+                        &json!({
+                            "turn_id": turn_id,
+                            "transcript_chars": transcript.chars().count()
+                        }),
+                    )
+                    .await;
+                    send_event(
+                        &event_sender,
+                        json!({
+                            "type": "input.command.handled",
+                            "turn_id": turn_id,
+                            "command": "stop"
+                        }),
+                    )
+                    .await?;
+                    continue;
+                }
                 if activation_mode == ActivationMode::Wake {
                     send_event(
                         &event_sender,
@@ -1278,32 +1643,6 @@ async fn handle_socket(
                     )
                     .await?;
                 }
-                let transcript = match state
-                    .orchestrator
-                    .transcribe_candidate(&captured_audio)
-                    .await
-                {
-                    Ok(transcript) => transcript,
-                    Err(error) => {
-                        warn!(%session_id, %response_id, %error, "audio transcription failed");
-                        record_event_best_effort(
-                            &state.context,
-                            &session_id,
-                            "server.transcript.failed",
-                            &json!({"response_id": response_id, "reason": "asr_error"}),
-                        )
-                        .await;
-                        send_event(
-                            &event_sender,
-                            failed_response_event(
-                                &response_id,
-                                &anyhow::anyhow!("ASR_FAILED: {error}"),
-                            ),
-                        )
-                        .await?;
-                        continue;
-                    }
-                };
                 if activation_mode == ActivationMode::Wake {
                     let follow_up_window_open =
                         awake_until.is_some_and(|deadline| deadline > Instant::now());
@@ -1433,8 +1772,9 @@ async fn handle_socket(
                 continue;
             }
             "input.clear" => {
+                cancel_endpoint(&mut pending_endpoint);
                 speech_active = false;
-                audio.clear();
+                endpoint_state.clear();
                 frames.clear();
                 pending_turn = None;
                 Ok(())
@@ -1474,6 +1814,8 @@ async fn handle_socket(
                 Ok(())
             }
             "input.text.commit" => {
+                cancel_endpoint(&mut pending_endpoint);
+                endpoint_state.clear();
                 cancel_response(
                     &mut active_response,
                     &event_sender,
@@ -1552,7 +1894,10 @@ async fn handle_socket(
                 )
                 .await
             }
-            "session.close" => break,
+            "session.close" => {
+                cancel_endpoint(&mut pending_endpoint);
+                break;
+            }
             _ => {
                 warn!(kind = %event.kind, extra = ?event.extra, "unknown client event");
                 Ok(())
@@ -1563,6 +1908,7 @@ async fn handle_socket(
         }
     }
 
+    cancel_endpoint(&mut pending_endpoint);
     cancel_response(
         &mut active_response,
         &event_sender,
@@ -1598,6 +1944,31 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[test]
+    fn late_evaluation_result_cannot_finalize_a_resumed_turn() {
+        let mut state = EndpointState::speaking("turn-1");
+        state.pause("turn-1");
+        state.resume("turn-1");
+
+        assert!(!state.accepts_result("turn-1"));
+    }
+
+    #[test]
+    fn older_pause_result_is_stale_even_for_same_turn_id() {
+        assert!(!endpoint_result_matches("turn-1", 2, "turn-1", 1, true));
+        assert!(endpoint_result_matches("turn-1", 2, "turn-1", 2, true));
+    }
+
+    #[test]
+    fn stop_command_clears_audio_without_spawning_agent_turn() {
+        let mut state = EndpointState::speaking("turn-2");
+        state.audio = vec![0.1; 1600];
+
+        assert!(state.consume_stop("turn-2", "不要说了"));
+        assert!(state.audio.is_empty());
+        assert!(state.transcript.is_none());
+    }
 
     #[test]
     fn pending_video_turn_only_accepts_its_own_response_id() {
