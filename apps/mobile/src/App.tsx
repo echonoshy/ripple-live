@@ -509,7 +509,7 @@ export default function App() {
           }, () => {
             void session.speechStarted()
           }, () => {
-            void session.commitInput()
+            void session.speechPaused()
           }, (level) => {
             visualizerRef.current?.style.setProperty('--audio-level', String(level))
           })

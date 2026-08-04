@@ -89,7 +89,7 @@ test('mobile app keeps the service address out of visible forms', () => {
   assert.doesNotMatch(appSource, /htmlFor="server">服务地址/)
 })
 
-test('mobile uses protocol v3 continuous model-gated turns', () => {
+test('mobile uses protocol v4 semantic endpointing', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const mediaSource = readFileSync(
     path.join(appRoot, 'src/media/LiveMedia.ts'),
@@ -97,6 +97,10 @@ test('mobile uses protocol v3 continuous model-gated turns', () => {
   )
   const realtimeSource = readFileSync(
     path.join(appRoot, 'src/realtime/RealtimeSession.ts'),
+    'utf8',
+  )
+  const protocolSource = readFileSync(
+    path.join(appRoot, 'src/realtime/protocol.ts'),
     'utf8',
   )
 
@@ -113,6 +117,10 @@ test('mobile uses protocol v3 continuous model-gated turns', () => {
   assert.match(realtimeSource, /'high'/)
   assert.match(realtimeSource, /onInterrupted: \(\) => void/)
   assert.match(appSource, /onInterrupted: \(\) => media\.clearOutput\(\)/)
+  assert.match(protocolSource, /REALTIME_PROTOCOL_VERSION = 4/)
+  assert.match(appSource, /void session\.speechPaused\(\)/)
+  assert.doesNotMatch(appSource, /void session\.commitInput\(\)/)
+  assert.match(realtimeSource, /setTimeout\(\(\) => \{[\s\S]*?\}, 1_500\)/)
   assert.match(mediaSource, /width: \{ ideal: 1280 \}/)
   assert.match(mediaSource, /height: \{ ideal: 720 \}/)
   assert.doesNotMatch(mediaSource, /lowPower/)
