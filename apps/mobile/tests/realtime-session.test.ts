@@ -297,7 +297,7 @@ test('force listen clears a currently speaking client turn on the server', async
 
   assert.deepEqual(sent, [
     { type: 'input.speech_started', turn_id: turnId },
-    { type: 'response.cancel' },
+    { type: 'response.cancel', clear_input: true },
     { type: 'input.clear' },
   ])
 })
@@ -316,7 +316,7 @@ test('force listen clears a pause-pending turn and rejects its delayed decision'
   assert.deepEqual(sent, [
     { type: 'input.speech_started', turn_id: turnId },
     { type: 'input.turn.pause', turn_id: turnId },
-    { type: 'response.cancel' },
+    { type: 'response.cancel', clear_input: true },
     { type: 'input.clear' },
   ])
 })
@@ -364,6 +364,7 @@ test('new speech waits until force-listen input clear reaches the server', async
   ])
   assert.equal(sent[0]?.turn_id, firstTurnId)
   assert.notEqual(sent[4]?.turn_id, firstTurnId)
+  assert.equal(sent[2]?.clear_input, true)
 })
 
 test('force listen clears a commit that is already queued for transport', async () => {
@@ -405,6 +406,54 @@ test('force listen clears a commit that is already queued for transport', async 
     'input.commit',
     'input.clear',
   ])
+  assert.equal(sent[2]?.clear_input, true)
+})
+
+test('in-flight speech cancellation rechecks a force-listen clear before starting', async () => {
+  const sent: Array<Record<string, unknown>> = []
+  let releaseCancel: (() => void) | null = null
+  const cancelHeld = new Promise<void>((resolve) => {
+    releaseCancel = resolve
+  })
+  const { session, receive } = readySessionHarness()
+  const internals = session as unknown as {
+    transport: {
+      send(message: string): Promise<void>
+      close(): Promise<void>
+    }
+  }
+  let cancelCount = 0
+  internals.transport = {
+    send: async (message) => {
+      const event = JSON.parse(message) as Record<string, unknown>
+      sent.push(event)
+      if (event.type === 'response.cancel' && ++cancelCount === 1) {
+        await cancelHeld
+      }
+    },
+    close: async () => {},
+  }
+  receive({ type: 'response.created', response_id: 'response-in-flight' })
+
+  const starting = session.speechStarted()
+  await new Promise((resolve) => setImmediate(resolve))
+  session.forceListen()
+  releaseCancel?.()
+  await starting
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(sent.map((event) => event.type), [
+    'response.cancel',
+    'response.cancel',
+    'input.clear',
+    'input.speech_started',
+  ])
+  assert.deepEqual(sent.slice(0, 3), [
+    { type: 'response.cancel' },
+    { type: 'response.cancel', clear_input: true },
+    { type: 'input.clear' },
+  ])
+  assert.equal(typeof sent[3]?.turn_id, 'string')
 })
 
 test('pause and commit wait behind already queued audio appends', async () => {

@@ -582,6 +582,8 @@ export class RealtimeSession {
       this.options.onTool('')
       await this.sendEvent({ type: 'response.cancel' }, 'high')
     }
+    if (this.inputClearBarrier) await this.waitForInputClear()
+    if (!this.transport || !this.ready || this.closed) return
     this.currentTurnId = createTurnId()
     this.options.onState('listening')
     await this.sendEvent(
@@ -632,7 +634,7 @@ export class RealtimeSession {
     this.playbackActive = false
     this.options.onTool('')
     this.options.onState('listening')
-    void this.sendEvent({ type: 'response.cancel' }, 'high')
+    void this.sendEvent({ type: 'response.cancel', clear_input: true }, 'high')
     this.scheduleInputClear()
     return hasActiveOutput
   }
