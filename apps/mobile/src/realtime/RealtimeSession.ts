@@ -3,6 +3,7 @@ import type { Message as TauriMessage } from '@tauri-apps/plugin-websocket'
 import {
   createRequestedFrameEvents,
   createSessionStart,
+  createTurnId,
 } from './protocol'
 import type { RealtimeMode } from './protocol'
 
@@ -34,6 +35,9 @@ type RealtimeEvent = {
   artifact?: ResponseArtifact
   reason?: string
   needs_frame?: boolean
+  turn_id?: string
+  decision?: 'complete' | 'continue' | 'uncertain'
+  command?: string
 }
 
 export type ResponseArtifact = {
@@ -167,6 +171,9 @@ export class RealtimeSession {
   private highPrioritySends: QueuedSend[] = []
   private sending = false
   private sendIdleWaiters: Array<() => void> = []
+  private currentTurnId: string | null = null
+  private pendingTurnId: string | null = null
+  private endpointTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(options: SessionOptions) {
     this.options = options
@@ -210,6 +217,7 @@ export class RealtimeSession {
       socket.onerror = () => reject(new Error(`无法连接 ${url}`))
       socket.onclose = () => {
         if (!this.closed) {
+          this.clearEndpointState()
           this.closed = true
           this.ready = false
           this.options.onState('ended')
@@ -292,6 +300,7 @@ export class RealtimeSession {
     if (message.type === 'Text') {
       this.handleText(message.data)
     } else if (message.type === 'Close' && !this.closed) {
+      this.clearEndpointState()
       this.closed = true
       this.ready = false
       this.options.onState('ended')
@@ -328,6 +337,14 @@ export class RealtimeSession {
         })
         break
       case 'input.speech_started':
+        this.options.onState('listening')
+        break
+      case 'input.turn.decision':
+        this.handleTurnDecision(event)
+        break
+      case 'input.command.handled':
+        if (!this.matchesEndpointTurn(event.turn_id)) return
+        this.clearEndpointState()
         this.options.onState('listening')
         break
       case 'input.frame.requested': {
@@ -412,6 +429,45 @@ export class RealtimeSession {
     return !event.response_id || event.response_id === this.currentResponseId
   }
 
+  private matchesEndpointTurn(turnId: string | undefined) {
+    return !!turnId && (turnId === this.pendingTurnId || turnId === this.currentTurnId)
+  }
+
+  private handleTurnDecision(event: RealtimeEvent) {
+    const turnId = event.turn_id
+    if (!turnId || turnId !== this.pendingTurnId || turnId !== this.currentTurnId) {
+      return
+    }
+    if (event.decision === 'complete') {
+      this.commitPendingTurn(turnId)
+    } else if (event.decision === 'continue' || event.decision === 'uncertain') {
+      this.clearEndpointTimer()
+      this.endpointTimer = setTimeout(() => {
+        this.commitPendingTurn(turnId)
+      }, 1500)
+    }
+  }
+
+  private clearEndpointTimer() {
+    if (this.endpointTimer === null) return
+    clearTimeout(this.endpointTimer)
+    this.endpointTimer = null
+  }
+
+  private clearEndpointState() {
+    this.clearEndpointTimer()
+    this.currentTurnId = null
+    this.pendingTurnId = null
+  }
+
+  private commitPendingTurn(turnId: string) {
+    if (turnId !== this.pendingTurnId) return
+    this.clearEndpointTimer()
+    this.pendingTurnId = null
+    this.currentTurnId = null
+    void this.sendEvent({ type: 'input.commit', turn_id: turnId })
+  }
+
   private finishResponse(
     outcome: 'done' | 'cancelled' | 'failed',
     message?: string,
@@ -446,6 +502,14 @@ export class RealtimeSession {
 
   async speechStarted() {
     if (!this.transport || !this.ready || this.closed) return
+    if (this.pendingTurnId) {
+      const turnId = this.pendingTurnId
+      this.clearEndpointTimer()
+      this.pendingTurnId = null
+      this.options.onState('listening')
+      await this.sendEvent({ type: 'input.speech_resumed', turn_id: turnId })
+      return
+    }
     if (this.currentResponseId || this.playbackActive) {
       this.currentResponseId = null
       this.interruptPending = true
@@ -457,8 +521,12 @@ export class RealtimeSession {
       this.options.onTool('')
       await this.sendEvent({ type: 'response.cancel' }, 'high')
     }
+    this.currentTurnId = createTurnId()
     this.options.onState('listening')
-    await this.sendEvent({ type: 'input.speech_started' }, 'high')
+    await this.sendEvent(
+      { type: 'input.speech_started', turn_id: this.currentTurnId },
+      'high',
+    )
   }
 
   outputPlaybackEnded() {
@@ -474,6 +542,7 @@ export class RealtimeSession {
         sample_rate: 16000,
       })
     } catch (error) {
+      this.clearEndpointState()
       this.ready = false
       this.closed = true
       this.options.onError(
@@ -487,17 +556,21 @@ export class RealtimeSession {
     }
   }
 
-  async commitInput() {
-    if (!this.transport || !this.ready || this.closed) return
-    await this.sendEvent({ type: 'input.commit' })
+  speechPaused() {
+    if (!this.transport || !this.ready || this.closed || !this.currentTurnId) return
+    this.clearEndpointTimer()
+    this.pendingTurnId = this.currentTurnId
+    void this.sendEvent({ type: 'input.turn.pause', turn_id: this.currentTurnId })
   }
 
   discardInput() {
+    this.clearEndpointState()
     if (!this.transport || !this.ready || this.closed) return
     void this.sendEvent({ type: 'input.clear' })
   }
 
   forceListen() {
+    this.clearEndpointState()
     if (!this.transport || this.closed) return false
     const hasActiveOutput = this.currentResponseId !== null || this.playbackActive
     this.currentResponseId = null
@@ -510,6 +583,7 @@ export class RealtimeSession {
   }
 
   async close() {
+    this.clearEndpointState()
     if (this.closed) return
     this.closed = true
     if (this.transport) {
