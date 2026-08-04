@@ -21,10 +21,11 @@ independent app implementations.
 
 The app supports:
 
-- VAD-delimited voice turns with a one-second local pre-roll and 16 kHz mono
-  float32 transport; idle audio is not uploaded;
-- a continuous model-gated flow where each completed speech turn is evaluated
-  by the server before the Agent decides whether to respond;
+- VAD produces tentative voice pauses with a one-second local pre-roll and
+  16 kHz mono float32 transport; idle audio is not uploaded;
+- a continuous model-gated flow where the server commits complete semantic
+  decisions immediately and uses a 1.5-second fallback for other pauses;
+- a spoken stop command silences output and is not added to chat history;
 - on-demand camera capture only after the server accepts a video turn;
 - server-side structured tool calls and visible tool status;
 - response interruption only after the model accepts a new turn, so unrelated
@@ -41,7 +42,7 @@ The default endpoint is:
 ws://YOUR_SERVER_IP:8700/v1/agent/realtime
 ```
 
-Realtime sessions use protocol v3. Wake words and manual wake state are not part
+Realtime sessions use protocol v4. Wake words and manual wake state are not part
 of the client protocol; the server model decides whether each speech turn needs
 a response.
 
