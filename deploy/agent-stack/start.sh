@@ -19,14 +19,23 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
 fi
 
 ASR_GPU="${ASR_GPU:-2}"
-AGENT_GPU="${AGENT_GPU:-3}"
-TTS_OMNI_GPU="${TTS_OMNI_GPU:-7}"
-TTS_OMNI_MODEL="${TTS_OMNI_MODEL:-Qwen3-TTS-12Hz-1.7B-CustomVoice}"
-TTS_OMNI_RUNTIME="${TTS_OMNI_RUNTIME:-$REPO_ROOT/.venv-vllm-omni-024}"
+ASR_RUNTIME="${ASR_RUNTIME:-$REPO_ROOT/.venv-qwen3-asr-1.7b}"
+AGENT_GPU="${AGENT_GPU:-4,5}"
+AGENT_MODEL="${AGENT_MODEL:-Qwen3.5-35B-A3B}"
+AGENT_RUNTIME="${AGENT_RUNTIME:-$REPO_ROOT/.venv-qwen3.5-35b-a3b}"
+AGENT_TOOL_CALL_PARSER="${AGENT_TOOL_CALL_PARSER:-qwen3_coder}"
+AGENT_GPU_MEMORY_UTILIZATION="${AGENT_GPU_MEMORY_UTILIZATION:-0.85}"
+AGENT_MAX_NUM_SEQS="${AGENT_MAX_NUM_SEQS:-192}"
+if [[ "$AGENT_RUNTIME" != /* ]]; then
+  AGENT_RUNTIME="$REPO_ROOT/$AGENT_RUNTIME"
+fi
+TTS_GPU="${TTS_GPU:-7}"
+TTS_MODEL="${TTS_MODEL:-Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+TTS_RUNTIME="${TTS_RUNTIME:-$REPO_ROOT/.venv-qwen3-tts-12hz-1.7b-customvoice}"
 TTS_CUDA_HOME="${TTS_CUDA_HOME:-/usr/local/cuda-12.8}"
-TTS_OMNI_SITE="$TTS_OMNI_RUNTIME/lib/python3.12/site-packages"
-TTS_OMNI_LIBRARY_PATH="$TTS_CUDA_HOME/targets/x86_64-linux/lib:$TTS_OMNI_SITE/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-GATEWAY_DATA_DIR="${RIPPLE_DATA_DIR:-$REPO_ROOT/.cache/agent-gateway}"
+TTS_SITE="$TTS_RUNTIME/lib/python3.12/site-packages"
+TTS_LIBRARY_PATH="$TTS_CUDA_HOME/targets/x86_64-linux/lib:$TTS_SITE/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+GATEWAY_DATA_DIR="${RIPPLE_DATA_DIR:-$REPO_ROOT/runtime-data/agent-gateway}"
 SEARCH_PROXY="${RIPPLE_SEARCH_PROXY:-${https_proxy:-${HTTPS_PROXY:-}}}"
 TOOL_CACHE_DB="${RIPPLE_TOOL_CACHE_DB:-$GATEWAY_DATA_DIR/tool-cache.sqlite3}"
 if [[ "$GATEWAY_DATA_DIR" != /* ]]; then
@@ -77,7 +86,7 @@ warm_tts() {
   local health_url="http://127.0.0.1:8723/health"
   local speech_url="http://127.0.0.1:8723/v1/audio/speech"
   local payload
-  payload="$(printf '{"model":"%s","input":"语音服务预热完成。","voice":"serena","language":"Chinese","response_format":"pcm","stream":true,"stream_format":"audio"}' "$TTS_OMNI_MODEL")"
+  payload="$(printf '{"model":"%s","input":"语音服务预热完成。","voice":"serena","language":"Chinese","response_format":"pcm","stream":true,"stream_format":"audio"}' "$TTS_MODEL")"
 
   for _ in $(seq 1 180); do
     if curl --fail --silent --max-time 2 "$health_url" >/dev/null; then
@@ -98,36 +107,41 @@ warm_tts() {
 }
 
 start_process asr env CUDA_VISIBLE_DEVICES="$ASR_GPU" \
-  "$REPO_ROOT/.venv-qwen-vllm/bin/qwen-asr-serve" \
-  "$MODEL_ROOT/Qwen3-ASR-0.6B" \
+  "$ASR_RUNTIME/bin/qwen-asr-serve" \
+  "$MODEL_ROOT/Qwen3-ASR-1.7B" \
   --host 127.0.0.1 \
   --port 8711 \
-  --served-model-name Qwen3-ASR-0.6B \
+  --served-model-name Qwen3-ASR-1.7B \
   --gpu-memory-utilization 0.35 \
   --max-model-len 8192
 
-start_process agent env CUDA_VISIBLE_DEVICES="$AGENT_GPU" \
-  "$REPO_ROOT/.venv-qwen-vllm/bin/vllm" serve \
-  "$MODEL_ROOT/Qwen3-VL-8B-Instruct" \
+start_process agent env \
+  CUDA_VISIBLE_DEVICES="$AGENT_GPU" \
+  PATH="$AGENT_RUNTIME/bin:$PATH" \
+  "$AGENT_RUNTIME/bin/vllm" serve \
+  "$MODEL_ROOT/$AGENT_MODEL" \
   --host 127.0.0.1 \
   --port 8712 \
-  --served-model-name Qwen3-VL-8B-Instruct \
-  --gpu-memory-utilization 0.8 \
+  --served-model-name "$AGENT_MODEL" \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization "$AGENT_GPU_MEMORY_UTILIZATION" \
+  --max-num-seqs "$AGENT_MAX_NUM_SEQS" \
   --max-model-len 32768 \
+  --reasoning-parser qwen3 \
   --enable-auto-tool-choice \
-  --tool-call-parser hermes \
+  --tool-call-parser "$AGENT_TOOL_CALL_PARSER" \
   --limit-mm-per-prompt '{"image":3,"video":0}'
 
-start_process tts-omni env \
-  CUDA_VISIBLE_DEVICES="$TTS_OMNI_GPU" \
-  LD_LIBRARY_PATH="$TTS_OMNI_LIBRARY_PATH" \
-  PATH="$TTS_OMNI_RUNTIME/bin:$PATH" \
-  "$TTS_OMNI_RUNTIME/bin/vllm-omni" serve \
-  "$MODEL_ROOT/$TTS_OMNI_MODEL" \
+start_process tts env \
+  CUDA_VISIBLE_DEVICES="$TTS_GPU" \
+  LD_LIBRARY_PATH="$TTS_LIBRARY_PATH" \
+  PATH="$TTS_RUNTIME/bin:$PATH" \
+  "$TTS_RUNTIME/bin/vllm-omni" serve \
+  "$MODEL_ROOT/$TTS_MODEL" \
   --omni \
   --host 127.0.0.1 \
   --port 8723 \
-  --served-model-name "$TTS_OMNI_MODEL" \
+  --served-model-name "$TTS_MODEL" \
   --deploy-config "$SCRIPT_DIR/qwen3-tts-batch.yaml" \
   --trust-remote-code \
   --no-enable-log-requests
@@ -138,8 +152,11 @@ start_process gateway env \
   RIPPLE_DATA_DIR="$GATEWAY_DATA_DIR" \
   RIPPLE_HOST="${RIPPLE_HOST:-0.0.0.0}" \
   RIPPLE_PORT="${RIPPLE_PORT:-8700}" \
+  RIPPLE_ASR_MODEL="${RIPPLE_ASR_MODEL:-Qwen3-ASR-1.7B}" \
+  RIPPLE_AGENT_URL="${RIPPLE_AGENT_URL:-http://127.0.0.1:8712/v1/responses}" \
+  RIPPLE_AGENT_MODEL="${RIPPLE_AGENT_MODEL:-$AGENT_MODEL}" \
   RIPPLE_TTS_URL="${RIPPLE_TTS_URL:-http://127.0.0.1:8723/v1/audio/speech}" \
-  RIPPLE_TTS_MODEL="${RIPPLE_TTS_MODEL:-$TTS_OMNI_MODEL}" \
+  RIPPLE_TTS_MODEL="${RIPPLE_TTS_MODEL:-$TTS_MODEL}" \
   RIPPLE_TTS_VOICE="${RIPPLE_TTS_VOICE:-serena}" \
   RIPPLE_TTS_LANGUAGE="${RIPPLE_TTS_LANGUAGE:-Chinese}" \
   RIPPLE_TTS_INSTRUCTIONS="${RIPPLE_TTS_INSTRUCTIONS:-自然、温暖、亲切的中文女声。语速偏快但吐字清晰，语气平静连贯，停顿简洁自然，保持稳定一致的音色，像真人助手交流，避免播音腔和夸张情绪。}" \

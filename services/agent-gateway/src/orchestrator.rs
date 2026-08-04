@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
+use anyhow::Context as _;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{SecondsFormat, Utc};
 use chrono_tz::Asia::Shanghai;
@@ -9,13 +10,19 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::{
-    adapters::{ModelAdapters, build_multimodal_user_message, tool_result_message},
+    adapters::{
+        FunctionCall, ModelAdapters, build_responses_user_input, function_call_output,
+        parse_responses_output, reject_legacy_tool_markup, responses_tool_schema,
+    },
     audio::encode_le_f32,
     config::Settings,
     context::ContextStore,
     context_compiler::ContextCompiler,
     memory::{MemoryArtifact, MemoryService},
     protocol::VideoFrame,
+    response_gate::{
+        GATE_INSTRUCTIONS, GateOutcome, build_gate_input, gate_tool_schema, parse_gate_response,
+    },
     tools::{ToolExecutionContext, ToolExecutor},
 };
 
@@ -32,6 +39,13 @@ fn system_prompt() -> String {
     format!(
         "{SYSTEM_PROMPT}\n当前 Asia/Shanghai 日期时间：{}。处理今天、明天、下班等时间表达时必须以此为准。",
         now.to_rfc3339_opts(SecondsFormat::Secs, true)
+    )
+}
+
+fn forced_tool_instructions(name: &str) -> String {
+    format!(
+        "{}\nYou MUST use the {name} tool in this turn. Do not answer before the tool result is available.",
+        system_prompt()
     )
 }
 
@@ -95,6 +109,41 @@ impl AgentOrchestrator {
         Ok(transcript)
     }
 
+    pub async fn gate_transcript(&self, session_id: &str, transcript: &str) -> GateOutcome {
+        let started = Instant::now();
+        let history = match self.context.recent_messages(session_id, 2).await {
+            Ok(history) => history,
+            Err(error) => {
+                warn!(%session_id, %error, "Gate context loading failed; failing open");
+                return GateOutcome::fallback("context_error", started.elapsed().as_millis());
+            }
+        };
+        let assistant_just_replied = history
+            .last()
+            .and_then(|item| item.get("role"))
+            .and_then(Value::as_str)
+            == Some("assistant");
+        let input = build_gate_input(&history, transcript, assistant_just_replied);
+        let tools = [gate_tool_schema()];
+        let request = self
+            .adapters
+            .respond(&input, &tools, json!("auto"), GATE_INSTRUCTIONS);
+        match tokio::time::timeout(self.settings.gate_timeout, request).await {
+            Ok(Ok(output)) => parse_gate_response(&output, started.elapsed().as_millis())
+                .unwrap_or_else(|error| {
+                    warn!(%session_id, %error, "Gate output invalid; failing open");
+                    GateOutcome::fallback("invalid_output", started.elapsed().as_millis())
+                }),
+            Ok(Err(error)) => {
+                warn!(%session_id, %error, "Gate model call failed; failing open");
+                GateOutcome::fallback("model_error", started.elapsed().as_millis())
+            }
+            Err(_) => {
+                warn!(%session_id, "Gate model call timed out; failing open");
+                GateOutcome::fallback("timeout", started.elapsed().as_millis())
+            }
+        }
+    }
     pub async fn run_text_response(
         &self,
         user_id: &str,
@@ -102,13 +151,13 @@ impl AgentOrchestrator {
         input: &str,
         response_id: &str,
     ) -> anyhow::Result<String> {
-        let input = input.trim();
-        if input.is_empty() {
+        let user_input = input.trim();
+        if user_input.is_empty() {
             anyhow::bail!("input 不能为空");
         }
         let user_turn_id = self
             .context
-            .add_turn(conversation_id, "user", input, None)
+            .add_turn(conversation_id, "user", user_input, None)
             .await?;
         let (routing_input, routing_turns) =
             self.context.trailing_user_input(conversation_id, 4).await?;
@@ -127,28 +176,36 @@ impl AgentOrchestrator {
             )
             .await?;
         let compiled = self.context_compiler.compile(conversation_id).await?;
-        let mut messages = vec![json!({"role": "system", "content": system_prompt()})];
-        messages.extend(compiled.messages);
-        let tools = self.tools.schemas();
+        let mut response_input = compiled.messages;
+        let tools = self
+            .tools
+            .schemas()
+            .iter()
+            .map(responses_tool_schema)
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         let mut response_artifacts = Vec::<MemoryArtifact>::new();
         for round in 0..self.settings.max_tool_rounds {
-            let tool_choice = if round == 0 {
-                forced_route
-                    .as_ref()
-                    .map(|route| route.name.clone())
-                    .map(|name| json!({"type": "function", "function": {"name": name}}))
-                    .unwrap_or_else(|| json!("auto"))
+            let forced_name = (round == 0)
+                .then(|| forced_route.as_ref().map(|route| route.name.as_str()))
+                .flatten();
+            let round_tools = if let Some(name) = forced_name {
+                tools
+                    .iter()
+                    .filter(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                    .cloned()
+                    .collect::<Vec<_>>()
             } else {
-                json!("auto")
+                tools.clone()
             };
+            let instructions = forced_name.map_or_else(system_prompt, forced_tool_instructions);
             let reply = self
                 .adapters
-                .complete(&messages, &tools, tool_choice)
+                .respond(&response_input, &round_tools, json!("auto"), &instructions)
                 .await?;
-            messages.push(reply.raw_message);
-            if reply.tool_calls.is_empty() {
-                let output = reply.content.trim().to_owned();
+            response_input.extend(reply.output_items.clone());
+            if reply.function_calls.is_empty() {
+                let output = reply.text.trim().to_owned();
                 if output.is_empty() {
                     anyhow::bail!("模型没有生成回复");
                 }
@@ -161,17 +218,17 @@ impl AgentOrchestrator {
                     .await?;
                 return Ok(output);
             }
-            if !reply.content.trim().is_empty() {
+            if !reply.text.trim().is_empty() {
                 info!(
                     %conversation_id,
                     %response_id,
                     round,
-                    text_chars = reply.content.chars().count(),
-                    tool_calls = reply.tool_calls.len(),
+                    text_chars = reply.text.chars().count(),
+                    tool_calls = reply.function_calls.len(),
                     "ignoring tool-call round text and continuing with tools"
                 );
             }
-            for call in reply.tool_calls {
+            for call in reply.function_calls {
                 let outcome = self
                     .tools
                     .execute(
@@ -180,8 +237,8 @@ impl AgentOrchestrator {
                             conversation_id: conversation_id.to_owned(),
                             user_turn_id,
                             response_id: response_id.to_owned(),
-                            tool_call_id: call.id.clone(),
-                            transcript: input.to_owned(),
+                            tool_call_id: call.call_id.clone(),
+                            transcript: user_input.to_owned(),
                             frames: Vec::new(),
                         },
                         &call.name,
@@ -195,14 +252,14 @@ impl AgentOrchestrator {
                         conversation_id,
                         "tool.result",
                         &json!({
-                            "call_id": call.id,
+                            "call_id": call.call_id,
                             "name": call.name,
                             "arguments": call.arguments,
                             "result": result
                         }),
                     )
                     .await?;
-                messages.push(tool_result_message(&call, &result));
+                response_input.push(function_call_output(&call.call_id, &result));
             }
         }
         anyhow::bail!("工具调用轮次超过限制")
@@ -253,7 +310,11 @@ impl AgentOrchestrator {
         {
             Some(text) => text.to_owned(),
             None if audio.is_empty() => anyhow::bail!("没有可处理的音频或文本"),
-            None => self.adapters.transcribe(&audio).await?,
+            None => self
+                .adapters
+                .transcribe(&audio)
+                .await
+                .context("ASR_FAILED")?,
         };
         if transcript.trim().is_empty() {
             anyhow::bail!("ASR 未识别出文本");
@@ -332,9 +393,8 @@ impl AgentOrchestrator {
             }),
         )
         .await;
-        let mut messages = vec![json!({"role": "system", "content": system_prompt()})];
-        messages.extend(compiled.messages);
-        messages.push(build_multimodal_user_message(&transcript, &frames));
+        let mut input = compiled.messages;
+        input.push(build_responses_user_input(&transcript, &frames));
 
         let audio_chunk_size =
             (self.settings.sample_rate_out as usize * self.settings.audio_chunk_ms.max(20) / 1_000)
@@ -351,19 +411,28 @@ impl AgentOrchestrator {
             session_id.to_owned(),
         );
         let generation = async move {
-            let available_tools = self.tools.schemas();
+            let available_tools = self
+                .tools
+                .schemas()
+                .iter()
+                .map(responses_tool_schema)
+                .collect::<anyhow::Result<Vec<_>>>()?;
             let forced_tool = forced_route.map(|route| route.name);
             let mut final_text = String::new();
             let mut response_artifacts = Vec::<MemoryArtifact>::new();
+            let mut agent_first_delta_recorded = false;
             for round in 0..self.settings.max_tool_rounds {
-                let tool_choice = if round == 0 {
-                    forced_tool
-                        .as_deref()
-                        .map(|name| json!({"type": "function", "function": {"name": name}}))
-                        .unwrap_or_else(|| json!("auto"))
+                let forced_name = (round == 0).then_some(forced_tool.as_deref()).flatten();
+                let round_tools = if let Some(name) = forced_name {
+                    available_tools
+                        .iter()
+                        .filter(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                        .cloned()
+                        .collect::<Vec<_>>()
                 } else {
-                    json!("auto")
+                    available_tools.clone()
                 };
+                let instructions = forced_name.map_or_else(system_prompt, forced_tool_instructions);
                 let agent_started = Instant::now();
                 info!(%session_id, %response_id, round, "agent generation started");
                 self.record_flow_event(
@@ -372,40 +441,60 @@ impl AgentOrchestrator {
                     json!({
                         "response_id": response_id,
                         "round": round,
-                        "tool_choice": tool_choice
+                        "tool_choice": "auto",
+                        "forced_tool": forced_name
                     }),
                 )
                 .await;
                 let mut stream = self
                     .adapters
-                    .complete_stream(&messages, &available_tools, tool_choice)
-                    .await?;
+                    .respond_stream(&input, &round_tools, json!("auto"), &instructions)
+                    .await
+                    .context("AGENT_FAILED")?;
                 let mut content = String::new();
-                let mut tool_calls = BTreeMap::new();
-                let mut segmenter = SpeechSegmenter::new();
+                let mut tool_calls = BTreeMap::<usize, FunctionCall>::new();
+                let mut completed_items = BTreeMap::<usize, Value>::new();
                 while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
-                    if let Some(delta) = chunk
-                        .pointer("/choices/0/delta/content")
-                        .and_then(Value::as_str)
-                        .filter(|delta| !delta.is_empty())
-                    {
-                        content.push_str(delta);
-                        emit_response(
-                            send,
-                            response_id,
-                            json!({"type": "response.text.delta", "delta": delta}),
+                    let chunk = chunk.context("AGENT_FAILED")?;
+                    if !agent_first_delta_recorded && let Some(kind) = useful_delta_kind(&chunk) {
+                        agent_first_delta_recorded = true;
+                        self.record_flow_event(
+                            session_id,
+                            "server.agent.first_delta",
+                            json!({
+                                "response_id": response_id,
+                                "round": round,
+                                "kind": kind,
+                                "elapsed_ms": agent_started.elapsed().as_millis()
+                            }),
                         )
-                        .await?;
-                        for phrase in segmenter.push(delta) {
-                            speech_sender.send(phrase).await.map_err(|_| {
-                                anyhow::anyhow!("speech pipeline stopped unexpectedly")
-                            })?;
-                        }
+                        .await;
                     }
-                    merge_tool_call_deltas(&mut tool_calls, &chunk);
+                    if let Some(delta) = responses_text_delta(&chunk) {
+                        content.push_str(delta);
+                    }
+                    merge_responses_function_event(&mut tool_calls, &chunk)?;
+                    merge_completed_response(&mut tool_calls, &mut completed_items, &chunk)?;
+                    if chunk.get("type").and_then(Value::as_str)
+                        == Some("response.output_item.done")
+                        && let Some(index) = chunk.get("output_index").and_then(Value::as_u64)
+                        && let Some(item) = chunk.get("item")
+                    {
+                        completed_items.insert(index as usize, item.clone());
+                    }
+                    match chunk.get("type").and_then(Value::as_str) {
+                        Some("response.failed") | Some("response.incomplete") => {
+                            anyhow::bail!("AGENT_FAILED: Responses upstream did not complete")
+                        }
+                        _ => {}
+                    }
                 }
                 let calls = tool_calls.into_values().collect::<Vec<_>>();
+                reject_legacy_tool_markup(&content).context("AGENT_INVALID_TOOL_OUTPUT")?;
+                for call in &calls {
+                    serde_json::from_str::<Value>(&call.arguments)
+                        .context("AGENT_FAILED: function_call arguments were not valid JSON")?;
+                }
                 let agent_ms = agent_started.elapsed().as_millis();
                 info!(
                     %session_id,
@@ -428,10 +517,18 @@ impl AgentOrchestrator {
                     }),
                 )
                 .await;
-                let raw_message = streamed_raw_message(&content, &calls);
-                messages.push(raw_message);
+                input.extend(completed_items.into_values());
                 if calls.is_empty() {
-                    for phrase in segmenter.finish() {
+                    let mut segmenter = SpeechSegmenter::new();
+                    let mut phrases = segmenter.push(&content);
+                    phrases.extend(segmenter.finish());
+                    for phrase in phrases {
+                        emit_response(
+                            send,
+                            response_id,
+                            json!({"type": "response.text.delta", "delta": &phrase}),
+                        )
+                        .await?;
                         speech_sender
                             .send(phrase)
                             .await
@@ -454,7 +551,7 @@ impl AgentOrchestrator {
                     info!(
                         %session_id,
                         %response_id,
-                        call_id = %call.id,
+                        call_id = %call.call_id,
                         tool = %call.name,
                         "tool execution started"
                     );
@@ -463,7 +560,7 @@ impl AgentOrchestrator {
                         "server.tool.started",
                         json!({
                             "response_id": response_id,
-                            "call_id": call.id,
+                            "call_id": call.call_id,
                             "name": call.name
                         }),
                     )
@@ -473,7 +570,7 @@ impl AgentOrchestrator {
                         response_id,
                         json!({
                             "type": "response.tool.started",
-                            "call_id": call.id,
+                            "call_id": call.call_id,
                             "name": call.name,
                             "arguments": call.arguments
                         }),
@@ -487,7 +584,7 @@ impl AgentOrchestrator {
                                 conversation_id: session_id.to_owned(),
                                 user_turn_id,
                                 response_id: response_id.to_owned(),
-                                tool_call_id: call.id.clone(),
+                                tool_call_id: call.call_id.clone(),
                                 transcript: transcript.clone(),
                                 frames: frames.clone(),
                             },
@@ -514,7 +611,7 @@ impl AgentOrchestrator {
                             "tool.result",
                             &json!({
                                 "response_id": response_id,
-                                "call_id": call.id,
+                                "call_id": call.call_id,
                                 "name": call.name,
                                 "arguments": call.arguments,
                                 "result": result
@@ -524,7 +621,7 @@ impl AgentOrchestrator {
                     info!(
                         %session_id,
                         %response_id,
-                        call_id = %call.id,
+                        call_id = %call.call_id,
                         tool = %call.name,
                         "tool execution completed"
                     );
@@ -533,13 +630,13 @@ impl AgentOrchestrator {
                         response_id,
                         json!({
                             "type": "response.tool.completed",
-                            "call_id": call.id,
+                            "call_id": call.call_id,
                             "name": call.name,
                             "result": result
                         }),
                     )
                     .await?;
-                    messages.push(tool_result_message(&call, &result));
+                    input.push(function_call_output(&call.call_id, &result));
                 }
             }
             drop(speech_sender);
@@ -550,7 +647,7 @@ impl AgentOrchestrator {
         };
         let (generation_result, speech_result) = tokio::join!(generation, speech);
         let (final_text, response_artifacts) = generation_result?;
-        speech_result?;
+        speech_result.context("TTS_FAILED")?;
         let assistant_turn_id = self
             .context
             .add_turn(session_id, "assistant", &final_text, None)
@@ -605,6 +702,7 @@ async fn stream_speech(
     let mut segment_index = 0usize;
     while let Some(sentence) = sentences.recv().await {
         let segment_started = Instant::now();
+        let mut first_audio_recorded = false;
         info!(
             %session_id,
             %response_id,
@@ -623,11 +721,29 @@ async fn stream_speech(
             }),
         )
         .await;
-        let mut stream = adapters.synthesize_stream(&sentence).await?;
+        let mut stream = adapters
+            .synthesize_stream(&sentence)
+            .await
+            .context("TTS_FAILED")?;
         let mut buffered = Vec::new();
         let mut audio_samples = 0usize;
         while let Some(output) = stream.next().await {
-            let output = output?;
+            let output = output.context("TTS_FAILED")?;
+            if !first_audio_recorded && !output.is_empty() {
+                first_audio_recorded = true;
+                record_flow_event(
+                    &context,
+                    &session_id,
+                    "server.tts.first_audio",
+                    json!({
+                        "response_id": response_id,
+                        "segment_index": segment_index,
+                        "elapsed_ms": segment_started.elapsed().as_millis(),
+                        "audio_samples": output.len()
+                    }),
+                )
+                .await;
+            }
             audio_samples += output.len();
             buffered.extend(output);
             while buffered.len() >= audio_chunk_size {
@@ -671,50 +787,99 @@ async fn record_flow_event(context: &ContextStore, session_id: &str, kind: &str,
     }
 }
 
-fn merge_tool_call_deltas(output: &mut BTreeMap<usize, crate::adapters::ToolCall>, chunk: &Value) {
-    let Some(deltas) = chunk
-        .pointer("/choices/0/delta/tool_calls")
-        .and_then(Value::as_array)
-    else {
-        return;
-    };
-    for delta in deltas {
-        let index = delta.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let call = output
-            .entry(index)
-            .or_insert_with(|| crate::adapters::ToolCall {
-                id: String::new(),
-                name: String::new(),
-                arguments: String::new(),
-            });
-        if let Some(value) = delta.get("id").and_then(Value::as_str) {
-            call.id.push_str(value);
-        }
-        if let Some(value) = delta.pointer("/function/name").and_then(Value::as_str) {
-            call.name.push_str(value);
-        }
-        if let Some(value) = delta.pointer("/function/arguments").and_then(Value::as_str) {
-            call.arguments.push_str(value);
-        }
+fn useful_delta_kind(chunk: &Value) -> Option<&'static str> {
+    if responses_text_delta(chunk).is_some() {
+        return Some("text");
     }
+    if chunk.get("type").and_then(Value::as_str) == Some("response.output_item.added")
+        && chunk.pointer("/item/type").and_then(Value::as_str) == Some("function_call")
+    {
+        return Some("tool_call");
+    }
+    None
 }
 
-fn streamed_raw_message(content: &str, calls: &[crate::adapters::ToolCall]) -> Value {
-    if calls.is_empty() {
-        json!({"role": "assistant", "content": content})
-    } else {
-        let tool_calls = calls
-            .iter()
-            .map(|call| {
-                json!({
-                    "id": call.id,
-                    "type": "function",
-                    "function": {"name": call.name, "arguments": call.arguments}
-                })
-            })
-            .collect::<Vec<_>>();
-        json!({"role": "assistant", "content": null, "tool_calls": tool_calls})
+fn responses_text_delta(event: &Value) -> Option<&str> {
+    (event.get("type").and_then(Value::as_str) == Some("response.output_text.delta"))
+        .then(|| event.get("delta").and_then(Value::as_str))
+        .flatten()
+        .filter(|delta| !delta.is_empty())
+}
+
+fn merge_responses_function_event(
+    output: &mut BTreeMap<usize, FunctionCall>,
+    event: &Value,
+) -> anyhow::Result<()> {
+    if let Some(delta) = responses_text_delta(event) {
+        reject_legacy_tool_markup(delta)?;
     }
+    let index = event
+        .get("output_index")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+    match event.get("type").and_then(Value::as_str) {
+        Some("response.output_item.added")
+            if event.pointer("/item/type").and_then(Value::as_str) == Some("function_call") =>
+        {
+            let index = index.context("function_call item did not include output_index")?;
+            output.insert(
+                index,
+                FunctionCall {
+                    call_id: event
+                        .pointer("/item/call_id")
+                        .and_then(Value::as_str)
+                        .context("function_call item did not include call_id")?
+                        .to_owned(),
+                    name: event
+                        .pointer("/item/name")
+                        .and_then(Value::as_str)
+                        .context("function_call item did not include name")?
+                        .to_owned(),
+                    arguments: event
+                        .pointer("/item/arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                },
+            );
+        }
+        Some("response.function_call_arguments.delta") => {
+            let index = index.context("function_call delta did not include output_index")?;
+            let call = output
+                .get_mut(&index)
+                .context("function_call delta arrived before item")?;
+            call.arguments.push_str(
+                event
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .context("function_call delta did not include delta")?,
+            );
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn merge_completed_response(
+    calls: &mut BTreeMap<usize, FunctionCall>,
+    completed_items: &mut BTreeMap<usize, Value>,
+    event: &Value,
+) -> anyhow::Result<()> {
+    if event.get("type").and_then(Value::as_str) != Some("response.completed") {
+        return Ok(());
+    }
+    let Some(response) = event.get("response") else {
+        return Ok(());
+    };
+    if !response.get("output").is_some_and(Value::is_array) {
+        return Ok(());
+    }
+    let parsed = parse_responses_output(response)?;
+    calls.clear();
+    calls.extend(parsed.function_calls.into_iter().enumerate());
+    completed_items.clear();
+    completed_items.extend(parsed.output_items.into_iter().enumerate());
+    Ok(())
 }
 
 struct SpeechSegmenter {
@@ -855,6 +1020,210 @@ fn push_bounded(output: &mut Vec<String>, text: &str, max_chars: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::response_gate::GateDecision;
+
+    #[tokio::test]
+    async fn gate_model_failure_fails_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings = Settings::from_env().unwrap();
+        settings.data_dir = directory.path().join("data");
+        settings.skills_dir = directory.path().join("skills");
+        settings.agent_backend = "mock".to_owned();
+        tokio::fs::create_dir_all(&settings.skills_dir)
+            .await
+            .unwrap();
+        let settings = Arc::new(settings);
+        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        context.touch_session("gate-session").await.unwrap();
+        let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
+            .await
+            .unwrap();
+        let orchestrator = AgentOrchestrator::new(
+            Arc::clone(&settings),
+            context,
+            ModelAdapters::new((*settings).clone()).unwrap(),
+            memories,
+        )
+        .unwrap();
+
+        let outcome = orchestrator.gate_transcript("gate-session", "你好").await;
+
+        assert_eq!(outcome.decision, GateDecision::Respond);
+        assert!(outcome.fallback);
+    }
+
+    #[test]
+    fn reads_responses_text_delta() {
+        assert_eq!(
+            responses_text_delta(&json!({
+                "type":"response.output_text.delta",
+                "delta":"你好"
+            })),
+            Some("你好")
+        );
+        assert_eq!(
+            responses_text_delta(&json!({
+                "type":"response.output_item.added",
+                "item":{"type":"function_call"}
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn forced_tool_instruction_avoids_protocol_markup() {
+        let instructions = forced_tool_instructions("calculate");
+        assert!(instructions.contains("You MUST use the calculate tool"));
+        assert!(instructions.contains("Do not answer before the tool result is available"));
+        assert!(!instructions.contains("function_call"));
+    }
+
+    #[test]
+    fn merges_only_structured_responses_function_events() {
+        let mut calls = BTreeMap::new();
+        merge_responses_function_event(
+            &mut calls,
+            &json!({
+                "type":"response.output_item.added",
+                "output_index":0,
+                "item":{
+                    "type":"function_call",
+                    "call_id":"call_1",
+                    "name":"calculate",
+                    "arguments":""
+                }
+            }),
+        )
+        .unwrap();
+        merge_responses_function_event(
+            &mut calls,
+            &json!({
+                "type":"response.function_call_arguments.delta",
+                "output_index":0,
+                "delta":"{\"expression\":\"7*8\"}"
+            }),
+        )
+        .unwrap();
+        let error = merge_responses_function_event(
+            &mut calls,
+            &json!({
+                "type":"response.output_text.delta",
+                "delta":"<tool_call>{\"name\":\"remember\"}</tool_call>"
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("legacy tool tag"));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[&0].call_id, "call_1");
+        assert_eq!(calls[&0].arguments, "{\"expression\":\"7*8\"}");
+    }
+
+    #[test]
+    fn uses_canonical_function_calls_from_completed_response() {
+        let mut calls = BTreeMap::new();
+        let mut items = BTreeMap::new();
+        merge_completed_response(
+            &mut calls,
+            &mut items,
+            &json!({
+                "type":"response.completed",
+                "response":{
+                    "output":[{
+                        "type":"function_call",
+                        "call_id":"call_final",
+                        "name":"calculate",
+                        "arguments":"{\"expression\":\"7 * 8\"}"
+                    }]
+                }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(calls[&0].call_id, "call_final");
+        assert_eq!(items[&0]["type"], "function_call");
+    }
+
+    #[test]
+    fn first_useful_delta_distinguishes_text_and_tool_calls() {
+        assert_eq!(
+            useful_delta_kind(&json!({"type":"response.output_text.delta","delta":"你"})),
+            Some("text")
+        );
+        assert_eq!(
+            useful_delta_kind(&json!({
+                "type":"response.output_item.added",
+                "item":{"type":"function_call"}
+            })),
+            Some("tool_call")
+        );
+        assert_eq!(
+            useful_delta_kind(&json!({"type":"response.in_progress"})),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn records_first_result_milestones_once_for_a_mock_turn() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings = Settings::from_env().unwrap();
+        settings.data_dir = directory.path().join("data");
+        settings.skills_dir = directory.path().join("skills");
+        settings.asr_backend = "mock".to_owned();
+        settings.agent_backend = "mock".to_owned();
+        settings.tts_backend = "mock".to_owned();
+        tokio::fs::create_dir_all(&settings.skills_dir)
+            .await
+            .unwrap();
+        let settings = Arc::new(settings);
+        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        context.touch_session("metrics-session").await.unwrap();
+        let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
+            .await
+            .unwrap();
+        let orchestrator = AgentOrchestrator::new(
+            Arc::clone(&settings),
+            context.clone(),
+            ModelAdapters::new((*settings).clone()).unwrap(),
+            memories,
+        )
+        .unwrap();
+        let (sender, mut receiver) = mpsc::channel(128);
+        let drain = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+
+        orchestrator
+            .run_turn(
+                "metrics-user",
+                "metrics-session",
+                &sender,
+                Vec::new(),
+                Vec::new(),
+                Some("你好".to_owned()),
+                "metrics-response",
+            )
+            .await
+            .unwrap();
+        drop(sender);
+        drain.await.unwrap();
+
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT kind, COUNT(*) FROM events
+             WHERE json_extract(payload, '$.response_id') = ?
+               AND kind IN ('server.agent.first_delta', 'server.tts.first_audio')
+             GROUP BY kind ORDER BY kind",
+        )
+        .bind("metrics-response")
+        .fetch_all(context.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("server.agent.first_delta".to_owned(), 1),
+                ("server.tts.first_audio".to_owned(), 1),
+            ]
+        );
+    }
 
     #[test]
     fn splits_unicode_without_breaking_characters() {
@@ -913,28 +1282,5 @@ mod tests {
         assert!(segmenter.push(&first).is_empty());
         assert!(segmenter.push(&second).is_empty());
         assert_eq!(segmenter.finish(), vec![format!("{first}{second}")]);
-    }
-
-    #[test]
-    fn merges_streamed_tool_call_arguments() {
-        let mut calls = BTreeMap::new();
-        merge_tool_call_deltas(
-            &mut calls,
-            &json!({"choices": [{"delta": {"tool_calls": [{
-                "index": 0,
-                "id": "call-1",
-                "function": {"name": "calculate", "arguments": "{\"expression\":"}
-            }]}}]}),
-        );
-        merge_tool_call_deltas(
-            &mut calls,
-            &json!({"choices": [{"delta": {"tool_calls": [{
-                "index": 0,
-                "function": {"arguments": "\"1+2\"}"}
-            }]}}]}),
-        );
-        let call = calls.get(&0).unwrap();
-        assert_eq!(call.name, "calculate");
-        assert_eq!(call.arguments, "{\"expression\":\"1+2\"}");
     }
 }

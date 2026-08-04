@@ -44,8 +44,9 @@ apps/mobile/                      Shared Tauri 2 + React mobile client
 services/agent-gateway/           Rust WebSocket protocol, tools, context, adapters
 deploy/agent-stack/               Install, download, start, stop, and status
 .cache/models/                    Local model weights (ignored by Git)
-.venv-qwen-vllm/                  uv-managed ASR/VL environment (ignored)
-.venv-vllm-omni-024/              uv-managed Qwen3-TTS environment (ignored)
+.venv-qwen3-asr-1.7b/             uv-managed Qwen3-ASR-1.7B environment (ignored)
+.venv-qwen3.5-35b-a3b/            uv-managed Qwen3.5-35B-A3B environment (ignored)
+.venv-qwen3-tts-12hz-1.7b-customvoice/  uv-managed Qwen3-TTS-12Hz-1.7B-CustomVoice environment (ignored)
 ```
 
 ## Install and run the Agent stack

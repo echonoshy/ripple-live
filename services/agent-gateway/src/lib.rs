@@ -10,4 +10,6 @@ pub mod context_compiler;
 pub mod memory;
 pub mod orchestrator;
 pub mod protocol;
+pub mod readiness;
+pub mod response_gate;
 pub mod tools;

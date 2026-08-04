@@ -2,8 +2,8 @@
 
 This deployment is a fully self-hosted cascaded speech Agent:
 
-- Qwen3-ASR-0.6B transcribes a completed VAD turn.
-- Qwen3-VL-8B-Instruct receives the transcript and up to three recent camera
+- Qwen3-ASR-1.7B transcribes a completed VAD turn.
+- Qwen3.5-35B-A3B receives the transcript and up to three recent camera
   frames and returns regular text or structured tool calls.
 - The Rust gateway executes only registered tools and loops tool results back
   into the model.
@@ -15,7 +15,8 @@ This deployment is a fully self-hosted cascaded speech Agent:
 ## Prerequisites
 
 - Linux with a current Rust toolchain, Python 3.12, and `uv`
-- NVIDIA driver and three GPUs with roughly 18 GB, 38 GB, and 16 GB free
+- NVIDIA driver and GPUs with capacity for ASR, two-way Agent tensor parallelism,
+  and TTS
 - A shell function named `proxy_off` (the helper also unsets proxy variables as
   a defensive fallback)
 
@@ -42,12 +43,12 @@ tail -f deploy/agent-stack/logs/*.log
 
 When a user systemd session is available, the lifecycle scripts create
 transient `ripple-agent-asr`, `ripple-agent-agent`,
-`ripple-agent-tts-omni`, and `ripple-agent-gateway` services so the processes
+`ripple-agent-tts`, and `ripple-agent-gateway` services so the processes
 survive the launching shell. The first start can take about one to two minutes
 while vLLM compiles kernels and captures CUDA graphs; later starts reuse the
 compile cache.
 
-The only TTS unit is `ripple-agent-tts-omni`, serving the 1.7B CustomVoice
+The TTS unit is `ripple-agent-tts`, serving the Qwen3-TTS-12Hz-1.7B-CustomVoice
 checkpoint through vLLM-Omni 0.24. The deployment uses the official CUDA 12.9
 vLLM wheel against the server's CUDA 12.8 toolkit, and no longer installs or
 starts the serial Transformers wrapper or the smaller 0.6B TTS model.
@@ -80,10 +81,11 @@ Services bind as follows:
 | --- | --- | --- |
 | 8700 | `0.0.0.0` | Public Agent WebSocket and health endpoint |
 | 8711 | `127.0.0.1` | ASR OpenAI-compatible API |
-| 8712 | `127.0.0.1` | Qwen3-VL OpenAI-compatible API |
+| 8712 | `127.0.0.1` | Qwen3.5-35B-A3B Responses API |
 | 8723 | `127.0.0.1` | vLLM-Omni Qwen3-TTS speech API |
 
-Each inference service uses exactly one physical GPU. Qwen3-TTS uses a
+ASR and TTS each use one physical GPU; the main Agent uses two-way tensor
+parallelism. Qwen3-TTS uses a
 two-stage Talker/Code2Wav pipeline in `qwen3-tts-batch.yaml`. The Talker keeps
 continuous batching enabled, while CustomVoice Code2Wav uses one sequence for
 the best first-audio latency. The codec emits an initial five-frame chunk,
@@ -137,7 +139,7 @@ an empty or failed result as evidence.
 
 The initial context manager is intentionally behind `ContextStore`. It
 persists a complete event log, recent conversational turns, and explicit
-memories in `.cache/agent-gateway/context.sqlite3`. A later Redis/PostgreSQL or
+memories in `runtime-data/agent-gateway/context.sqlite3`. A later Redis/PostgreSQL or
 vector-memory implementation can replace this class without changing the
 Android protocol or model adapters.
 
@@ -147,7 +149,7 @@ input commit, transcript, context load, Agent rounds, TTS segments, completion,
 cancellation, or failure. Inspect the latest flow with:
 
 ```bash
-sqlite3 .cache/agent-gateway/context.sqlite3 \
+sqlite3 runtime-data/agent-gateway/context.sqlite3 \
   "SELECT datetime(created_at, 'unixepoch', 'localtime'), session_id, kind, payload FROM events ORDER BY id DESC LIMIT 100;"
 ```
 

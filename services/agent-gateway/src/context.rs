@@ -56,6 +56,7 @@ pub struct ConversationAttachment {
     pub id: String,
     pub kind: String,
     pub memory_id: Option<String>,
+    pub todo_id: Option<String>,
     pub caption: String,
     pub content_url: String,
 }
@@ -156,12 +157,13 @@ impl ContextStore {
             )",
             "CREATE TABLE IF NOT EXISTS turn_attachments (
                 turn_id INTEGER NOT NULL, asset_id TEXT NOT NULL,
-                memory_id TEXT, caption TEXT NOT NULL DEFAULT '',
+                memory_id TEXT, todo_id TEXT, caption TEXT NOT NULL DEFAULT '',
                 ordinal INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(turn_id, asset_id),
                 FOREIGN KEY(turn_id) REFERENCES turns(id) ON DELETE CASCADE,
                 FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE,
-                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE SET NULL
+                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE SET NULL,
+                FOREIGN KEY(todo_id) REFERENCES todos(id) ON DELETE SET NULL
             )",
             "CREATE TABLE IF NOT EXISTS memory_tool_executions (
                 response_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
@@ -239,6 +241,12 @@ impl ContextStore {
             .await?;
         self.ensure_column("todos", "cover_asset_id", "TEXT")
             .await?;
+        self.ensure_column(
+            "turn_attachments",
+            "todo_id",
+            "TEXT REFERENCES todos(id) ON DELETE SET NULL",
+        )
+        .await?;
         self.migrate_memory_sources_nullable().await?;
         self.migrate_todo_evidence().await?;
         sqlx::query(
@@ -730,7 +738,9 @@ impl ContextStore {
         } else {
             let mut update = QueryBuilder::<Sqlite>::new("UPDATE conversations SET ");
             match action {
-                LibraryAction::Pin => update.push("is_pinned = CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END"),
+                LibraryAction::Pin => {
+                    update.push("is_pinned = CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END")
+                }
                 LibraryAction::Unpin => update.push("is_pinned = 0"),
                 LibraryAction::Archive => {
                     update.push("is_pinned = 0, archived_at = COALESCE(archived_at, ");
@@ -788,7 +798,7 @@ impl ContextStore {
         for row in rows {
             let turn_id: i64 = row.get("id");
             let attachment_rows = sqlx::query(
-                "SELECT a.id, ta.memory_id, ta.caption
+                "SELECT a.id, ta.memory_id, ta.todo_id, ta.caption
                  FROM turn_attachments ta JOIN assets a ON a.id = ta.asset_id
                  WHERE ta.turn_id = ? AND a.user_id = ? ORDER BY ta.ordinal ASC",
             )
@@ -810,6 +820,7 @@ impl ContextStore {
                             id,
                             kind: "image".to_owned(),
                             memory_id: attachment.get("memory_id"),
+                            todo_id: attachment.get("todo_id"),
                             caption: attachment.get("caption"),
                         }
                     })
@@ -897,6 +908,11 @@ impl ContextStore {
 
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub async fn readiness(&self) -> anyhow::Result<()> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
     }
 
     pub async fn recent_messages(

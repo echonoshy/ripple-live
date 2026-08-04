@@ -169,6 +169,9 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
     if asks_about_todos(transcript) {
         return Some("list_todos");
     }
+    if transcript.contains("天气") {
+        return Some("weather_lookup");
+    }
     if [
         "联网搜索",
         "网上搜索",
@@ -273,6 +276,7 @@ impl ToolExecutor {
                 "create_todo" => "todo_create",
                 "remember" => "memory_save",
                 "web_search" => "explicit_web_scope",
+                "weather_lookup" => "weather_query",
                 _ => "keyword_rule",
             },
         })
@@ -800,6 +804,10 @@ mod tests {
             Some("list_todos")
         );
         assert_eq!(select_forced_tool("请联网搜索 OpenAI"), Some("web_search"));
+        assert_eq!(
+            select_forced_tool("帮我查一下明天徐汇区的天气。"),
+            Some("weather_lookup")
+        );
         assert!(is_builtin_tool("create_todo"));
         assert!(is_builtin_tool("list_todos"));
     }
@@ -810,6 +818,7 @@ mod tests {
             id: "asset_1".to_owned(),
             kind: "image".to_owned(),
             memory_id: "todo_1".to_owned(),
+            todo_id: Some("todo_1".to_owned()),
             caption: "买芦荟胶".to_owned(),
             content_url: "/v1/assets/asset_1/content".to_owned(),
         };

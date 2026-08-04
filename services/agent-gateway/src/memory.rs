@@ -33,6 +33,8 @@ pub struct MemoryArtifact {
     pub id: String,
     pub kind: String,
     pub memory_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub todo_id: Option<String>,
     pub caption: String,
     pub content_url: String,
 }
@@ -581,10 +583,10 @@ impl MemoryService {
         let user_note: String = row.get("user_note");
         let assets = asset_rows
             .into_iter()
-            .map(|asset| artifact(asset.get("id"), memory_id, &user_note))
+            .map(|asset| memory_artifact(asset.get("id"), memory_id, &user_note))
             .collect::<Vec<_>>();
         let cover_id: Option<String> = row.get("cover_asset_id");
-        let cover = cover_id.map(|id| artifact(id, memory_id, &user_note));
+        let cover = cover_id.map(|id| memory_artifact(id, memory_id, &user_note));
         Ok(Some(MemorySearchResult {
             memory: MemoryRecord {
                 id: row.get("id"),
@@ -706,7 +708,9 @@ impl MemoryService {
         } else {
             let mut update = QueryBuilder::<Sqlite>::new("UPDATE memory_items SET ");
             match action {
-                LibraryAction::Pin => update.push("is_pinned = CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END"),
+                LibraryAction::Pin => {
+                    update.push("is_pinned = CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END")
+                }
                 LibraryAction::Unpin => update.push("is_pinned = 0"),
                 LibraryAction::Archive => {
                     update.push("is_pinned = 0, archived_at = COALESCE(archived_at, ");
@@ -757,14 +761,20 @@ impl MemoryService {
         artifacts: &[MemoryArtifact],
     ) -> anyhow::Result<()> {
         for (ordinal, item) in artifacts.iter().enumerate() {
+            let memory_id = if item.todo_id.is_some() {
+                None
+            } else {
+                Some(item.memory_id.as_str())
+            };
             sqlx::query(
                 "INSERT OR IGNORE INTO turn_attachments(
-                    turn_id, asset_id, memory_id, caption, ordinal
-                 ) VALUES (?, ?, ?, ?, ?)",
+                    turn_id, asset_id, memory_id, todo_id, caption, ordinal
+                 ) VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(turn_id)
             .bind(&item.id)
-            .bind(&item.memory_id)
+            .bind(memory_id)
+            .bind(item.todo_id.as_deref())
             .bind(&item.caption)
             .bind(ordinal as i64)
             .execute(self.context.pool())
@@ -793,7 +803,7 @@ impl MemoryService {
             due_at: row.get("due_at"),
             completed_at: row.get("completed_at"),
             created_at: row.get("created_at"),
-            cover: cover_id.map(|asset_id| artifact(asset_id, todo_id, &title)),
+            cover: cover_id.map(|asset_id| todo_artifact(asset_id, todo_id, &title)),
         }))
     }
 
@@ -839,12 +849,26 @@ fn validate_library_ids(ids: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn artifact(id: String, memory_id: &str, caption: &str) -> MemoryArtifact {
+fn memory_artifact(id: String, memory_id: &str, caption: &str) -> MemoryArtifact {
     MemoryArtifact {
         content_url: format!("/v1/assets/{id}/content"),
         id,
         kind: "image".to_owned(),
         memory_id: memory_id.to_owned(),
+        todo_id: None,
+        caption: caption.to_owned(),
+    }
+}
+
+fn todo_artifact(id: String, todo_id: &str, caption: &str) -> MemoryArtifact {
+    MemoryArtifact {
+        content_url: format!("/v1/assets/{id}/content"),
+        id,
+        kind: "image".to_owned(),
+        // Retain the existing response shape for mobile clients while giving
+        // the persistence layer an explicit, correctly typed owner.
+        memory_id: todo_id.to_owned(),
+        todo_id: Some(todo_id.to_owned()),
         caption: caption.to_owned(),
     }
 }
@@ -901,7 +925,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creates_completes_and_lists_todo_with_memory_evidence() {
+    async fn creates_completes_lists_and_attaches_todo_evidence() {
         let directory = tempfile::tempdir().unwrap();
         let context = ContextStore::open(&directory.path().join("context.sqlite3"))
             .await
@@ -919,24 +943,54 @@ mod tests {
             .add_turn(&conversation, "user", "把这个做成待办", None)
             .await
             .unwrap();
-        let service = MemoryService::new(context, directory.path().join("assets"))
+        let service = MemoryService::new(context.clone(), directory.path().join("assets"))
             .await
+            .unwrap();
+        let mut jpeg = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(4, 3)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
             .unwrap();
         let request = CreateTodoRequest {
             user_id: user.id.clone(),
-            conversation_id: conversation,
+            conversation_id: conversation.clone(),
             source_turn_id: turn,
             response_id: "resp_todo".to_owned(),
             tool_call_id: "call_todo".to_owned(),
             title: "购买滤芯".to_owned(),
             visual_summary: "空调滤芯型号为 XX-123".to_owned(),
             due_at: Some(1_900_000_000.0),
-            frames: Vec::new(),
+            frames: vec![VideoFrame {
+                bytes: jpeg.into_inner(),
+                mime_type: "image/jpeg".to_owned(),
+                captured_at_ms: Some(1_700_000_000_000),
+                received_at_ms: 1_700_000_000_100,
+            }],
         };
         let created = service.create_todo(request.clone()).await.unwrap();
         let repeated = service.create_todo(request).await.unwrap();
         assert_eq!(created.id, repeated.id);
         assert!(created.memory_id.is_none());
+        let cover = created.cover.clone().unwrap();
+        assert_eq!(cover.todo_id.as_deref(), Some(created.id.as_str()));
+        let assistant_turn = context
+            .add_turn(&conversation, "assistant", "已经创建待办", None)
+            .await
+            .unwrap();
+        service
+            .attach_to_turn(assistant_turn, std::slice::from_ref(&cover))
+            .await
+            .unwrap();
+        let attachment =
+            sqlx::query("SELECT memory_id, todo_id FROM turn_attachments WHERE turn_id = ?")
+                .bind(assistant_turn)
+                .fetch_one(context.pool())
+                .await
+                .unwrap();
+        assert_eq!(attachment.get::<Option<String>, _>("memory_id"), None);
+        assert_eq!(
+            attachment.get::<Option<String>, _>("todo_id").as_deref(),
+            Some(created.id.as_str())
+        );
         let memory_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_items")
             .fetch_one(service.context.pool())
             .await
