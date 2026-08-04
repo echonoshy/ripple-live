@@ -131,6 +131,11 @@ test('continue decision waits exactly 1.5 seconds before committing', async (t) 
   await new Promise((resolve) => setImmediate(resolve))
 
   assert.equal(sent.at(-1)?.type, 'input.commit')
+  assert.deepEqual(sent.at(-1), {
+    type: 'input.commit',
+    turn_id: sent[0]?.turn_id,
+    endpoint_fallback: true,
+  })
 })
 
 test('speech resumption cancels a pending endpoint timer', async (t) => {
@@ -275,7 +280,131 @@ test('stale decisions and handled commands cannot affect the pending turn', asyn
 
   receive({ type: 'input.turn.decision', turn_id: turnId, decision: 'complete' })
   await new Promise((resolve) => setImmediate(resolve))
-  assert.deepEqual(sent.at(-1), { type: 'input.commit', turn_id: turnId })
+  assert.deepEqual(sent.at(-1), {
+    type: 'input.commit',
+    turn_id: turnId,
+    endpoint_fallback: false,
+  })
+})
+
+test('force listen clears a currently speaking client turn on the server', async () => {
+  const { session, sent } = readySessionHarness()
+  await session.speechStarted()
+  const turnId = sent.at(-1)?.turn_id
+
+  session.forceListen()
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(sent, [
+    { type: 'input.speech_started', turn_id: turnId },
+    { type: 'response.cancel' },
+    { type: 'input.clear' },
+  ])
+})
+
+test('force listen clears a pause-pending turn and rejects its delayed decision', async () => {
+  const { session, receive, sent } = readySessionHarness()
+  await session.speechStarted()
+  const turnId = sent.at(-1)?.turn_id
+  session.speechPaused()
+  await new Promise((resolve) => setImmediate(resolve))
+
+  session.forceListen()
+  receive({ type: 'input.turn.decision', turn_id: turnId, decision: 'complete' })
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(sent, [
+    { type: 'input.speech_started', turn_id: turnId },
+    { type: 'input.turn.pause', turn_id: turnId },
+    { type: 'response.cancel' },
+    { type: 'input.clear' },
+  ])
+})
+
+test('new speech waits until force-listen input clear reaches the server', async () => {
+  const sent: Array<Record<string, unknown>> = []
+  let releasePause: (() => void) | null = null
+  const pauseHeld = new Promise<void>((resolve) => {
+    releasePause = resolve
+  })
+  const { session } = readySessionHarness()
+  const internals = session as unknown as {
+    transport: {
+      send(message: string): Promise<void>
+      close(): Promise<void>
+    }
+  }
+  internals.transport = {
+    send: async (message) => {
+      const event = JSON.parse(message) as Record<string, unknown>
+      sent.push(event)
+      if (event.type === 'input.turn.pause') await pauseHeld
+    },
+    close: async () => {},
+  }
+
+  await session.speechStarted()
+  const firstTurnId = sent.at(-1)?.turn_id
+  session.speechPaused()
+  await new Promise((resolve) => setImmediate(resolve))
+  session.forceListen()
+  const nextSpeech = session.speechStarted()
+  await new Promise((resolve) => setImmediate(resolve))
+
+  releasePause?.()
+  await nextSpeech
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(sent.map((event) => event.type), [
+    'input.speech_started',
+    'input.turn.pause',
+    'response.cancel',
+    'input.clear',
+    'input.speech_started',
+  ])
+  assert.equal(sent[0]?.turn_id, firstTurnId)
+  assert.notEqual(sent[4]?.turn_id, firstTurnId)
+})
+
+test('force listen clears a commit that is already queued for transport', async () => {
+  const sent: Array<Record<string, unknown>> = []
+  let releasePause: (() => void) | null = null
+  const pauseHeld = new Promise<void>((resolve) => {
+    releasePause = resolve
+  })
+  const { session, receive } = readySessionHarness()
+  const internals = session as unknown as {
+    transport: {
+      send(message: string): Promise<void>
+      close(): Promise<void>
+    }
+  }
+  internals.transport = {
+    send: async (message) => {
+      const event = JSON.parse(message) as Record<string, unknown>
+      sent.push(event)
+      if (event.type === 'input.turn.pause') await pauseHeld
+    },
+    close: async () => {},
+  }
+
+  await session.speechStarted()
+  const turnId = sent.at(-1)?.turn_id
+  session.speechPaused()
+  await new Promise((resolve) => setImmediate(resolve))
+  receive({ type: 'input.turn.decision', turn_id: turnId, decision: 'complete' })
+  session.forceListen()
+
+  releasePause?.()
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(sent.map((event) => event.type), [
+    'input.speech_started',
+    'input.turn.pause',
+    'response.cancel',
+    'input.commit',
+    'input.clear',
+  ])
 })
 
 test('pause and commit wait behind already queued audio appends', async () => {

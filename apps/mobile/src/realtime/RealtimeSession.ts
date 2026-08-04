@@ -175,6 +175,7 @@ export class RealtimeSession {
   private currentTurnId: string | null = null
   private pendingTurnId: string | null = null
   private endpointTimer: ReturnType<typeof setTimeout> | null = null
+  private inputClearBarrier: Promise<void> | null = null
 
   constructor(options: SessionOptions) {
     this.options = options
@@ -455,11 +456,11 @@ export class RealtimeSession {
       return
     }
     if (event.decision === 'complete') {
-      this.commitPendingTurn(turnId)
+      this.commitPendingTurn(turnId, false)
     } else if (event.decision === 'continue' || event.decision === 'uncertain') {
       this.clearEndpointTimer()
       this.endpointTimer = setTimeout(() => {
-        this.commitPendingTurn(turnId)
+        this.commitPendingTurn(turnId, true)
       }, 1_500)
     }
   }
@@ -476,18 +477,40 @@ export class RealtimeSession {
     this.pendingTurnId = null
   }
 
-  private commitPendingTurn(turnId: string) {
+  private commitPendingTurn(turnId: string, endpointFallback: boolean) {
     if (turnId !== this.pendingTurnId) return
     this.clearEndpointTimer()
     this.pendingTurnId = null
     this.currentTurnId = null
-    this.sendEndpointEvent({ type: 'input.commit', turn_id: turnId })
+    this.sendEndpointEvent({
+      type: 'input.commit',
+      turn_id: turnId,
+      endpoint_fallback: endpointFallback,
+    })
   }
 
   private sendEndpointEvent(event: Record<string, unknown>) {
     void this.sendEvent(event, 'normal', (error: unknown) => {
       void this.handleSendFailure(error)
     }).catch(() => {})
+  }
+
+  private scheduleInputClear() {
+    let failure: Promise<void> | null = null
+    const clear = this.sendEvent({ type: 'input.clear' }, 'normal', (error) => {
+      failure = this.handleSendFailure(error)
+    })
+    const barrier = clear.catch(async () => {
+      await failure
+    })
+    this.inputClearBarrier = barrier
+    void barrier.then(() => {
+      if (this.inputClearBarrier === barrier) this.inputClearBarrier = null
+    })
+  }
+
+  private async waitForInputClear() {
+    while (this.inputClearBarrier) await this.inputClearBarrier
   }
 
   private async handleSendFailure(error: unknown) {
@@ -538,6 +561,7 @@ export class RealtimeSession {
   }
 
   async speechStarted() {
+    if (this.inputClearBarrier) await this.waitForInputClear()
     if (!this.transport || !this.ready || this.closed) return
     if (this.pendingTurnId) {
       const turnId = this.pendingTurnId
@@ -609,6 +633,7 @@ export class RealtimeSession {
     this.options.onTool('')
     this.options.onState('listening')
     void this.sendEvent({ type: 'response.cancel' }, 'high')
+    this.scheduleInputClear()
     return hasActiveOutput
   }
 
