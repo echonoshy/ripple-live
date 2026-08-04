@@ -35,3 +35,6 @@ __pycache__/
 .idea/
 .vscode/
 *.log
+
+# Local Git worktrees
+.worktrees/
