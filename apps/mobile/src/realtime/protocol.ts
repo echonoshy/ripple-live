@@ -1,6 +1,6 @@
 export type RealtimeMode = 'audio' | 'video'
 
-export const REALTIME_PROTOCOL_VERSION = 3
+export const REALTIME_PROTOCOL_VERSION = 4
 
 const clientBuild =
   typeof __RIPPLE_CLIENT_BUILD__ === 'string'
@@ -14,6 +14,13 @@ export function createSessionStart(mode: RealtimeMode) {
     client_build: clientBuild,
     mode,
   }
+}
+
+export function createTurnId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 }
 
 export function createRequestedFrameEvents(
