@@ -186,6 +186,63 @@ test('speech start immediately interrupts an active response before capturing in
   ])
 })
 
+test('speech start clears locally buffered playback after generation is already done', async () => {
+  const sent: Array<Record<string, unknown>> = []
+  let audioClears = 0
+  const session = new RealtimeSession({
+    server: '127.0.0.1:8700',
+    accessToken: 'test-token',
+    mode: 'audio',
+    onState: () => {},
+    onError: () => {},
+    onResponseFailed: () => {},
+    onAssistantText: () => {},
+    onUserText: () => {},
+    onTool: () => {},
+    onAudio: () => {},
+    onAudioDone: () => {},
+    onInterrupted: () => {
+      audioClears += 1
+    },
+    onArtifact: () => {},
+    onFrameRequested: () => null,
+    onReady: async () => {},
+    onConversation: () => {},
+  })
+  const internals = session as unknown as {
+    transport: {
+      send(message: string): Promise<void>
+      close(): Promise<void>
+    }
+    handleText(text: string): void
+  }
+  internals.transport = {
+    send: async (message) => sent.push(JSON.parse(message)),
+    close: async () => {},
+  }
+  internals.handleText(JSON.stringify({ type: 'session.ready' }))
+  internals.handleText(
+    JSON.stringify({ type: 'response.created', response_id: 'response-buffered' }),
+  )
+  session.outputPlaybackStarted(450)
+  internals.handleText(
+    JSON.stringify({ type: 'response.done', response_id: 'response-buffered' }),
+  )
+
+  await session.speechStarted()
+
+  assert.equal(audioClears, 1)
+  assert.deepEqual(sent, [
+    {
+      type: 'output.playback.started',
+      response_id: 'response-buffered',
+      buffered_ms: 450,
+    },
+    { type: 'response.cancel' },
+    { type: 'input.speech_started' },
+  ])
+})
+
 test('requested frame and commit preserve one response id', () => {
   assert.deepEqual(
     createRequestedFrameEvents('response-7', 'jpeg-data', 1234),

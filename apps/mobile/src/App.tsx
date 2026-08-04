@@ -473,6 +473,7 @@ export default function App() {
         facingMode: cameraFacing,
         onPlaybackStarted: (bufferedMs) =>
           session.outputPlaybackStarted(bufferedMs),
+        onPlaybackEnded: () => session.outputPlaybackEnded(),
       })
       session = new RealtimeSession({
         server,
