@@ -460,7 +460,7 @@ export class RealtimeSession {
       this.clearEndpointTimer()
       this.endpointTimer = setTimeout(() => {
         this.commitPendingTurn(turnId)
-      }, 1500)
+      }, 1_500)
     }
   }
 
