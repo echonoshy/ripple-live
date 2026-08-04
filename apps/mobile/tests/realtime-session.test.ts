@@ -73,12 +73,13 @@ function failureHarness() {
 
 function readySessionHarness() {
   const sent: Array<Record<string, unknown>> = []
+  const errors: string[] = []
   const session = new RealtimeSession({
     server: '127.0.0.1:8700',
     accessToken: 'test-token',
     mode: 'audio',
     onState: () => {},
-    onError: () => {},
+    onError: (message) => errors.push(message),
     onResponseFailed: () => {},
     onAssistantText: () => {},
     onUserText: () => {},
@@ -109,6 +110,7 @@ function readySessionHarness() {
     receive: (event: Record<string, unknown>) =>
       internals.handleText(JSON.stringify(event)),
     sent,
+    errors,
   }
 }
 
@@ -135,16 +137,94 @@ test('speech resumption cancels a pending endpoint timer', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const { session, receive, sent } = readySessionHarness()
   await session.speechStarted()
+  const turnId = sent.at(-1)?.turn_id
   session.speechPaused()
   receive({
     type: 'input.turn.decision',
-    turn_id: sent.at(-1)?.turn_id,
+    turn_id: turnId,
     decision: 'uncertain',
   })
 
   await session.speechStarted()
 
-  assert.equal(sent.at(-1)?.type, 'input.speech_resumed')
+  assert.deepEqual(sent.at(-1), {
+    type: 'input.speech_resumed',
+    turn_id: turnId,
+  })
+  t.mock.timers.tick(1501)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(sent.some((event) => event.type === 'input.commit'), false)
+})
+
+test('failed pause send closes the session without an unhandled rejection', async () => {
+  const { session, sent, errors } = readySessionHarness()
+  let closeCalls = 0
+  const internals = session as unknown as {
+    transport: {
+      send(message: string): Promise<void>
+      close(): Promise<void>
+    }
+  }
+  internals.transport = {
+    send: async (message) => {
+      const event = JSON.parse(message) as Record<string, unknown>
+      sent.push(event)
+      if (event.type === 'input.turn.pause') throw new Error('pause failed')
+    },
+    close: async () => {
+      closeCalls += 1
+    },
+  }
+
+  await session.speechStarted()
+  session.speechPaused()
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
+  await session.speechStarted()
+
+  assert.deepEqual(errors, ['pause failed'])
+  assert.equal(closeCalls, 1)
+  assert.deepEqual(sent.map((event) => event.type), [
+    'input.speech_started',
+    'input.turn.pause',
+  ])
+})
+
+test('failed endpoint commit closes the session without an unhandled rejection', async () => {
+  const { session, receive, sent, errors } = readySessionHarness()
+  let closeCalls = 0
+  const internals = session as unknown as {
+    transport: {
+      send(message: string): Promise<void>
+      close(): Promise<void>
+    }
+  }
+  internals.transport = {
+    send: async (message) => {
+      const event = JSON.parse(message) as Record<string, unknown>
+      sent.push(event)
+      if (event.type === 'input.commit') throw new Error('commit failed')
+    },
+    close: async () => {
+      closeCalls += 1
+    },
+  }
+
+  await session.speechStarted()
+  const turnId = sent.at(-1)?.turn_id
+  session.speechPaused()
+  receive({ type: 'input.turn.decision', turn_id: turnId, decision: 'complete' })
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
+  await session.speechStarted()
+
+  assert.deepEqual(errors, ['commit failed'])
+  assert.equal(closeCalls, 1)
+  assert.deepEqual(sent.map((event) => event.type), [
+    'input.speech_started',
+    'input.turn.pause',
+    'input.commit',
+  ])
 })
 
 test('stale decisions and handled commands cannot affect the pending turn', async () => {
