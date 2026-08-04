@@ -18,6 +18,9 @@ use crate::{
     config::Settings,
     context::ContextStore,
     context_compiler::ContextCompiler,
+    endpointing::{
+        EndpointDecision, EndpointEvaluation, deterministic_decision, parse_classifier_decision,
+    },
     memory::{MemoryArtifact, MemoryService},
     protocol::VideoFrame,
     response_gate::{
@@ -107,6 +110,48 @@ impl AgentOrchestrator {
             anyhow::bail!("ASR 未识别出文本");
         }
         Ok(transcript)
+    }
+
+    pub async fn evaluate_turn_end(&self, audio: &[f32]) -> EndpointEvaluation {
+        let transcript = match self.transcribe_candidate(audio).await {
+            Ok(transcript) => transcript,
+            Err(_) => {
+                return EndpointEvaluation {
+                    transcript: String::new(),
+                    decision: EndpointDecision::Uncertain,
+                    reason: "asr_error",
+                    classifier_latency_ms: None,
+                };
+            }
+        };
+
+        if let Some(decision) = deterministic_decision(&transcript) {
+            return EndpointEvaluation {
+                transcript,
+                decision,
+                reason: "deterministic",
+                classifier_latency_ms: None,
+            };
+        }
+
+        let classifier_started = Instant::now();
+        let classifier = self.adapters.classify_turn_end(&transcript).await;
+        let classifier_latency_ms = Some(classifier_started.elapsed().as_millis());
+        let (decision, reason) = match classifier {
+            Err(_) => (EndpointDecision::Uncertain, "classifier_error"),
+            Ok(reply) => match parse_classifier_decision(&reply) {
+                Some((decision, confidence)) if confidence >= 0.75 => (decision, "classifier"),
+                Some(_) => (EndpointDecision::Uncertain, "classifier_low_confidence"),
+                None => (EndpointDecision::Uncertain, "classifier_malformed"),
+            },
+        };
+
+        EndpointEvaluation {
+            transcript,
+            decision,
+            reason,
+            classifier_latency_ms,
+        }
     }
 
     pub async fn gate_transcript(&self, session_id: &str, transcript: &str) -> GateOutcome {
@@ -1020,7 +1065,126 @@ fn push_bounded(output: &mut Vec<String>, text: &str, max_chars: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::response_gate::GateDecision;
+    use crate::{endpointing::EndpointDecision, response_gate::GateDecision};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    async fn endpointing_orchestrator(
+        transcript: Result<&str, &str>,
+        classifier: Result<&str, &str>,
+    ) -> (tempfile::TempDir, AgentOrchestrator, Arc<AtomicUsize>) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings = Settings::from_env().unwrap();
+        settings.data_dir = directory.path().join("data");
+        settings.skills_dir = directory.path().join("skills");
+        tokio::fs::create_dir_all(&settings.skills_dir)
+            .await
+            .unwrap();
+        let settings = Arc::new(settings);
+        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
+            .await
+            .unwrap();
+        let (adapters, classifier_calls) = ModelAdapters::with_endpointing_test_results(
+            (*settings).clone(),
+            transcript.map(str::to_owned).map_err(str::to_owned),
+            classifier.map(str::to_owned).map_err(str::to_owned),
+        )
+        .unwrap();
+        let orchestrator =
+            AgentOrchestrator::new(Arc::clone(&settings), context, adapters, memories).unwrap();
+        (directory, orchestrator, classifier_calls)
+    }
+
+    #[tokio::test]
+    async fn endpoint_evaluation_accepts_complete_at_exact_confidence_boundary() {
+        let (_directory, orchestrator, calls) = endpointing_orchestrator(
+            Ok("今天天气"),
+            Ok(r#"{"decision":"complete","confidence":0.75}"#),
+        )
+        .await;
+
+        let evaluation = orchestrator.evaluate_turn_end(&[0.1; 1600]).await;
+
+        assert_eq!(evaluation.decision, EndpointDecision::Complete);
+        assert_eq!(evaluation.reason, "classifier");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(evaluation.classifier_latency_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn endpoint_evaluation_accepts_confident_continue() {
+        let (_directory, orchestrator, _) = endpointing_orchestrator(
+            Ok("今天天气"),
+            Ok(r#"{"decision":"continue","confidence":0.9}"#),
+        )
+        .await;
+
+        let evaluation = orchestrator.evaluate_turn_end(&[0.1; 1600]).await;
+
+        assert_eq!(evaluation.decision, EndpointDecision::Continue);
+        assert_eq!(evaluation.reason, "classifier");
+    }
+
+    #[tokio::test]
+    async fn endpoint_evaluation_rejects_below_threshold_classifier_result() {
+        let (_directory, orchestrator, _) = endpointing_orchestrator(
+            Ok("今天天气"),
+            Ok(r#"{"decision":"complete","confidence":0.749}"#),
+        )
+        .await;
+
+        let evaluation = orchestrator.evaluate_turn_end(&[0.1; 1600]).await;
+
+        assert_eq!(evaluation.decision, EndpointDecision::Uncertain);
+        assert_eq!(evaluation.reason, "classifier_low_confidence");
+    }
+
+    #[tokio::test]
+    async fn endpoint_evaluation_maps_malformed_and_transport_failures_to_uncertain() {
+        let (_directory, malformed, _) =
+            endpointing_orchestrator(Ok("今天天气"), Ok("not json")).await;
+        let malformed = malformed.evaluate_turn_end(&[0.1; 1600]).await;
+        assert_eq!(malformed.decision, EndpointDecision::Uncertain);
+        assert_eq!(malformed.reason, "classifier_malformed");
+        assert!(!malformed.transcript.is_empty());
+
+        let (_directory, transport, _) =
+            endpointing_orchestrator(Ok("今天天气"), Err("transport")).await;
+        let transport = transport.evaluate_turn_end(&[0.1; 1600]).await;
+        assert_eq!(transport.decision, EndpointDecision::Uncertain);
+        assert_eq!(transport.reason, "classifier_error");
+        assert!(!transport.transcript.is_empty());
+    }
+
+    #[tokio::test]
+    async fn endpoint_evaluation_bypasses_classifier_for_deterministic_decision() {
+        let (_directory, orchestrator, calls) =
+            endpointing_orchestrator(Ok("因为"), Err("must not run")).await;
+
+        let evaluation = orchestrator.evaluate_turn_end(&[0.1; 1600]).await;
+
+        assert_eq!(evaluation.decision, EndpointDecision::Continue);
+        assert_eq!(evaluation.reason, "deterministic");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(evaluation.classifier_latency_ms, None);
+    }
+
+    #[tokio::test]
+    async fn endpoint_evaluation_maps_asr_failure_to_uncertain() {
+        let (_directory, orchestrator, calls) =
+            endpointing_orchestrator(Err("asr"), Err("must not run")).await;
+
+        let evaluation = orchestrator.evaluate_turn_end(&[0.1; 1600]).await;
+
+        assert_eq!(evaluation.decision, EndpointDecision::Uncertain);
+        assert_eq!(evaluation.reason, "asr_error");
+        assert!(evaluation.transcript.is_empty());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(evaluation.classifier_latency_ms, None);
+    }
 
     #[tokio::test]
     async fn gate_model_failure_fails_open() {

@@ -1,5 +1,11 @@
 use std::{f32::consts::PI, pin::Pin};
 
+#[cfg(test)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::{Stream, StreamExt, future};
@@ -24,6 +30,14 @@ pub struct ResponsesOutput {
 
 pub type AudioStream = Pin<Box<dyn Stream<Item = anyhow::Result<Vec<f32>>> + Send>>;
 pub type AgentStream = Pin<Box<dyn Stream<Item = anyhow::Result<Value>> + Send>>;
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct EndpointingTestAdapter {
+    transcript: Result<String, String>,
+    classifier: Result<String, String>,
+    classifier_calls: Arc<AtomicUsize>,
+}
 
 fn agent_rejection_summary(body: &str) -> String {
     serde_json::from_str::<Value>(body)
@@ -196,6 +210,8 @@ fn responses_request_body(
 pub struct ModelAdapters {
     settings: Settings,
     client: reqwest::Client,
+    #[cfg(test)]
+    endpointing_test: Option<EndpointingTestAdapter>,
 }
 
 impl ModelAdapters {
@@ -205,10 +221,35 @@ impl ModelAdapters {
             .pool_max_idle_per_host(32)
             .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()?;
-        Ok(Self { settings, client })
+        Ok(Self {
+            settings,
+            client,
+            #[cfg(test)]
+            endpointing_test: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_endpointing_test_results(
+        settings: Settings,
+        transcript: Result<String, String>,
+        classifier: Result<String, String>,
+    ) -> anyhow::Result<(Self, Arc<AtomicUsize>)> {
+        let classifier_calls = Arc::new(AtomicUsize::new(0));
+        let mut adapters = Self::new(settings)?;
+        adapters.endpointing_test = Some(EndpointingTestAdapter {
+            transcript,
+            classifier,
+            classifier_calls: Arc::clone(&classifier_calls),
+        });
+        Ok((adapters, classifier_calls))
     }
 
     pub async fn transcribe(&self, samples: &[f32]) -> anyhow::Result<String> {
+        #[cfg(test)]
+        if let Some(test) = &self.endpointing_test {
+            return test.transcript.clone().map_err(anyhow::Error::msg);
+        }
         if self.settings.asr_backend == "mock" {
             return Ok("这是本地模拟语音输入。".to_owned());
         }
@@ -241,6 +282,47 @@ impl ModelAdapters {
         tool_choice: Value,
         instructions: &str,
     ) -> anyhow::Result<ResponsesOutput> {
+        self.respond_with_options(
+            input,
+            tools,
+            tool_choice,
+            instructions,
+            self.settings.agent_temperature,
+            self.settings.agent_max_tokens,
+        )
+        .await
+    }
+
+    pub async fn classify_turn_end(&self, transcript: &str) -> anyhow::Result<String> {
+        #[cfg(test)]
+        if let Some(test) = &self.endpointing_test {
+            test.classifier_calls.fetch_add(1, Ordering::Relaxed);
+            return test.classifier.clone().map_err(anyhow::Error::msg);
+        }
+        self.respond_with_options(
+            &[json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": transcript}]
+            })],
+            &[],
+            json!("none"),
+            "Return only JSON: {\"decision\":\"complete|continue\",\"confidence\":0..1}. Mark complete only when the Chinese utterance is clearly finished.",
+            0.0,
+            64,
+        )
+        .await
+        .map(|output| output.text)
+    }
+
+    async fn respond_with_options(
+        &self,
+        input: &[Value],
+        tools: &[Value],
+        tool_choice: Value,
+        instructions: &str,
+        temperature: f64,
+        max_output_tokens: u32,
+    ) -> anyhow::Result<ResponsesOutput> {
         if self.settings.agent_backend == "mock" {
             return parse_responses_output(&json!({"output": [{
                 "type": "message",
@@ -258,8 +340,8 @@ impl ModelAdapters {
                 tools,
                 tool_choice,
                 instructions,
-                self.settings.agent_temperature,
-                self.settings.agent_max_tokens,
+                temperature,
+                max_output_tokens,
                 false,
             ))
             .send()
