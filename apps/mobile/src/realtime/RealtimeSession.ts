@@ -59,6 +59,7 @@ type QueuedSend = {
   messages: string[]
   resolve: () => void
   reject: (error: unknown) => void
+  onFailure?: (error: unknown) => void
 }
 
 type SessionOptions = {
@@ -237,13 +238,15 @@ export class RealtimeSession {
   private sendEvent(
     event: Record<string, unknown>,
     priority: SendPriority = 'normal',
+    onFailure?: (error: unknown) => void,
   ) {
-    return this.sendEvents([event], priority)
+    return this.sendEvents([event], priority, onFailure)
   }
 
   private sendEvents(
     events: Record<string, unknown>[],
     priority: SendPriority = 'normal',
+    onFailure?: (error: unknown) => void,
   ) {
     if (!this.transport || this.closed) return Promise.resolve()
     return new Promise<void>((resolve, reject) => {
@@ -252,6 +255,7 @@ export class RealtimeSession {
         messages: events.map((event) => JSON.stringify(event)),
         resolve,
         reject,
+        onFailure,
       })
       void this.drainSendQueue()
     })
@@ -272,7 +276,12 @@ export class RealtimeSession {
           }
           item.resolve()
         } catch (error) {
+          item.onFailure?.(error)
           item.reject(error)
+          if (item.onFailure) {
+            this.rejectQueuedSends(error)
+            return
+          }
         }
       }
     } finally {
@@ -283,6 +292,13 @@ export class RealtimeSession {
         void this.drainSendQueue()
       }
     }
+  }
+
+  private rejectQueuedSends(error: unknown) {
+    const queued = [...this.highPrioritySends, ...this.normalSends]
+    this.highPrioritySends = []
+    this.normalSends = []
+    queued.forEach((item) => item.reject(error))
   }
 
   private waitForSendIdle() {
@@ -469,9 +485,9 @@ export class RealtimeSession {
   }
 
   private sendEndpointEvent(event: Record<string, unknown>) {
-    void this.sendEvent(event).catch((error: unknown) => {
+    void this.sendEvent(event, 'normal', (error: unknown) => {
       void this.handleSendFailure(error)
-    })
+    }).catch(() => {})
   }
 
   private async handleSendFailure(error: unknown) {

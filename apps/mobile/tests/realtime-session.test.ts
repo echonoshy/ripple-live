@@ -227,6 +227,41 @@ test('failed endpoint commit closes the session without an unhandled rejection',
   ])
 })
 
+test('failed pause prevents an immediately queued automatic commit from sending', async () => {
+  const { session, receive, sent, errors } = readySessionHarness()
+  let closeCalls = 0
+  const internals = session as unknown as {
+    transport: {
+      send(message: string): Promise<void>
+      close(): Promise<void>
+    }
+  }
+  internals.transport = {
+    send: async (message) => {
+      const event = JSON.parse(message) as Record<string, unknown>
+      sent.push(event)
+      if (event.type === 'input.turn.pause') throw new Error('pause failed')
+    },
+    close: async () => {
+      closeCalls += 1
+    },
+  }
+
+  await session.speechStarted()
+  const turnId = sent.at(-1)?.turn_id
+  session.speechPaused()
+  receive({ type: 'input.turn.decision', turn_id: turnId, decision: 'complete' })
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(errors, ['pause failed'])
+  assert.equal(closeCalls, 1)
+  assert.deepEqual(sent.map((event) => event.type), [
+    'input.speech_started',
+    'input.turn.pause',
+  ])
+})
+
 test('stale decisions and handled commands cannot affect the pending turn', async () => {
   const { session, receive, sent } = readySessionHarness()
   await session.speechStarted()
