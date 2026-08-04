@@ -78,6 +78,27 @@ class SmokeContractTests(unittest.TestCase):
         self.assertEqual(json.loads(item["arguments"]), {"expression": "7 * 8"})
         self.assertNotIn("<tool_call>", item["arguments"])
 
+    def test_tool_continuation_keeps_the_original_user_query(self) -> None:
+        tool = {"type": "function", "name": "calculate"}
+        continuation = SMOKE.build_tool_continuation(
+            model="Qwen3.5-35B-A3B",
+            user_query="Calculate 7 * 8 using the calculate function.",
+            tool=tool,
+            first_output=[{"type": "function_call", "call_id": "call-7"}],
+            call_id="call-7",
+        )
+
+        self.assertEqual(continuation["model"], "Qwen3.5-35B-A3B")
+        self.assertEqual(continuation["tools"], [tool])
+        self.assertEqual(
+            continuation["input"][0],
+            {
+                "role": "user",
+                "content": "Calculate 7 * 8 using the calculate function.",
+            },
+        )
+        self.assertEqual(continuation["input"][-1]["call_id"], "call-7")
+
     def test_realtime_url_encodes_access_token(self) -> None:
         self.assertEqual(
             SMOKE.build_realtime_url("127.0.0.1:8700", "a+b/c="),
