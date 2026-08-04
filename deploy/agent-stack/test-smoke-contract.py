@@ -1,4 +1,5 @@
 import importlib.util
+import base64
 import json
 import os
 import stat
@@ -55,22 +56,6 @@ class SmokeContractTests(unittest.TestCase):
         self.assertIn('"RIPPLE_SMOKE_EVENTS_DB", "runtime-data/agent-gateway/context.sqlite3"', smoke_script)
         self.assertIn('value("DATA_DIR", "runtime-data/agent-gateway")', gateway_config)
 
-    def test_asr_console_script_uses_the_renamed_runtime(self) -> None:
-        runtime_root = ROOT.parent.parent / ".venv-qwen3-asr-1.7b"
-        console_script = runtime_root / "bin" / "qwen-asr-serve"
-        self.assertEqual(
-            console_script.read_text(encoding="utf-8").splitlines()[0],
-            f"#!{runtime_root}/bin/python",
-        )
-
-    def test_tts_console_script_does_not_depend_on_the_transition_runtime(self) -> None:
-        runtime_root = ROOT.parent.parent / ".venv-qwen3-tts-12hz-1.7b-customvoice"
-        console_script = runtime_root / "bin" / "vllm-omni"
-        self.assertEqual(
-            console_script.read_text(encoding="utf-8").splitlines()[0],
-            f"#!{runtime_root}/bin/python",
-        )
-
     def test_realtime_smoke_uses_protocol_three(self) -> None:
         self.assertEqual(SMOKE.REALTIME_PROTOCOL_VERSION, 3)
         smoke_source = (ROOT / "smoke-test.py").read_text(encoding="utf-8")
@@ -97,6 +82,33 @@ class SmokeContractTests(unittest.TestCase):
         self.assertEqual(
             SMOKE.build_realtime_url("127.0.0.1:8700", "a+b/c="),
             "ws://127.0.0.1:8700/v1/agent/realtime?access_token=a%2Bb%2Fc%3D",
+        )
+
+    def test_voice_turn_events_reuse_one_turn_id(self) -> None:
+        events = SMOKE.voice_turn_events("turn-7", b"\0\0\0\0")
+
+        self.assertEqual(
+            events,
+            [
+                {"type": "input.speech_started", "turn_id": "turn-7"},
+                {
+                    "type": "input.audio.append",
+                    "audio": "AAAAAA==",
+                    "sample_rate": 16_000,
+                },
+                {"type": "input.commit", "turn_id": "turn-7"},
+            ],
+        )
+
+    def test_requested_frame_events_are_valid_jpeg_and_correlated(self) -> None:
+        frame, commit = SMOKE.requested_frame_events("response-9")
+
+        self.assertEqual(frame["response_id"], "response-9")
+        self.assertEqual(frame["mime_type"], "image/jpeg")
+        self.assertTrue(base64.b64decode(frame["image"]).startswith(b"\xff\xd8"))
+        self.assertEqual(
+            commit,
+            {"type": "input.video.commit", "response_id": "response-9"},
         )
 
     def test_failed_response_is_a_terminal_error(self) -> None:

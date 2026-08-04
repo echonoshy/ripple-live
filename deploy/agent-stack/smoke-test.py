@@ -6,16 +6,24 @@ import json
 import os
 import sqlite3
 import time
+import uuid
+from typing import Optional
 from urllib.parse import urlencode
-
-import httpx
-import numpy as np
-import websockets
 
 REALTIME_PROTOCOL_VERSION = 3
 
 
 TERMINAL_TYPES = {"response.done", "response.cancelled", "response.failed"}
+SMOKE_JPEG_BASE64 = (
+    "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAP//////////////////////////////////////////////"
+    "////////////////////////////////////2wBDAf//////////////////////////////////////////////"
+    "////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAA"
+    "X/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEF"
+    "Aqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/Aaf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/Aaf/"
+    "xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Ap//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IX//2gAM"
+    "AwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAI"
+    "AQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z"
+)
 
 
 def require_function_call(payload: dict) -> dict:
@@ -46,6 +54,8 @@ def response_output_text(payload: dict) -> str:
 
 
 async def check_responses_tool_loop() -> None:
+    import httpx
+
     agent_url = os.environ.get(
         "RIPPLE_SMOKE_AGENT_URL", "http://127.0.0.1:8712/v1/responses"
     )
@@ -106,9 +116,36 @@ def build_realtime_url(server: str, access_token: str) -> str:
     return f"ws://{server}/v1/agent/realtime?{query}"
 
 
+def voice_turn_events(turn_id: str, audio: bytes) -> list[dict]:
+    return [
+        {"type": "input.speech_started", "turn_id": turn_id},
+        {
+            "type": "input.audio.append",
+            "audio": base64.b64encode(audio).decode("ascii"),
+            "sample_rate": 16_000,
+        },
+        {"type": "input.commit", "turn_id": turn_id},
+    ]
+
+
+def requested_frame_events(response_id: str) -> tuple[dict, dict]:
+    return (
+        {
+            "type": "input.video.frame",
+            "response_id": response_id,
+            "image": SMOKE_JPEG_BASE64,
+            "mime_type": "image/jpeg",
+            "captured_at": int(time.time() * 1000),
+        },
+        {"type": "input.video.commit", "response_id": response_id},
+    )
+
+
 def check_terminal_event(
-    event: dict, response_id: str, terminal_response_ids: set[str] | None = None
-) -> str | None:
+    event: dict,
+    response_id: str,
+    terminal_response_ids: Optional[set[str]] = None,
+) -> Optional[str]:
     event_type = event.get("type")
     if event_type not in TERMINAL_TYPES:
         return None
@@ -159,7 +196,9 @@ async def wait_for_gate_decision(database_path: str, session_id: str) -> dict:
     raise RuntimeError("response Gate did not record a decision")
 
 
-async def synthesize_gate_probe() -> bytes:
+async def synthesize_probe(text: str) -> bytes:
+    import httpx
+
     tts_url = os.environ.get(
         "RIPPLE_SMOKE_TTS_URL", "http://127.0.0.1:8723/v1/audio/speech"
     )
@@ -167,7 +206,7 @@ async def synthesize_gate_probe() -> bytes:
         "model": os.environ.get(
             "RIPPLE_TTS_MODEL", "Qwen3-TTS-12Hz-1.7B-CustomVoice"
         ),
-        "input": "今天天气挺好的，我们一会儿去吃饭吧。",
+        "input": text,
         "voice": os.environ.get("RIPPLE_TTS_VOICE", "serena"),
         "language": "Chinese",
         "response_format": "pcm",
@@ -182,7 +221,29 @@ async def synthesize_gate_probe() -> bytes:
     return response.content
 
 
+async def receive_frame_request(socket, terminal_response_ids: set[str]) -> str:
+    while True:
+        try:
+            event = json.loads(await asyncio.wait_for(socket.recv(), timeout=90))
+        except asyncio.TimeoutError as error:
+            raise RuntimeError("timed out waiting for requested video frame") from error
+        if event.get("type") == "error":
+            raise RuntimeError(event.get("message") or "gateway returned an error")
+        if event.get("type") == "input.frame.requested":
+            response_id = event.get("response_id")
+            if not response_id:
+                raise RuntimeError("requested video frame did not include response_id")
+            return response_id
+        terminal = check_terminal_event(event, "", terminal_response_ids)
+        if terminal:
+            raise RuntimeError(f"response ended before requesting video frame: {terminal}")
+
+
 async def main() -> None:
+    import httpx
+    import numpy as np
+    import websockets
+
     server = os.environ.get("RIPPLE_SMOKE_SERVER", "127.0.0.1:8700")
     access_token = os.environ.get("RIPPLE_SMOKE_ACCESS_TOKEN", "").strip()
     if not access_token:
@@ -266,7 +327,10 @@ async def main() -> None:
 
         output_samples = np.frombuffer(b"".join(audio_parts), dtype="<f4")
         gate_probe = (
-            np.frombuffer(await synthesize_gate_probe(), dtype="<i2").astype(np.float32)
+            np.frombuffer(
+                await synthesize_probe("今天天气挺好的，我们一会儿去吃饭吧。"),
+                dtype="<i2",
+            ).astype(np.float32)
             / 32768.0
         )
         target_size = round(gate_probe.size * 16000 / 24000)
@@ -275,17 +339,8 @@ async def main() -> None:
             np.arange(gate_probe.size),
             gate_probe,
         ).astype("<f4")
-        await socket.send(json.dumps({"type": "input.speech_started"}))
-        await socket.send(
-            json.dumps(
-                {
-                    "type": "input.audio.append",
-                    "audio": base64.b64encode(input_samples.tobytes()).decode("ascii"),
-                    "sample_rate": 16000,
-                }
-            )
-        )
-        await socket.send(json.dumps({"type": "input.commit"}))
+        for event in voice_turn_events(str(uuid.uuid4()), input_samples.tobytes()):
+            await socket.send(json.dumps(event))
         events_db = os.environ.get(
             "RIPPLE_SMOKE_EVENTS_DB", "runtime-data/agent-gateway/context.sqlite3"
         )
@@ -293,6 +348,54 @@ async def main() -> None:
         if gate.get("gate_decision") != "ignore":
             raise RuntimeError(f"expected unrelated speech to be ignored, got: {gate}")
         asr_transcript = str(gate.get("transcript", "")).strip()
+
+        visual_probe = (
+            np.frombuffer(
+                await synthesize_probe("请告诉我你看到了什么？"), dtype="<i2"
+            ).astype(np.float32)
+            / 32768.0
+        )
+        visual_input_size = round(visual_probe.size * 16000 / 24000)
+        visual_input = np.interp(
+            np.linspace(0, visual_probe.size, visual_input_size, endpoint=False),
+            np.arange(visual_probe.size),
+            visual_probe,
+        ).astype("<f4")
+        for event in voice_turn_events(str(uuid.uuid4()), visual_input.tobytes()):
+            await socket.send(json.dumps(event))
+        video_response_id = await receive_frame_request(socket, terminal_response_ids)
+        for event in requested_frame_events(video_response_id):
+            await socket.send(json.dumps(event))
+        video_playback_reported = False
+        while True:
+            event = json.loads(await socket.recv())
+            if event.get("type") == "error":
+                raise RuntimeError(event.get("message") or "gateway returned an error")
+            if event.get("response_id") and event["response_id"] != video_response_id:
+                raise RuntimeError(
+                    "video response mismatch: "
+                    f"expected {video_response_id}, got {event['response_id']}"
+                )
+            if event.get("type") == "response.audio.delta" and not video_playback_reported:
+                video_playback_reported = True
+                await socket.send(
+                    json.dumps(
+                        {
+                            "type": "output.playback.started",
+                            "response_id": video_response_id,
+                            "buffered_ms": 450,
+                        }
+                    )
+                )
+            if (
+                check_terminal_event(
+                    event, video_response_id, terminal_response_ids
+                )
+                == "response.done"
+            ):
+                break
+        if not video_playback_reported:
+            raise RuntimeError("video response did not produce audio")
 
         await socket.send(
             json.dumps(
@@ -344,7 +447,7 @@ async def main() -> None:
     assert cancelled_response_id
     assert resumed_response_id
     assert resumed_response_id != cancelled_response_id
-    assert len(terminal_response_ids) == 3
+    assert len(terminal_response_ids) == 4
     assert output_samples.size > 0
     assert asr_transcript
     assert "<asr_text>" not in asr_transcript
@@ -357,6 +460,7 @@ async def main() -> None:
     )
     print("protocol 3: ok")
     print("model Gate ignored unrelated speech: ok")
+    print("on-demand JPEG video frame: ok")
     print("first-result milestones: ok")
     print("tool loop: ok")
     print("barge-in and response isolation: ok")
