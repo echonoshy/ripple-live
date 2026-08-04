@@ -14,6 +14,9 @@ use crate::{
     config::Settings,
     context::ContextStore,
     context_compiler::ContextCompiler,
+    endpointing::{
+        EndpointDecision, EndpointEvaluation, deterministic_decision, parse_classifier_decision,
+    },
     memory::{MemoryArtifact, MemoryService},
     protocol::VideoFrame,
     tools::{ToolExecutionContext, ToolExecutor},
@@ -93,6 +96,48 @@ impl AgentOrchestrator {
             anyhow::bail!("ASR 未识别出文本");
         }
         Ok(transcript)
+    }
+
+    pub async fn evaluate_turn_end(&self, audio: &[f32]) -> EndpointEvaluation {
+        let transcript = match self.transcribe_candidate(audio).await {
+            Ok(transcript) => transcript,
+            Err(_) => {
+                return EndpointEvaluation {
+                    transcript: String::new(),
+                    decision: EndpointDecision::Uncertain,
+                    reason: "asr_error",
+                    classifier_latency_ms: None,
+                };
+            }
+        };
+
+        if let Some(decision) = deterministic_decision(&transcript) {
+            return EndpointEvaluation {
+                transcript,
+                decision,
+                reason: "deterministic",
+                classifier_latency_ms: None,
+            };
+        }
+
+        let classifier_started = Instant::now();
+        let classifier_result = self.adapters.classify_turn_end(&transcript).await;
+        let classifier_latency_ms = Some(classifier_started.elapsed().as_millis());
+        let (decision, reason) = match classifier_result {
+            Err(_) => (EndpointDecision::Uncertain, "classifier_error"),
+            Ok(reply) => match parse_classifier_decision(&reply) {
+                Some((decision, confidence)) if confidence >= 0.75 => (decision, "classifier"),
+                Some(_) => (EndpointDecision::Uncertain, "classifier_low_confidence"),
+                None => (EndpointDecision::Uncertain, "classifier_malformed"),
+            },
+        };
+
+        EndpointEvaluation {
+            transcript,
+            decision,
+            reason,
+            classifier_latency_ms,
+        }
     }
 
     pub async fn run_text_response(
@@ -855,6 +900,83 @@ fn push_bounded(output: &mut Vec<String>, text: &str, max_chars: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::endpointing::EndpointDecision;
+
+    async fn orchestrator_with_failing_asr() -> AgentOrchestrator {
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings = Settings::from_env().unwrap();
+        settings.data_dir = directory.path().join("data");
+        settings.skills_dir = directory.path().join("skills");
+        settings.asr_backend = "openai".to_owned();
+        settings.asr_url = "http://127.0.0.1:1/v1/audio/transcriptions".to_owned();
+        tokio::fs::create_dir_all(&settings.skills_dir)
+            .await
+            .unwrap();
+        let settings = Arc::new(settings);
+        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
+            .await
+            .unwrap();
+
+        AgentOrchestrator::new(
+            Arc::clone(&settings),
+            context,
+            ModelAdapters::new((*settings).clone()).unwrap(),
+            memories,
+        )
+        .unwrap()
+    }
+
+    async fn orchestrator_with_mock_models() -> AgentOrchestrator {
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings = Settings::from_env().unwrap();
+        settings.data_dir = directory.path().join("data");
+        settings.skills_dir = directory.path().join("skills");
+        settings.asr_backend = "mock".to_owned();
+        settings.agent_backend = "mock".to_owned();
+        tokio::fs::create_dir_all(&settings.skills_dir)
+            .await
+            .unwrap();
+        let settings = Arc::new(settings);
+        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
+            .await
+            .unwrap();
+
+        AgentOrchestrator::new(
+            Arc::clone(&settings),
+            context,
+            ModelAdapters::new((*settings).clone()).unwrap(),
+            memories,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn endpoint_evaluation_marks_asr_failure_uncertain() {
+        let evaluation = orchestrator_with_failing_asr()
+            .await
+            .evaluate_turn_end(&[0.1; 1600])
+            .await;
+
+        assert_eq!(evaluation.decision, EndpointDecision::Uncertain);
+        assert_eq!(evaluation.reason, "asr_error");
+        assert!(evaluation.transcript.is_empty());
+        assert_eq!(evaluation.classifier_latency_ms, None);
+    }
+
+    #[tokio::test]
+    async fn endpoint_evaluation_maps_malformed_classifier_output_to_uncertain() {
+        let evaluation = orchestrator_with_mock_models()
+            .await
+            .evaluate_turn_end(&[0.1; 1600])
+            .await;
+
+        assert_eq!(evaluation.decision, EndpointDecision::Uncertain);
+        assert_eq!(evaluation.reason, "classifier_malformed");
+        assert!(!evaluation.transcript.is_empty());
+        assert!(evaluation.classifier_latency_ms.is_some());
+    }
 
     #[test]
     fn splits_unicode_without_breaking_characters() {

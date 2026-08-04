@@ -73,6 +73,39 @@ impl ModelAdapters {
         tools: &[Value],
         tool_choice: Value,
     ) -> anyhow::Result<AgentReply> {
+        self.complete_with_options(
+            messages,
+            tools,
+            tool_choice,
+            self.settings.agent_temperature,
+            self.settings.agent_max_tokens,
+        )
+        .await
+    }
+
+    pub async fn classify_turn_end(&self, transcript: &str) -> anyhow::Result<String> {
+        self.complete_with_options(
+            &[
+                json!({"role":"system","content":"Return only JSON: {\\\"decision\\\":\\\"complete|continue\\\",\\\"confidence\\\":0..1}. Mark complete only when the Chinese utterance is clearly finished."}),
+                json!({"role":"user","content":transcript}),
+            ],
+            &[],
+            json!("none"),
+            0.0,
+            64,
+        )
+        .await
+        .map(|reply| reply.content)
+    }
+
+    async fn complete_with_options(
+        &self,
+        messages: &[Value],
+        tools: &[Value],
+        tool_choice: Value,
+        temperature: f64,
+        max_tokens: u32,
+    ) -> anyhow::Result<AgentReply> {
         if self.settings.agent_backend == "mock" {
             let content = "本地 Agent 网关已经收到你的输入。".to_owned();
             return Ok(AgentReply {
@@ -90,8 +123,8 @@ impl ModelAdapters {
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": tool_choice,
-                "temperature": self.settings.agent_temperature,
-                "max_tokens": self.settings.agent_max_tokens
+                "temperature": temperature,
+                "max_tokens": max_tokens
             }))
             .send()
             .await?
