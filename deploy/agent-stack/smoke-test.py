@@ -102,6 +102,31 @@ def response_output_text(payload: dict) -> str:
     return "".join(parts).strip()
 
 
+def build_tool_continuation(
+    model: str,
+    user_query: str,
+    tool: dict,
+    first_output: list[dict],
+    call_id: str,
+) -> dict:
+    return {
+        "model": model,
+        "instructions": "You must answer the user using the function result.",
+        "input": [
+            {"role": "user", "content": user_query},
+            *first_output,
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": json.dumps({"ok": True, "result": 56}),
+            },
+        ],
+        "tools": [tool],
+        "temperature": 0,
+        "max_output_tokens": 64,
+    }
+
+
 async def check_responses_tool_loop() -> None:
     import httpx
 
@@ -120,10 +145,11 @@ async def check_responses_tool_loop() -> None:
             "additionalProperties": False,
         },
     }
+    user_query = "Calculate 7 * 8 using the calculate function."
     first_request = {
         "model": model,
         "instructions": "You must call calculate exactly once. Do not answer directly.",
-        "input": "Calculate 7 * 8 using the calculate function.",
+        "input": user_query,
         "tools": [tool],
         "tool_choice": "auto",
         "temperature": 0,
@@ -137,19 +163,13 @@ async def check_responses_tool_loop() -> None:
         arguments = json.loads(call["arguments"])
         if arguments != {"expression": "7 * 8"}:
             raise RuntimeError(f"unexpected calculate arguments: {arguments}")
-        continuation = {
-            "model": model,
-            "input": first["output"]
-            + [
-                {
-                    "type": "function_call_output",
-                    "call_id": call["call_id"],
-                    "output": json.dumps({"ok": True, "result": 56}),
-                }
-            ],
-            "temperature": 0,
-            "max_output_tokens": 64,
-        }
+        continuation = build_tool_continuation(
+            model=model,
+            user_query=user_query,
+            tool=tool,
+            first_output=first["output"],
+            call_id=call["call_id"],
+        )
         final_response = await client.post(agent_url, json=continuation)
         final_response.raise_for_status()
         final = final_response.json()
