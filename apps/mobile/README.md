@@ -23,8 +23,9 @@ The app supports:
 
 - VAD produces tentative voice pauses with a one-second local pre-roll and
   16 kHz mono float32 transport; idle audio is not uploaded;
-- a continuous model-gated flow where the server commits complete semantic
-  decisions immediately and uses a 1.5-second fallback for other pauses;
+- a continuous model-gated flow where a `complete` semantic decision commits
+  immediately, while `continue` remains tentative and resumable until the
+  1.5-second fallback expires;
 - a spoken stop command silences output and is not added to chat history;
 - on-demand camera capture only after the server accepts a video turn;
 - server-side structured tool calls and visible tool status;

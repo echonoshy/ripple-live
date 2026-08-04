@@ -120,7 +120,7 @@ test('mobile uses protocol v4 semantic endpointing', () => {
   assert.match(protocolSource, /REALTIME_PROTOCOL_VERSION = 4/)
   assert.match(appSource, /void session\.speechPaused\(\)/)
   assert.doesNotMatch(appSource, /void session\.commitInput\(\)/)
-  assert.match(realtimeSource, /setTimeout\(\(\) => \{[\s\S]*?\}, 1500\)/)
+  assert.match(realtimeSource, /setTimeout\(\(\) => \{[\s\S]*?\}, 1_500\)/)
   assert.match(mediaSource, /width: \{ ideal: 1280 \}/)
   assert.match(mediaSource, /height: \{ ideal: 720 \}/)
   assert.doesNotMatch(mediaSource, /lowPower/)
