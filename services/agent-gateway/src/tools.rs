@@ -169,7 +169,8 @@ pub fn select_forced_tool(transcript: &str) -> Option<&'static str> {
     if asks_about_todos(transcript) {
         return Some("list_todos");
     }
-    if transcript.contains("天气") {
+    if transcript.contains("天气") && Regex::new("[省市区县镇乡村]").unwrap().is_match(transcript)
+    {
         return Some("weather_lookup");
     }
     if [
@@ -810,6 +811,15 @@ mod tests {
         );
         assert!(is_builtin_tool("create_todo"));
         assert!(is_builtin_tool("list_todos"));
+    }
+
+    #[test]
+    fn does_not_force_weather_lookup_without_a_location() {
+        assert_eq!(select_forced_tool("今天天气如何？"), None);
+        assert_eq!(
+            select_forced_tool("今天北京市朝阳区天气如何？"),
+            Some("weather_lookup")
+        );
     }
 
     #[test]

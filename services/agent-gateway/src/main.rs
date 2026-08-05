@@ -2784,6 +2784,17 @@ mod tests {
     }
 
     #[test]
+    fn failed_response_reports_recoverable_empty_agent_output() {
+        let event = failed_response_event(
+            "response-empty",
+            &anyhow::anyhow!("AGENT_EMPTY_RESPONSE: upstream returned no text after retry"),
+        );
+
+        assert_eq!(event["code"], "agent_empty_response");
+        assert_eq!(event["message"], "模型暂未生成回复，请重试");
+    }
+
+    #[test]
     fn failed_response_distinguishes_an_agent_request_rejection() {
         let event = failed_response_event(
             "response-10",
@@ -3188,6 +3199,11 @@ fn failed_response_event(response_id: &str, error: &anyhow::Error) -> Value {
         ("agent_request_rejected", "Agent 请求格式不兼容")
     } else if chain.iter().any(|item| item.contains("ASR_FAILED")) {
         ("asr_failed", "语音识别暂时不可用")
+    } else if chain
+        .iter()
+        .any(|item| item.contains("AGENT_EMPTY_RESPONSE"))
+    {
+        ("agent_empty_response", "模型暂未生成回复，请重试")
     } else if chain.iter().any(|item| item.contains("AGENT_FAILED")) {
         ("agent_unavailable", "Agent 服务暂时不可用")
     } else if chain.iter().any(|item| item.contains("TTS_FAILED")) {

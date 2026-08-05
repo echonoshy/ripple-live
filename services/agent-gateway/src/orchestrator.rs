@@ -52,6 +52,10 @@ fn forced_tool_instructions(name: &str) -> String {
     )
 }
 
+fn should_retry_empty_agent_response(retried: bool, round: usize, max_tool_rounds: usize) -> bool {
+    !retried && round + 1 < max_tool_rounds
+}
+
 const MIN_SPEECH_CHUNK_CHARS: usize = 40;
 const SOFT_SPEECH_CHUNK_CHARS: usize = 60;
 const MAX_SPEECH_CHUNK_CHARS: usize = 80;
@@ -466,6 +470,7 @@ impl AgentOrchestrator {
             let mut final_text = String::new();
             let mut response_artifacts = Vec::<MemoryArtifact>::new();
             let mut agent_first_delta_recorded = false;
+            let mut retried_empty_agent_response = false;
             for round in 0..self.settings.max_tool_rounds {
                 let forced_name = (round == 0).then_some(forced_tool.as_deref()).flatten();
                 let round_tools = if let Some(name) = forced_name {
@@ -563,6 +568,20 @@ impl AgentOrchestrator {
                 )
                 .await;
                 input.extend(completed_items.into_values());
+                if calls.is_empty() && content.trim().is_empty() {
+                    if should_retry_empty_agent_response(
+                        retried_empty_agent_response,
+                        round,
+                        self.settings.max_tool_rounds,
+                    ) {
+                        retried_empty_agent_response = true;
+                        warn!(%session_id, %response_id, round, "retrying empty Agent response");
+                        continue;
+                    }
+                    anyhow::bail!(
+                        "AGENT_EMPTY_RESPONSE: upstream returned no text or function call after retry"
+                    );
+                }
                 if calls.is_empty() {
                     let mut segmenter = SpeechSegmenter::new();
                     let mut phrases = segmenter.push(&content);
@@ -1240,6 +1259,13 @@ mod tests {
         assert!(instructions.contains("You MUST use the calculate tool"));
         assert!(instructions.contains("Do not answer before the tool result is available"));
         assert!(!instructions.contains("function_call"));
+    }
+
+    #[test]
+    fn retries_one_empty_agent_response_when_a_round_remains() {
+        assert!(should_retry_empty_agent_response(false, 0, 6));
+        assert!(!should_retry_empty_agent_response(true, 0, 6));
+        assert!(!should_retry_empty_agent_response(false, 5, 6));
     }
 
     #[test]
