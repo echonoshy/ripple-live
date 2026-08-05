@@ -24,4 +24,3 @@ The existing single retry for an empty or `max_output_tokens` response remains a
 - Request-body tests prove normal Agent and Gate requests contain `reasoning.effort=none`.
 - Orchestrator integration tests prove the first Agent HTTP request uses `none` and tool calls still complete.
 - All Rust tests, formatting, linting, release build, server readiness, Responses smoke tests, and direct live-model latency probes must pass.
-

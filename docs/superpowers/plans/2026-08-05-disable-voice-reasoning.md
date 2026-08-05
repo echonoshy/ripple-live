@@ -77,4 +77,3 @@
 - [ ] Run direct live-model probes for normal text, Gate structured output, and a tool call.
 - [ ] Synchronize the exact files to the server and run tests, release build, readiness, and smoke checks.
 - [ ] Stage only reviewed files, commit once, push the current branch, align the server checkout to that commit, and verify both work trees are clean at the same SHA.
-
