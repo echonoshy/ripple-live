@@ -184,6 +184,7 @@ pub fn build_responses_user_input(transcript: &str, frames: &[VideoFrame]) -> Va
     json!({"role": "user", "content": content})
 }
 
+#[allow(clippy::too_many_arguments)]
 fn responses_request_body(
     model: &str,
     input: &[Value],
@@ -193,8 +194,9 @@ fn responses_request_body(
     temperature: f64,
     max_output_tokens: u32,
     stream: bool,
+    reasoning_effort: Option<&str>,
 ) -> Value {
-    json!({
+    let mut body = json!({
         "model": model,
         "instructions": instructions,
         "input": input,
@@ -203,7 +205,58 @@ fn responses_request_body(
         "temperature": temperature,
         "max_output_tokens": max_output_tokens,
         "stream": stream
-    })
+    });
+    if let Some(effort) = reasoning_effort {
+        body["reasoning"] = json!({"effort": effort});
+    }
+    body
+}
+
+fn endpoint_classifier_request_body(model: &str, transcript: &str) -> Value {
+    responses_request_body(
+        model,
+        &[json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": transcript}]
+        })],
+        &[json!({
+            "type": "function",
+            "name": "classify_turn_end",
+            "description": "返回中文话语是否已经清晰结束",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "decision": {"type": "string", "enum": ["complete", "continue"]},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                },
+                "required": ["decision", "confidence"],
+                "additionalProperties": false
+            }
+        })],
+        json!("required"),
+        "判断中文话语是否已经清晰结束。你必须立即调用 classify_turn_end 一次，不得输出分析或文本。",
+        0.0,
+        128,
+        false,
+        Some("none"),
+    )
+}
+
+fn endpoint_classifier_arguments(output: &ResponsesOutput) -> anyhow::Result<String> {
+    if output.function_calls.len() != 1 {
+        anyhow::bail!(
+            "endpoint classifier expected one function call, got {}",
+            output.function_calls.len()
+        );
+    }
+    let call = &output.function_calls[0];
+    if call.name != "classify_turn_end" {
+        anyhow::bail!(
+            "endpoint classifier returned unexpected function: {}",
+            call.name
+        );
+    }
+    Ok(call.arguments.clone())
 }
 
 #[derive(Clone)]
@@ -299,19 +352,19 @@ impl ModelAdapters {
             test.classifier_calls.fetch_add(1, Ordering::Relaxed);
             return test.classifier.clone().map_err(anyhow::Error::msg);
         }
-        self.respond_with_options(
-            &[json!({
-                "role": "user",
-                "content": [{"type": "input_text", "text": transcript}]
-            })],
-            &[],
-            json!("none"),
-            "Return only JSON: {\"decision\":\"complete|continue\",\"confidence\":0..1}. Mark complete only when the Chinese utterance is clearly finished.",
-            0.0,
-            64,
-        )
-        .await
-        .map(|output| output.text)
+        let response = self
+            .client
+            .post(&self.settings.agent_url)
+            .bearer_auth(&self.settings.agent_api_key)
+            .json(&endpoint_classifier_request_body(
+                &self.settings.agent_model,
+                transcript,
+            ))
+            .send()
+            .await?;
+        let response = require_agent_success(response).await?;
+        let output = parse_responses_output(&response.json::<Value>().await?)?;
+        endpoint_classifier_arguments(&output)
     }
 
     async fn respond_with_options(
@@ -343,6 +396,7 @@ impl ModelAdapters {
                 temperature,
                 max_output_tokens,
                 false,
+                Some("none"),
             ))
             .send()
             .await?;
@@ -356,6 +410,7 @@ impl ModelAdapters {
         tools: &[Value],
         tool_choice: Value,
         instructions: &str,
+        reasoning_effort: Option<&str>,
     ) -> anyhow::Result<AgentStream> {
         if self.settings.agent_backend == "mock" {
             return Ok(Box::pin(futures_util::stream::iter([
@@ -378,6 +433,7 @@ impl ModelAdapters {
                 self.settings.agent_temperature,
                 self.settings.agent_max_tokens,
                 true,
+                reasoning_effort,
             ))
             .send()
             .await?;
@@ -628,6 +684,7 @@ mod tests {
             0.2,
             256,
             true,
+            None,
         );
 
         assert_eq!(body["model"], "Qwen3-VL-8B-Instruct");
@@ -636,6 +693,78 @@ mod tests {
         assert_eq!(body["max_output_tokens"], 256);
         assert!(body.get("max_tokens").is_none());
         assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn builds_agent_recovery_request_with_reasoning_disabled() {
+        let body = responses_request_body(
+            "Qwen3.5-35B-A3B",
+            &[json!({"role":"user","content":"今天天气如何？"})],
+            &[],
+            json!("auto"),
+            "system instructions",
+            0.2,
+            1024,
+            true,
+            Some("none"),
+        );
+
+        assert_eq!(body["reasoning"], json!({"effort": "none"}));
+        assert_eq!(body["max_output_tokens"], 1024);
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn endpoint_classifier_request_requires_one_structured_call_without_reasoning() {
+        let body = endpoint_classifier_request_body("Qwen3.5-35B-A3B", "今天天气");
+
+        assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["reasoning"]["effort"], "none");
+        assert_eq!(body["max_output_tokens"], 128);
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tools"][0]["name"], "classify_turn_end");
+        assert_eq!(
+            body["tools"][0]["parameters"]["required"],
+            json!(["decision", "confidence"])
+        );
+    }
+
+    #[test]
+    fn endpoint_classifier_extracts_the_required_function_arguments() {
+        let output = parse_responses_output(&json!({"output": [{
+            "type":"function_call",
+            "call_id":"call_endpoint",
+            "name":"classify_turn_end",
+            "arguments":"{\"decision\":\"continue\",\"confidence\":0.9}"
+        }]}))
+        .unwrap();
+
+        assert_eq!(
+            endpoint_classifier_arguments(&output).unwrap(),
+            "{\"decision\":\"continue\",\"confidence\":0.9}"
+        );
+    }
+
+    #[test]
+    fn endpoint_classifier_rejects_missing_or_unexpected_function_calls() {
+        let missing = ResponsesOutput {
+            text: String::new(),
+            function_calls: Vec::new(),
+            output_items: Vec::new(),
+        };
+        let unexpected = ResponsesOutput {
+            text: String::new(),
+            function_calls: vec![FunctionCall {
+                call_id: "call_wrong".to_owned(),
+                name: "other_tool".to_owned(),
+                arguments: "{}".to_owned(),
+            }],
+            output_items: Vec::new(),
+        };
+
+        assert!(endpoint_classifier_arguments(&missing).is_err());
+        assert!(endpoint_classifier_arguments(&unexpected).is_err());
     }
 
     #[test]

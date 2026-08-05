@@ -56,6 +56,38 @@ fn should_retry_empty_agent_response(retried: bool, round: usize, max_tool_round
     !retried && round + 1 < max_tool_rounds
 }
 
+fn agent_recovery_reason(
+    content: &str,
+    has_tool_calls: bool,
+    incomplete_reason: Option<&str>,
+) -> Option<&'static str> {
+    if !content.trim().is_empty() || has_tool_calls {
+        return None;
+    }
+    match incomplete_reason {
+        Some("max_output_tokens") => Some("max_output_tokens"),
+        None => Some("empty_output"),
+        Some(_) => None,
+    }
+}
+
+fn responses_incomplete_reason(event: &Value) -> Option<&str> {
+    match event.get("type").and_then(Value::as_str) {
+        Some("response.incomplete") => event
+            .pointer("/response/incomplete_details/reason")
+            .or_else(|| event.pointer("/incomplete_details/reason"))
+            .and_then(Value::as_str),
+        Some("response.completed")
+            if event.pointer("/response/status").and_then(Value::as_str) == Some("incomplete") =>
+        {
+            event
+                .pointer("/response/incomplete_details/reason")
+                .and_then(Value::as_str)
+        }
+        _ => None,
+    }
+}
+
 const MIN_SPEECH_CHUNK_CHARS: usize = 40;
 const SOFT_SPEECH_CHUNK_CHARS: usize = 60;
 const MAX_SPEECH_CHUNK_CHARS: usize = 80;
@@ -471,9 +503,18 @@ impl AgentOrchestrator {
             let mut response_artifacts = Vec::<MemoryArtifact>::new();
             let mut agent_first_delta_recorded = false;
             let mut retried_empty_agent_response = false;
+            let mut retry_next_agent_attempt = false;
+            let mut retry_forced_tool = None::<String>;
             for round in 0..self.settings.max_tool_rounds {
-                let forced_name = (round == 0).then_some(forced_tool.as_deref()).flatten();
-                let round_tools = if let Some(name) = forced_name {
+                let recovery_attempt = std::mem::take(&mut retry_next_agent_attempt);
+                let forced_name = if recovery_attempt {
+                    retry_forced_tool.clone()
+                } else if round == 0 {
+                    forced_tool.clone()
+                } else {
+                    None
+                };
+                let round_tools = if let Some(name) = forced_name.as_deref() {
                     available_tools
                         .iter()
                         .filter(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
@@ -482,7 +523,9 @@ impl AgentOrchestrator {
                 } else {
                     available_tools.clone()
                 };
-                let instructions = forced_name.map_or_else(system_prompt, forced_tool_instructions);
+                let instructions = forced_name
+                    .as_deref()
+                    .map_or_else(system_prompt, forced_tool_instructions);
                 let agent_started = Instant::now();
                 info!(%session_id, %response_id, round, "agent generation started");
                 self.record_flow_event(
@@ -492,18 +535,27 @@ impl AgentOrchestrator {
                         "response_id": response_id,
                         "round": round,
                         "tool_choice": "auto",
-                        "forced_tool": forced_name
+                        "forced_tool": forced_name,
+                        "recovery_attempt": recovery_attempt,
+                        "reasoning_effort": "none"
                     }),
                 )
                 .await;
                 let mut stream = self
                     .adapters
-                    .respond_stream(&input, &round_tools, json!("auto"), &instructions)
+                    .respond_stream(
+                        &input,
+                        &round_tools,
+                        json!("auto"),
+                        &instructions,
+                        Some("none"),
+                    )
                     .await
                     .context("AGENT_FAILED")?;
                 let mut content = String::new();
                 let mut tool_calls = BTreeMap::<usize, FunctionCall>::new();
                 let mut completed_items = BTreeMap::<usize, Value>::new();
+                let mut incomplete_reason = None::<String>;
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.context("AGENT_FAILED")?;
                     if !agent_first_delta_recorded && let Some(kind) = useful_delta_kind(&chunk) {
@@ -532,11 +584,12 @@ impl AgentOrchestrator {
                     {
                         completed_items.insert(index as usize, item.clone());
                     }
-                    match chunk.get("type").and_then(Value::as_str) {
-                        Some("response.failed") | Some("response.incomplete") => {
-                            anyhow::bail!("AGENT_FAILED: Responses upstream did not complete")
-                        }
-                        _ => {}
+                    if let Some(reason) = responses_incomplete_reason(&chunk) {
+                        incomplete_reason = Some(reason.to_owned());
+                        break;
+                    }
+                    if chunk.get("type").and_then(Value::as_str) == Some("response.failed") {
+                        anyhow::bail!("AGENT_FAILED: Responses upstream did not complete")
                     }
                 }
                 let calls = tool_calls.into_values().collect::<Vec<_>>();
@@ -563,25 +616,57 @@ impl AgentOrchestrator {
                         "round": round,
                         "elapsed_ms": agent_ms,
                         "text_chars": content.chars().count(),
-                        "tool_calls": calls.len()
+                        "tool_calls": calls.len(),
+                        "incomplete_reason": incomplete_reason
                     }),
                 )
                 .await;
-                input.extend(completed_items.into_values());
-                if calls.is_empty() && content.trim().is_empty() {
+                if let Some(reason) =
+                    agent_recovery_reason(&content, !calls.is_empty(), incomplete_reason.as_deref())
+                {
                     if should_retry_empty_agent_response(
                         retried_empty_agent_response,
                         round,
                         self.settings.max_tool_rounds,
                     ) {
                         retried_empty_agent_response = true;
-                        warn!(%session_id, %response_id, round, "retrying empty Agent response");
+                        retry_next_agent_attempt = true;
+                        retry_forced_tool = forced_name.clone();
+                        warn!(%session_id, %response_id, round, %reason, "retrying Agent response without reasoning");
+                        self.record_flow_event(
+                            session_id,
+                            "server.agent.recovery.started",
+                            json!({
+                                "response_id": response_id,
+                                "round": round,
+                                "reason": reason,
+                                "reasoning_effort": "none"
+                            }),
+                        )
+                        .await;
                         continue;
                     }
                     anyhow::bail!(
-                        "AGENT_EMPTY_RESPONSE: upstream returned no text or function call after retry"
+                        "AGENT_EMPTY_RESPONSE: upstream returned no usable output after recovery"
                     );
                 }
+                if let Some(reason) = incomplete_reason {
+                    anyhow::bail!("AGENT_FAILED: Responses upstream did not complete ({reason})");
+                }
+                if recovery_attempt {
+                    self.record_flow_event(
+                        session_id,
+                        "server.agent.recovery.completed",
+                        json!({
+                            "response_id": response_id,
+                            "round": round,
+                            "elapsed_ms": agent_ms,
+                            "outcome": if calls.is_empty() { "text" } else { "tool_call" }
+                        }),
+                    )
+                    .await;
+                }
+                input.extend(completed_items.into_values());
                 if calls.is_empty() {
                     let mut segmenter = SpeechSegmenter::new();
                     let mut phrases = segmenter.push(&content);
@@ -1086,9 +1171,55 @@ mod tests {
     use super::*;
     use crate::{endpointing::EndpointDecision, response_gate::GateDecision};
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+
+    async fn recovery_agent_stub(
+        axum::extract::State(requests): axum::extract::State<Arc<Mutex<Vec<Value>>>>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> impl axum::response::IntoResponse {
+        let attempt = {
+            let mut requests = requests.lock().unwrap();
+            requests.push(body);
+            requests.len()
+        };
+        let events = if attempt == 1 {
+            concat!(
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"未完成分析\"}]}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"type\":\"reasoning\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"未完成分析\"}]}]}}\n\n",
+                "data: [DONE]\n\n"
+            )
+            .to_owned()
+        } else {
+            concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"恢复成功。\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"恢复成功。\"}]}]}}\n\n",
+                "data: [DONE]\n\n"
+            )
+            .to_owned()
+        };
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            events,
+        )
+    }
+
+    async fn gate_agent_stub(
+        axum::extract::State(requests): axum::extract::State<Arc<Mutex<Vec<Value>>>>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> impl axum::response::IntoResponse {
+        requests.lock().unwrap().push(body);
+        axum::Json(json!({
+            "status": "completed",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_gate",
+                "name": "decide_response",
+                "arguments": "{\"decision\":\"respond\",\"reason\":\"direct request\"}"
+            }]
+        }))
+    }
 
     async fn endpointing_orchestrator(
         transcript: Result<&str, &str>,
@@ -1235,6 +1366,55 @@ mod tests {
         assert!(outcome.fallback);
     }
 
+    #[tokio::test]
+    async fn gate_request_disables_reasoning() {
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let app = axum::Router::new()
+            .route("/v1/responses", axum::routing::post(gate_agent_stub))
+            .with_state(Arc::clone(&requests));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings = Settings::from_env().unwrap();
+        settings.data_dir = directory.path().join("data");
+        settings.skills_dir = directory.path().join("skills");
+        settings.agent_backend = "openai".to_owned();
+        settings.agent_url = format!("http://{address}/v1/responses");
+        tokio::fs::create_dir_all(&settings.skills_dir)
+            .await
+            .unwrap();
+        let settings = Arc::new(settings);
+        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        context
+            .touch_session("gate-reasoning-session")
+            .await
+            .unwrap();
+        let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
+            .await
+            .unwrap();
+        let orchestrator = AgentOrchestrator::new(
+            Arc::clone(&settings),
+            context,
+            ModelAdapters::new((*settings).clone()).unwrap(),
+            memories,
+        )
+        .unwrap();
+
+        let outcome = orchestrator
+            .gate_transcript("gate-reasoning-session", "今天天气怎么样？")
+            .await;
+        server.abort();
+
+        assert_eq!(outcome.decision, GateDecision::Respond);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["reasoning"], json!({"effort": "none"}));
+    }
+
     #[test]
     fn reads_responses_text_delta() {
         assert_eq!(
@@ -1266,6 +1446,52 @@ mod tests {
         assert!(should_retry_empty_agent_response(false, 0, 6));
         assert!(!should_retry_empty_agent_response(true, 0, 6));
         assert!(!should_retry_empty_agent_response(false, 5, 6));
+    }
+
+    #[test]
+    fn recovers_empty_agent_attempts_and_max_token_incompletes() {
+        assert_eq!(
+            agent_recovery_reason("", false, Some("max_output_tokens")),
+            Some("max_output_tokens")
+        );
+        assert_eq!(agent_recovery_reason("", false, None), Some("empty_output"));
+    }
+
+    #[test]
+    fn does_not_recover_partial_or_non_token_incomplete_agent_attempts() {
+        assert_eq!(
+            agent_recovery_reason("已经有回复", false, Some("max_output_tokens")),
+            None
+        );
+        assert_eq!(
+            agent_recovery_reason("", true, Some("max_output_tokens")),
+            None
+        );
+        assert_eq!(
+            agent_recovery_reason("", false, Some("content_filter")),
+            None
+        );
+    }
+
+    #[test]
+    fn reads_incomplete_reason_from_vllm_completed_event() {
+        assert_eq!(
+            responses_incomplete_reason(&json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"}
+                }
+            })),
+            Some("max_output_tokens")
+        );
+        assert_eq!(
+            responses_incomplete_reason(&json!({
+                "type": "response.completed",
+                "response": {"status": "completed", "incomplete_details": null}
+            })),
+            None
+        );
     }
 
     #[test]
@@ -1411,6 +1637,87 @@ mod tests {
             vec![
                 ("server.agent.first_delta".to_owned(), 1),
                 ("server.tts.first_audio".to_owned(), 1),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn max_token_incomplete_recovers_once_without_reasoning_and_records_success() {
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let app = axum::Router::new()
+            .route("/v1/responses", axum::routing::post(recovery_agent_stub))
+            .with_state(Arc::clone(&requests));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings = Settings::from_env().unwrap();
+        settings.data_dir = directory.path().join("data");
+        settings.skills_dir = directory.path().join("skills");
+        settings.agent_backend = "openai".to_owned();
+        settings.agent_url = format!("http://{address}/v1/responses");
+        settings.tts_backend = "mock".to_owned();
+        tokio::fs::create_dir_all(&settings.skills_dir)
+            .await
+            .unwrap();
+        let settings = Arc::new(settings);
+        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        context.touch_session("recovery-session").await.unwrap();
+        let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
+            .await
+            .unwrap();
+        let orchestrator = AgentOrchestrator::new(
+            Arc::clone(&settings),
+            context.clone(),
+            ModelAdapters::new((*settings).clone()).unwrap(),
+            memories,
+        )
+        .unwrap();
+        let (sender, mut receiver) = mpsc::channel(128);
+        let drain = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+
+        orchestrator
+            .run_turn(
+                "recovery-user",
+                "recovery-session",
+                &sender,
+                Vec::new(),
+                Vec::new(),
+                Some("请简单回答。".to_owned()),
+                "recovery-response",
+            )
+            .await
+            .unwrap();
+        drop(sender);
+        drain.await.unwrap();
+        server.abort();
+
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0]["reasoning"], json!({"effort": "none"}));
+            assert_eq!(requests[1]["reasoning"], json!({"effort": "none"}));
+            assert_eq!(requests[0]["input"], requests[1]["input"]);
+        }
+
+        let recovery_events: Vec<String> = sqlx::query_scalar(
+            "SELECT kind FROM events
+             WHERE json_extract(payload, '$.response_id') = ?
+               AND kind LIKE 'server.agent.recovery.%'
+             ORDER BY id",
+        )
+        .bind("recovery-response")
+        .fetch_all(context.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            recovery_events,
+            vec![
+                "server.agent.recovery.started".to_owned(),
+                "server.agent.recovery.completed".to_owned(),
             ]
         );
     }

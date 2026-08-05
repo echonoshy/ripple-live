@@ -57,6 +57,29 @@ pub fn is_stop_command(text: &str) -> bool {
         "不用说了",
         "先别说",
         "安静",
+        "停下来",
+        "停下来吧",
+        "停下吧",
+        "先停下来",
+        "先停下吧",
+        "可以停了",
+        "可以停下了",
+        "可以停下来",
+        "可以停下来了",
+        "别再说了",
+        "不要再说了",
+        "不要继续说了",
+        "不用继续说了",
+        "停止回复",
+        "停止回答",
+        "进入静默状态",
+        "进入静默模式",
+        "进入静默",
+        "进去静默状态",
+        "进去静默模式",
+        "进去静默",
+        "静默状态",
+        "静默模式",
     ]
     .iter()
     .any(|candidate| command == *candidate)
@@ -161,5 +184,56 @@ mod tests {
             parse_classifier_decision(r#"{\"decision\":\"complete\",\"confidence\":0.75}"#),
             Some((EndpointDecision::Complete, 0.75))
         );
+    }
+
+    #[test]
+    fn silent_mode_phrases_are_handled_as_stop_commands() {
+        for transcript in [
+            "进入静默状态",
+            "进入静默模式",
+            "进入静默",
+            "进去静默状态",
+            "进去静默模式",
+            "进去静默",
+            "静默状态",
+            "静默模式",
+        ] {
+            assert!(is_stop_command(transcript), "{transcript}");
+        }
+    }
+
+    #[test]
+    fn explicit_stop_variants_are_handled_as_stop_commands() {
+        for transcript in [
+            "停下来",
+            "停下来吧",
+            "停下吧",
+            "先停下来",
+            "先停下吧",
+            "可以停了",
+            "可以停下了",
+            "可以停下来",
+            "可以停下来了",
+            "别再说了",
+            "不要再说了",
+            "不要继续说了",
+            "不用继续说了",
+            "停止回复",
+            "停止回答",
+        ] {
+            assert!(is_stop_command(transcript), "{transcript}");
+        }
+    }
+
+    #[test]
+    fn stop_words_inside_larger_requests_are_not_intercepted() {
+        for transcript in [
+            "停下来之后继续讲",
+            "停止计时",
+            "别再说刚才那件事",
+            "可以停在这里吗",
+        ] {
+            assert!(!is_stop_command(transcript), "{transcript}");
+        }
     }
 }
