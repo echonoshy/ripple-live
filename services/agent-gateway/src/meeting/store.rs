@@ -11,8 +11,8 @@ use uuid::Uuid;
 use super::storage::VerifiedLegacyFinalization;
 use super::types::{
     ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_CHUNK_SEQUENCE,
-    MAX_MEETING_DURATION_MS, Meeting, MeetingState, MeetingTodo, ProcessingStage,
-    StoredChunkMetadata, TranscriptJobClaim, TranscriptSegment,
+    MAX_MEETING_DURATION_MS, Meeting, MeetingArtifact, MeetingState, MeetingTodo, ProcessingStage,
+    RetryStageOutcome, StoredChunkMetadata, TranscriptJobClaim, TranscriptSegment,
 };
 
 #[derive(Clone)]
@@ -671,6 +671,225 @@ impl MeetingStore {
         Ok(())
     }
 
+    pub async fn final_transcript(
+        &self,
+        meeting_id: &str,
+    ) -> anyhow::Result<Vec<TranscriptSegment>> {
+        let segments = self.transcript(meeting_id).await?;
+        if segments.iter().any(|segment| segment.provisional) {
+            bail!("meeting final transcript is not complete");
+        }
+        Ok(segments)
+    }
+
+    pub async fn claim_organization_job(
+        &self,
+        meeting_id: &str,
+    ) -> anyhow::Result<TranscriptJobClaim> {
+        claim_processing_job(&self.pool, meeting_id, "organization").await
+    }
+
+    pub async fn heartbeat_organization_job(
+        &self,
+        meeting_id: &str,
+        attempt: i64,
+    ) -> anyhow::Result<bool> {
+        heartbeat_processing_job(&self.pool, meeting_id, "organization", attempt).await
+    }
+
+    pub async fn fail_organization_job(
+        &self,
+        meeting_id: &str,
+        attempt: i64,
+    ) -> anyhow::Result<()> {
+        const SAFE_ERROR: &str = "meeting organization failed";
+        let now = unix_time();
+        let mut transaction = self.pool.begin().await?;
+        let failed = sqlx::query(
+            "UPDATE meeting_processing_jobs
+             SET status = 'failed', diagnostic_error = ?, updated_at = ?
+             WHERE meeting_id = ? AND stage = 'organization'
+               AND status = 'running' AND attempt = ?",
+        )
+        .bind(SAFE_ERROR)
+        .bind(now)
+        .bind(meeting_id)
+        .bind(attempt)
+        .execute(&mut *transaction)
+        .await?;
+        if failed.rows_affected() == 1 {
+            sqlx::query(
+                "UPDATE meetings SET error_stage = 'organization', error_message = ?, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(SAFE_ERROR)
+            .bind(now)
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn complete_organization_job(
+        &self,
+        meeting_id: &str,
+        attempt: i64,
+        artifact: &MeetingArtifact,
+    ) -> anyhow::Result<()> {
+        validate_meeting_artifact(artifact)?;
+        let now = unix_time();
+        let mut transaction = self.pool.begin().await?;
+        ensure_meeting_exists(&mut transaction, meeting_id).await?;
+        let completed = sqlx::query(
+            "UPDATE meeting_processing_jobs
+             SET status = 'completed', diagnostic_error = NULL, updated_at = ?
+             WHERE meeting_id = ? AND stage = 'organization'
+               AND status = 'running' AND attempt = ?",
+        )
+        .bind(now)
+        .bind(meeting_id)
+        .bind(attempt)
+        .execute(&mut *transaction)
+        .await?;
+        if completed.rows_affected() != 1 {
+            bail!("organization job was not running");
+        }
+        sqlx::query(
+            "UPDATE meetings
+             SET title = ?, summary = ?, state = 'completed',
+                 error_stage = NULL, error_message = NULL, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(artifact.title.trim())
+        .bind(artifact.summary.trim())
+        .bind(now)
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM meeting_todos WHERE meeting_id = ?")
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+        for todo in &artifact.todos {
+            sqlx::query(
+                "INSERT INTO meeting_todos(
+                    meeting_id, id, text, completed, source_start_ms, source_end_ms,
+                    created_at, updated_at
+                 ) VALUES (?, ?, ?, 0, ?, ?, ?, ?)",
+            )
+            .bind(meeting_id)
+            .bind(Uuid::new_v4().to_string())
+            .bind(todo.text.trim())
+            .bind(todo.source_start_ms)
+            .bind(todo.source_end_ms)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn retry_stage_owned(
+        &self,
+        user_id: &str,
+        meeting_id: &str,
+        stage: ProcessingStage,
+    ) -> anyhow::Result<RetryStageOutcome> {
+        if stage == ProcessingStage::Upload {
+            return Ok(RetryStageOutcome::Unavailable);
+        }
+        let stage_name = match stage {
+            ProcessingStage::Transcript => "transcript",
+            ProcessingStage::Organization => "organization",
+            ProcessingStage::Upload => unreachable!(),
+        };
+        let now = unix_time();
+        let stale_before = now - 900.0;
+        let mut transaction = self.pool.begin().await?;
+        let meeting =
+            sqlx::query("SELECT final_audio_path FROM meetings WHERE id = ? AND user_id = ?")
+                .bind(meeting_id)
+                .bind(user_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        let Some(meeting) = meeting else {
+            transaction.rollback().await?;
+            return Ok(RetryStageOutcome::NotFound);
+        };
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM meeting_processing_jobs WHERE meeting_id = ? AND stage = ?",
+        )
+        .bind(meeting_id)
+        .bind(stage_name)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if status.as_deref() == Some("completed") {
+            transaction.rollback().await?;
+            return Ok(RetryStageOutcome::Completed);
+        }
+        if stage == ProcessingStage::Transcript
+            && meeting
+                .get::<Option<String>, _>("final_audio_path")
+                .is_none()
+        {
+            transaction.rollback().await?;
+            return Ok(RetryStageOutcome::Unavailable);
+        }
+        if stage == ProcessingStage::Organization {
+            let transcript_complete = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM meeting_processing_jobs
+                 WHERE meeting_id = ? AND stage = 'transcript' AND status = 'completed'",
+            )
+            .bind(meeting_id)
+            .fetch_one(&mut *transaction)
+            .await?
+                == 1;
+            if !transcript_complete {
+                transaction.rollback().await?;
+                return Ok(RetryStageOutcome::Unavailable);
+            }
+        }
+        let busy = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM meeting_processing_jobs
+             WHERE meeting_id = ? AND stage = ? AND status = 'running' AND updated_at >= ?",
+        )
+        .bind(meeting_id)
+        .bind(stage_name)
+        .bind(stale_before)
+        .fetch_one(&mut *transaction)
+        .await?
+            == 1;
+        if busy {
+            transaction.rollback().await?;
+            return Ok(RetryStageOutcome::Busy);
+        }
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
+             VALUES (?, ?, 'pending', ?)
+             ON CONFLICT(meeting_id, stage) DO UPDATE SET
+                status = 'pending', diagnostic_error = NULL, updated_at = excluded.updated_at",
+        )
+        .bind(meeting_id)
+        .bind(stage_name)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE meetings SET error_stage = NULL, error_message = NULL, state = 'processing', updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(now)
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(RetryStageOutcome::Queued)
+    }
+
     pub async fn claim_finalization(
         &self,
         user_id: &str,
@@ -1297,6 +1516,83 @@ fn validate_transcript_segments(
     Ok(())
 }
 
+fn validate_meeting_artifact(artifact: &MeetingArtifact) -> anyhow::Result<()> {
+    if artifact.title.trim().is_empty() || artifact.todos.len() > 50 {
+        bail!("invalid meeting artifact title or todo count");
+    }
+    for todo in &artifact.todos {
+        if todo.text.trim().is_empty() {
+            bail!("meeting todo text must not be empty");
+        }
+        match (todo.source_start_ms, todo.source_end_ms) {
+            (None, None) => {}
+            (Some(start), Some(end)) if start >= 0 && end > start => {}
+            _ => bail!("meeting todo source timing must be a valid complete range"),
+        }
+    }
+    Ok(())
+}
+
+async fn claim_processing_job(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    stage: &str,
+) -> anyhow::Result<TranscriptJobClaim> {
+    let now = unix_time();
+    let stale_before = now - 900.0;
+    let claimed = sqlx::query(
+        "UPDATE meeting_processing_jobs
+         SET status = 'running', attempt = attempt + 1,
+             diagnostic_error = NULL, updated_at = ?
+         WHERE meeting_id = ? AND stage = ?
+           AND (status IN ('pending', 'failed')
+                OR (status = 'running' AND updated_at < ?))
+         RETURNING attempt",
+    )
+    .bind(now)
+    .bind(meeting_id)
+    .bind(stage)
+    .bind(stale_before)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(row) = claimed {
+        return Ok(TranscriptJobClaim::Claimed {
+            attempt: row.get("attempt"),
+        });
+    }
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM meeting_processing_jobs WHERE meeting_id = ? AND stage = ?",
+    )
+    .bind(meeting_id)
+    .bind(stage)
+    .fetch_optional(pool)
+    .await?;
+    Ok(match status.as_deref() {
+        Some("completed") => TranscriptJobClaim::Completed,
+        Some("running") | Some("pending") | Some("failed") => TranscriptJobClaim::Busy,
+        _ => TranscriptJobClaim::Missing,
+    })
+}
+
+async fn heartbeat_processing_job(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    stage: &str,
+    attempt: i64,
+) -> anyhow::Result<bool> {
+    let updated = sqlx::query(
+        "UPDATE meeting_processing_jobs SET updated_at = ?
+         WHERE meeting_id = ? AND stage = ? AND status = 'running' AND attempt = ?",
+    )
+    .bind(unix_time())
+    .bind(meeting_id)
+    .bind(stage)
+    .bind(attempt)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
 async fn ensure_meeting_exists(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     meeting_id: &str,
@@ -1383,8 +1679,9 @@ mod tests {
     use crate::{
         context::ContextStore,
         meeting::types::{
-            ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_DURATION_MS, MeetingState,
-            MeetingTodo, ProcessingStage, TranscriptSegment,
+            ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_DURATION_MS,
+            MeetingArtifact, MeetingState, MeetingTodo, MeetingTodoDraft, ProcessingStage,
+            RetryStageOutcome, TranscriptJobClaim, TranscriptSegment,
         },
     };
 
@@ -2287,8 +2584,6 @@ mod tests {
 
     #[tokio::test]
     async fn stale_transcript_attempt_cannot_finish_a_reclaimed_job() -> anyhow::Result<()> {
-        use crate::meeting::types::TranscriptJobClaim;
-
         let (_directory, context, store) = test_store().await;
         let meeting = store.create("user-a", "job-fence", 100.0).await?;
         sqlx::query(
@@ -2318,6 +2613,163 @@ mod tests {
         .fetch_one(&context.pool_clone())
         .await?;
         assert_eq!(state, ("running".to_owned(), 2));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn organization_completion_is_atomic_and_fenced_by_attempt() -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store.create("user-a", "organization-atomic", 100.0).await?;
+        store
+            .replace_artifact(
+                &meeting.id,
+                "旧标题",
+                "旧摘要",
+                &[MeetingTodo {
+                    id: "old".to_owned(),
+                    text: "旧待办".to_owned(),
+                    completed: false,
+                    source_start_ms: None,
+                    source_end_ms: None,
+                }],
+            )
+            .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, attempt, status, updated_at)
+             VALUES (?, 'organization', 2, 'running', 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER fail_meeting_todo_insert BEFORE INSERT ON meeting_todos
+             BEGIN SELECT RAISE(ABORT, 'injected'); END",
+        )
+        .execute(&context.pool_clone())
+        .await?;
+        let artifact = MeetingArtifact {
+            title: "新标题".to_owned(),
+            summary: "新摘要".to_owned(),
+            todos: vec![MeetingTodoDraft {
+                text: "新待办".to_owned(),
+                source_start_ms: None,
+                source_end_ms: None,
+            }],
+        };
+
+        assert!(
+            store
+                .complete_organization_job(&meeting.id, 2, &artifact)
+                .await
+                .is_err()
+        );
+        let unchanged = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(unchanged.title.as_deref(), Some("旧标题"));
+        assert_eq!(unchanged.todos[0].text, "旧待办");
+        let job: (String, i64) = sqlx::query_as(
+            "SELECT status, attempt FROM meeting_processing_jobs
+             WHERE meeting_id = ? AND stage = 'organization'",
+        )
+        .bind(&meeting.id)
+        .fetch_one(&context.pool_clone())
+        .await?;
+        assert_eq!(job, ("running".to_owned(), 2));
+        assert!(
+            store
+                .complete_organization_job(&meeting.id, 1, &artifact)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retry_stage_is_owned_idempotent_single_flight_and_recovers_stale_jobs()
+    -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store.create("user-a", "retry-stages", 100.0).await?;
+        sqlx::query("UPDATE meetings SET final_audio_path = ?, final_audio_size_bytes = 1, final_audio_checksum = 'sum', state = 'processing' WHERE id = ?")
+            .bind(format!("{}/recording.m4a", meeting.id))
+            .bind(&meeting.id)
+            .execute(&context.pool_clone())
+            .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, attempt, status, updated_at)
+             VALUES (?, 'transcript', 1, 'running', 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        assert_eq!(
+            store
+                .retry_stage_owned("user-b", &meeting.id, ProcessingStage::Transcript)
+                .await?,
+            RetryStageOutcome::NotFound
+        );
+        assert_eq!(
+            store
+                .retry_stage_owned("user-a", &meeting.id, ProcessingStage::Transcript)
+                .await?,
+            RetryStageOutcome::Queued
+        );
+        assert_eq!(
+            store.claim_transcript_job(&meeting.id).await?,
+            TranscriptJobClaim::Claimed { attempt: 2 }
+        );
+        assert_eq!(
+            store
+                .retry_stage_owned("user-a", &meeting.id, ProcessingStage::Transcript)
+                .await?,
+            RetryStageOutcome::Busy
+        );
+        store.complete_transcript_job(&meeting.id, 2, &[]).await?;
+        assert_eq!(
+            store
+                .retry_stage_owned("user-a", &meeting.id, ProcessingStage::Transcript)
+                .await?,
+            RetryStageOutcome::Completed
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_retry_is_idempotent_even_when_legacy_prerequisites_are_missing()
+    -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let transcript = store
+            .create("user-a", "completed-transcript", 100.0)
+            .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
+             VALUES (?, 'transcript', 'completed', 1)",
+        )
+        .bind(&transcript.id)
+        .execute(&context.pool_clone())
+        .await?;
+        assert_eq!(
+            store
+                .retry_stage_owned("user-a", &transcript.id, ProcessingStage::Transcript)
+                .await?,
+            RetryStageOutcome::Completed
+        );
+
+        let organization = store
+            .create("user-a", "completed-organization", 100.0)
+            .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
+             VALUES (?, 'organization', 'completed', 1)",
+        )
+        .bind(&organization.id)
+        .execute(&context.pool_clone())
+        .await?;
+        assert_eq!(
+            store
+                .retry_stage_owned("user-a", &organization.id, ProcessingStage::Organization)
+                .await?,
+            RetryStageOutcome::Completed
+        );
         Ok(())
     }
 }

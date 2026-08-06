@@ -5,12 +5,14 @@ use std::{
 };
 
 use anyhow::{Context, bail};
+use serde::Deserialize;
 use tokio::{sync::Semaphore, task::JoinHandle};
 
 use crate::adapters::ModelAdapters;
 
 use super::types::{
-    MAX_MEETING_CHUNK_SEQUENCE, StoredChunkMetadata, TranscriptJobClaim, TranscriptSegment,
+    MAX_MEETING_CHUNK_SEQUENCE, MeetingArtifact, MeetingTodoDraft, StoredChunkMetadata,
+    TranscriptJobClaim, TranscriptSegment,
 };
 use super::{storage::MeetingStorage, store::MeetingStore};
 
@@ -25,6 +27,7 @@ const VAD_MAX_SILENCE_MS: i64 = 500;
 const VAD_MAX_SPAN_MS: i64 = 20_000;
 const VAD_SPAN_OVERLAP_MS: i64 = 1_000;
 const MAX_DECODE_PADDING_MS: usize = 100;
+const ORGANIZATION_SECTION_CHARS: usize = 12_000;
 
 #[derive(Clone)]
 pub struct MeetingProcessor {
@@ -122,14 +125,145 @@ impl MeetingProcessor {
     ) -> JoinHandle<()> {
         let processor = self.clone();
         tokio::spawn(async move {
-            if processor
+            match processor
                 .finalize_transcript(&meeting_id, &relative_path)
                 .await
-                .is_err()
             {
-                tracing::warn!(meeting_id, "meeting final transcription failed");
+                Ok(Some(_)) => {
+                    if processor.organize_meeting(&meeting_id).await.is_err() {
+                        tracing::warn!(meeting_id, "meeting organization failed");
+                    }
+                }
+                Ok(None) => {
+                    if processor.organize_meeting(&meeting_id).await.is_err() {
+                        tracing::warn!(meeting_id, "meeting organization failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(meeting_id, "meeting final transcription failed");
+                }
             }
         })
+    }
+
+    pub fn spawn_organize_meeting(&self, meeting_id: String) -> JoinHandle<()> {
+        let processor = self.clone();
+        tokio::spawn(async move {
+            if processor.organize_meeting(&meeting_id).await.is_err() {
+                tracing::warn!(meeting_id, "meeting organization failed");
+            }
+        })
+    }
+
+    pub async fn organize_meeting(
+        &self,
+        meeting_id: &str,
+    ) -> anyhow::Result<Option<MeetingArtifact>> {
+        let claim = self.store.claim_organization_job(meeting_id).await?;
+        let TranscriptJobClaim::Claimed { attempt } = claim else {
+            return Ok(None);
+        };
+        match self.process_meeting_organization(meeting_id, attempt).await {
+            Ok(artifact) => {
+                if let Err(error) = self
+                    .store
+                    .complete_organization_job(meeting_id, attempt, &artifact)
+                    .await
+                {
+                    self.store
+                        .fail_organization_job(meeting_id, attempt)
+                        .await?;
+                    return Err(error).context("complete meeting organization job");
+                }
+                Ok(Some(artifact))
+            }
+            Err(error) => {
+                self.store
+                    .fail_organization_job(meeting_id, attempt)
+                    .await
+                    .context("record meeting organization failure")?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn process_meeting_organization(
+        &self,
+        meeting_id: &str,
+        attempt: i64,
+    ) -> anyhow::Result<MeetingArtifact> {
+        let transcript = self
+            .store
+            .final_transcript(meeting_id)
+            .await
+            .context("load final meeting transcript")?;
+        if transcript.is_empty() {
+            return Ok(MeetingArtifact {
+                title: "未检测到语音内容".to_owned(),
+                summary: "录音中未检测到可转写的语音内容。".to_owned(),
+                todos: Vec::new(),
+            });
+        }
+        let sections = meeting_organization_sections(&transcript, ORGANIZATION_SECTION_CHARS)?;
+        let organized_input = if sections.len() == 1 {
+            sections[0].clone()
+        } else {
+            let mut summaries = Vec::with_capacity(sections.len());
+            for section in sections {
+                if !self
+                    .store
+                    .heartbeat_organization_job(meeting_id, attempt)
+                    .await?
+                {
+                    bail!("organization job lease was lost");
+                }
+                summaries.push(self.adapters.summarize_meeting_section(&section).await?);
+            }
+            summaries
+                .into_iter()
+                .enumerate()
+                .map(|(index, summary)| format!("分段摘要 {}:\n{}", index + 1, summary))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+        if !self
+            .store
+            .heartbeat_organization_job(meeting_id, attempt)
+            .await?
+        {
+            bail!("organization job lease was lost");
+        }
+        let output = self
+            .adapters
+            .organize_meeting_artifact(&organized_input)
+            .await?;
+        if !output.text.trim().is_empty() || output.function_calls.len() != 1 {
+            bail!("meeting organization expected exactly one function call and no text");
+        }
+        let call = &output.function_calls[0];
+        if call.name != "save_meeting_artifact" {
+            bail!("meeting organization returned unexpected function");
+        }
+        let artifact = parse_meeting_artifact(&call.arguments)?;
+        let timeline_start = transcript
+            .iter()
+            .map(|segment| segment.start_ms)
+            .min()
+            .context("final meeting transcript was empty")?;
+        let timeline_end = transcript
+            .iter()
+            .map(|segment| segment.end_ms)
+            .max()
+            .context("final meeting transcript was empty")?;
+        if artifact.todos.iter().any(|todo| {
+            matches!(
+                (todo.source_start_ms, todo.source_end_ms),
+                (Some(start), Some(end)) if start < timeline_start || end > timeline_end
+            )
+        }) {
+            bail!("meeting todo source range is outside the transcript timeline");
+        }
+        Ok(artifact)
     }
 
     pub async fn transcribe_chunk(
@@ -330,6 +464,125 @@ impl MeetingProcessor {
     fn with_retry_delays_for_test(mut self, delays: Vec<Duration>) -> Self {
         self.retry_delays = Arc::new(delays);
         self
+    }
+}
+
+pub fn meeting_organization_sections(
+    segments: &[TranscriptSegment],
+    maximum_chars: usize,
+) -> anyhow::Result<Vec<String>> {
+    if maximum_chars == 0 || segments.iter().any(|segment| segment.provisional) {
+        bail!("invalid meeting organization input");
+    }
+    let mut sections = Vec::new();
+    let mut current = String::new();
+    for segment in segments {
+        if segment.start_ms < 0 || segment.end_ms <= segment.start_ms {
+            bail!("invalid meeting transcript timing");
+        }
+        let prefix = format!("[{}-{}] ", segment.start_ms, segment.end_ms);
+        let available = maximum_chars
+            .checked_sub(prefix.chars().count())
+            .filter(|available| *available > 0)
+            .context("meeting organization character bound is too small")?;
+        let chars = segment.text.trim().chars().collect::<Vec<_>>();
+        if chars.is_empty() {
+            continue;
+        }
+        for chunk in chars.chunks(available) {
+            let line = format!("{}{}", prefix, chunk.iter().collect::<String>());
+            let separator = usize::from(!current.is_empty());
+            if !current.is_empty()
+                && current.chars().count() + separator + line.chars().count() > maximum_chars
+            {
+                sections.push(std::mem::take(&mut current));
+            }
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(&line);
+        }
+    }
+    if !current.is_empty() {
+        sections.push(current);
+    }
+    Ok(sections)
+}
+
+pub fn parse_meeting_artifact(arguments: &str) -> anyhow::Result<MeetingArtifact> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawArtifact {
+        title: String,
+        summary: String,
+        todos: Vec<RawTodo>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawTodo {
+        text: String,
+        source_start_ms: serde_json::Value,
+        source_end_ms: serde_json::Value,
+    }
+
+    let raw: RawArtifact =
+        serde_json::from_str(arguments).context("meeting artifact arguments were invalid JSON")?;
+    let artifact = MeetingArtifact {
+        title: raw.title,
+        summary: raw.summary,
+        todos: raw
+            .todos
+            .into_iter()
+            .map(|todo| {
+                Ok(MeetingTodoDraft {
+                    text: todo.text,
+                    source_start_ms: required_nullable_i64(todo.source_start_ms)?,
+                    source_end_ms: required_nullable_i64(todo.source_end_ms)?,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    };
+    if artifact.title.trim().is_empty() || artifact.todos.len() > 50 {
+        bail!("meeting artifact title or todo count is invalid");
+    }
+    for MeetingTodoDraft {
+        text,
+        source_start_ms,
+        source_end_ms,
+    } in &artifact.todos
+    {
+        if text.trim().is_empty() {
+            bail!("meeting todo text is empty");
+        }
+        match (*source_start_ms, *source_end_ms) {
+            (None, None) => {}
+            (Some(start), Some(end)) if start >= 0 && end > start => {}
+            _ => bail!("meeting todo source range is invalid"),
+        }
+    }
+    Ok(MeetingArtifact {
+        title: artifact.title.trim().to_owned(),
+        summary: artifact.summary.trim().to_owned(),
+        todos: artifact
+            .todos
+            .into_iter()
+            .map(|todo| MeetingTodoDraft {
+                text: todo.text.trim().to_owned(),
+                ..todo
+            })
+            .collect(),
+    })
+}
+
+fn required_nullable_i64(value: serde_json::Value) -> anyhow::Result<Option<i64>> {
+    if value.is_null() {
+        Ok(None)
+    } else {
+        value
+            .as_i64()
+            .map(Some)
+            .context("meeting todo source range must be an integer or null")
     }
 }
 
@@ -603,7 +856,8 @@ mod tests {
     use std::{path::Path, time::Duration};
 
     use super::{
-        ContinuityGroup, MeetingProcessor, continuity_windows, detect_speech_spans,
+        ContinuityGroup, MeetingProcessor, ORGANIZATION_SECTION_CHARS, continuity_windows,
+        detect_speech_spans, meeting_organization_sections, parse_meeting_artifact,
         reconcile_overlap, window_ranges,
     };
     use crate::{
@@ -1329,6 +1583,384 @@ mod tests {
         second.await?;
 
         assert_eq!(probe.attempts(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn meeting_organization_sections_preserve_ranges_and_character_bound() {
+        let segments = vec![
+            TranscriptSegment {
+                id: 0,
+                start_ms: 0,
+                end_ms: 1_000,
+                text: "alpha".to_owned(),
+                provisional: false,
+            },
+            TranscriptSegment {
+                id: 1,
+                start_ms: 1_000,
+                end_ms: 2_000,
+                text: "beta".to_owned(),
+                provisional: false,
+            },
+        ];
+
+        let sections = meeting_organization_sections(&segments, 18).unwrap();
+
+        assert_eq!(sections, vec!["[0-1000] alpha", "[1000-2000] beta"]);
+        assert!(sections.iter().all(|section| section.chars().count() <= 18));
+    }
+
+    #[test]
+    fn meeting_organization_rejects_invalid_structured_outputs() {
+        assert!(parse_meeting_artifact("plain text").is_err());
+        assert!(parse_meeting_artifact(r#"{"title":"","summary":"x","todos":[]}"#).is_err());
+        assert!(parse_meeting_artifact(
+            r#"{"title":"t","summary":"s","todos":[{"text":"x","source_start_ms":1,"source_end_ms":null}]}"#
+        )
+        .is_err());
+        assert!(
+            parse_meeting_artifact(r#"{"title":"t","summary":"s","todos":[{"text":"x"}]}"#)
+                .is_err()
+        );
+
+        let too_many = serde_json::json!({
+            "title": "t",
+            "summary": "s",
+            "todos": (0..51).map(|index| serde_json::json!({"text": format!("todo-{index}"), "source_start_ms": null, "source_end_ms": null})).collect::<Vec<_>>()
+        });
+        assert!(parse_meeting_artifact(&too_many.to_string()).is_err());
+    }
+
+    #[tokio::test]
+    async fn meeting_organization_uses_forced_function_and_never_global_todos() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let context = ContextStore::open(&directory.path().join("meeting.sqlite3")).await?;
+        let store = MeetingStore::new(context.pool_clone());
+        store.initialize().await?;
+        let (meeting, _) = store
+            .create_with_status("user-a", "meeting-organization", 1.0)
+            .await?;
+        store.enqueue_transcript_job(&meeting.id).await?;
+        let crate::meeting::types::TranscriptJobClaim::Claimed { attempt } =
+            store.claim_transcript_job(&meeting.id).await?
+        else {
+            anyhow::bail!("transcript job was not claimable");
+        };
+        store
+            .complete_transcript_job(
+                &meeting.id,
+                attempt,
+                &[TranscriptSegment {
+                    id: 0,
+                    start_ms: 0,
+                    end_ms: 2_000,
+                    text: "下周发布，张三准备验收清单".to_owned(),
+                    provisional: false,
+                }],
+            )
+            .await?;
+        let (adapters, probe) = ModelAdapters::with_meeting_organization_test_results(
+            Settings::from_env()?,
+            vec![Ok(crate::adapters::ResponsesOutput {
+                text: String::new(),
+                function_calls: vec![crate::adapters::FunctionCall {
+                    call_id: "call-1".to_owned(),
+                    name: "save_meeting_artifact".to_owned(),
+                    arguments: r#"{"title":"发布准备会","summary":"确认下周发布。","todos":[{"text":"张三准备验收清单","source_start_ms":0,"source_end_ms":2000}]}"#.to_owned(),
+                }],
+                output_items: Vec::new(),
+            })],
+        )?;
+        let storage = MeetingStorage::new(
+            directory.path().join("audio"),
+            2 * 1024 * 1024,
+            "/usr/bin/ffmpeg".into(),
+        );
+        let processor = MeetingProcessor::new(store.clone(), storage, adapters, 1)?;
+
+        let artifact = processor.organize_meeting(&meeting.id).await?.unwrap();
+
+        assert_eq!(artifact.title, "发布准备会");
+        let request = probe.requests().pop().unwrap();
+        assert_eq!(request["reasoning"]["effort"], "none");
+        assert_eq!(request["tools"][0]["name"], "save_meeting_artifact");
+        assert_eq!(
+            request["tool_choice"],
+            serde_json::json!({"type":"function","name":"save_meeting_artifact"})
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM todos")
+                .fetch_one(&context.pool_clone())
+                .await?,
+            0
+        );
+        let detail = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(detail.title.as_deref(), Some("发布准备会"));
+        assert_eq!(detail.todos.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn meeting_organization_rejects_todo_range_outside_final_transcript() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let context = ContextStore::open(&directory.path().join("meeting.sqlite3")).await?;
+        let store = MeetingStore::new(context.pool_clone());
+        store.initialize().await?;
+        let (meeting, _) = store
+            .create_with_status("user-a", "meeting-organization-range", 1.0)
+            .await?;
+        store.enqueue_transcript_job(&meeting.id).await?;
+        let crate::meeting::types::TranscriptJobClaim::Claimed { attempt } =
+            store.claim_transcript_job(&meeting.id).await?
+        else {
+            anyhow::bail!("transcript job was not claimable");
+        };
+        store
+            .complete_transcript_job(
+                &meeting.id,
+                attempt,
+                &[TranscriptSegment {
+                    id: 0,
+                    start_ms: 0,
+                    end_ms: 2_000,
+                    text: "下周发布".to_owned(),
+                    provisional: false,
+                }],
+            )
+            .await?;
+        let (adapters, _) = ModelAdapters::with_meeting_organization_test_results(
+            Settings::from_env()?,
+            vec![Ok(crate::adapters::ResponsesOutput {
+                text: String::new(),
+                function_calls: vec![crate::adapters::FunctionCall {
+                    call_id: "call-range".to_owned(),
+                    name: "save_meeting_artifact".to_owned(),
+                    arguments: r#"{"title":"发布会","summary":"发布","todos":[{"text":"准备发布","source_start_ms":9000,"source_end_ms":10000}]}"#.to_owned(),
+                }],
+                output_items: Vec::new(),
+            })],
+        )?;
+        let processor = MeetingProcessor::new(
+            store.clone(),
+            MeetingStorage::new(
+                directory.path().join("audio"),
+                2 * 1024 * 1024,
+                "/usr/bin/ffmpeg".into(),
+            ),
+            adapters,
+            1,
+        )?;
+
+        assert!(processor.organize_meeting(&meeting.id).await.is_err());
+        let detail = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(detail.title, None);
+        assert_eq!(
+            detail.error_stage,
+            Some(crate::meeting::types::ProcessingStage::Organization)
+        );
+        assert_eq!(detail.transcript.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn meeting_organization_summarizes_bounded_sections_before_final_call()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let context = ContextStore::open(&directory.path().join("meeting.sqlite3")).await?;
+        let store = MeetingStore::new(context.pool_clone());
+        store.initialize().await?;
+        let (meeting, _) = store.create_with_status("user-a", "hierarchy", 1.0).await?;
+        store.enqueue_transcript_job(&meeting.id).await?;
+        let crate::meeting::types::TranscriptJobClaim::Claimed { attempt } =
+            store.claim_transcript_job(&meeting.id).await?
+        else {
+            anyhow::bail!("transcript job was not claimable");
+        };
+        store
+            .complete_transcript_job(
+                &meeting.id,
+                attempt,
+                &[TranscriptSegment {
+                    id: 0,
+                    start_ms: 0,
+                    end_ms: 10_000,
+                    text: "会".repeat(ORGANIZATION_SECTION_CHARS),
+                    provisional: false,
+                }],
+            )
+            .await?;
+        let summary = |text: &str| crate::adapters::ResponsesOutput {
+            text: text.to_owned(),
+            function_calls: Vec::new(),
+            output_items: Vec::new(),
+        };
+        let final_output = crate::adapters::ResponsesOutput {
+            text: String::new(),
+            function_calls: vec![crate::adapters::FunctionCall {
+                call_id: "final".to_owned(),
+                name: "save_meeting_artifact".to_owned(),
+                arguments: r#"{"title":"长会","summary":"分段完成","todos":[]}"#.to_owned(),
+            }],
+            output_items: Vec::new(),
+        };
+        let (adapters, probe) = ModelAdapters::with_meeting_organization_test_results(
+            Settings::from_env()?,
+            vec![
+                Ok(summary("第一段")),
+                Ok(summary("第二段")),
+                Ok(final_output),
+            ],
+        )?;
+        let processor = MeetingProcessor::new(
+            store,
+            MeetingStorage::new(
+                directory.path().join("audio"),
+                2 * 1024 * 1024,
+                "/usr/bin/ffmpeg".into(),
+            ),
+            adapters,
+            1,
+        )?;
+
+        processor.organize_meeting(&meeting.id).await?;
+
+        let requests = probe.requests();
+        assert_eq!(requests.len(), 3);
+        for request in &requests[..2] {
+            assert_eq!(request["tool_choice"], "none");
+            assert_eq!(request["tools"], serde_json::json!([]));
+            let input = request["input"][0]["content"][0]["text"].as_str().unwrap();
+            assert!(input.chars().count() <= ORGANIZATION_SECTION_CHARS);
+            assert!(input.starts_with("[0-10000] "));
+        }
+        assert_eq!(requests[2]["tools"][0]["strict"], true);
+        assert_eq!(
+            requests[2]["tools"][0]["parameters"]["required"],
+            serde_json::json!(["title", "summary", "todos"])
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn meeting_organization_handles_silence_without_provider_call() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let context = ContextStore::open(&directory.path().join("meeting.sqlite3")).await?;
+        let store = MeetingStore::new(context.pool_clone());
+        store.initialize().await?;
+        let (meeting, _) = store.create_with_status("user-a", "silence", 1.0).await?;
+        store.enqueue_transcript_job(&meeting.id).await?;
+        let crate::meeting::types::TranscriptJobClaim::Claimed { attempt } =
+            store.claim_transcript_job(&meeting.id).await?
+        else {
+            anyhow::bail!("transcript job was not claimable");
+        };
+        store
+            .complete_transcript_job(&meeting.id, attempt, &[])
+            .await?;
+        let (adapters, probe) = ModelAdapters::with_meeting_organization_test_results(
+            Settings::from_env()?,
+            Vec::new(),
+        )?;
+        let processor = MeetingProcessor::new(
+            store.clone(),
+            MeetingStorage::new(
+                directory.path().join("audio"),
+                2 * 1024 * 1024,
+                "/usr/bin/ffmpeg".into(),
+            ),
+            adapters,
+            1,
+        )?;
+
+        let artifact = processor.organize_meeting(&meeting.id).await?.unwrap();
+
+        assert_eq!(artifact.title, "未检测到语音内容");
+        assert!(probe.requests().is_empty());
+        let detail = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(detail.state, crate::meeting::types::MeetingState::Completed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_meeting_organization_is_retryable_without_losing_final_transcript()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let context = ContextStore::open(&directory.path().join("meeting.sqlite3")).await?;
+        let store = MeetingStore::new(context.pool_clone());
+        store.initialize().await?;
+        let (meeting, _) = store.create_with_status("user-a", "org-retry", 1.0).await?;
+        store.enqueue_transcript_job(&meeting.id).await?;
+        let crate::meeting::types::TranscriptJobClaim::Claimed { attempt } =
+            store.claim_transcript_job(&meeting.id).await?
+        else {
+            anyhow::bail!("transcript job was not claimable");
+        };
+        let transcript = vec![TranscriptSegment {
+            id: 0,
+            start_ms: 0,
+            end_ms: 1_000,
+            text: "确认发布".to_owned(),
+            provisional: false,
+        }];
+        store
+            .complete_transcript_job(&meeting.id, attempt, &transcript)
+            .await?;
+        let (adapters, _) = ModelAdapters::with_meeting_organization_test_results(
+            Settings::from_env()?,
+            vec![
+                Ok(crate::adapters::ResponsesOutput {
+                    text: "plain text is forbidden".to_owned(),
+                    function_calls: Vec::new(),
+                    output_items: Vec::new(),
+                }),
+                Ok(crate::adapters::ResponsesOutput {
+                    text: String::new(),
+                    function_calls: vec![crate::adapters::FunctionCall {
+                        call_id: "retry".to_owned(),
+                        name: "save_meeting_artifact".to_owned(),
+                        arguments: r#"{"title":"发布会","summary":"确认发布","todos":[]}"#
+                            .to_owned(),
+                    }],
+                    output_items: Vec::new(),
+                }),
+            ],
+        )?;
+        let processor = MeetingProcessor::new(
+            store.clone(),
+            MeetingStorage::new(
+                directory.path().join("audio"),
+                2 * 1024 * 1024,
+                "/usr/bin/ffmpeg".into(),
+            ),
+            adapters,
+            1,
+        )?;
+
+        assert!(processor.organize_meeting(&meeting.id).await.is_err());
+        let failed = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(failed.transcript, transcript);
+        assert_eq!(
+            failed.error_message.as_deref(),
+            Some("meeting organization failed")
+        );
+        assert_eq!(
+            store
+                .retry_stage_owned(
+                    "user-a",
+                    &meeting.id,
+                    crate::meeting::types::ProcessingStage::Organization,
+                )
+                .await?,
+            crate::meeting::types::RetryStageOutcome::Queued
+        );
+        processor.organize_meeting(&meeting.id).await?;
+        let recovered = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(recovered.title.as_deref(), Some("发布会"));
+        assert_eq!(recovered.transcript, transcript);
+        assert_eq!(recovered.error_stage, None);
         Ok(())
     }
 }

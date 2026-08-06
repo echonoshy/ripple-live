@@ -93,6 +93,22 @@ pub struct MeetingTodo {
     pub source_end_ms: Option<i64>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeetingTodoDraft {
+    pub text: String,
+    pub source_start_ms: Option<i64>,
+    pub source_end_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeetingArtifact {
+    pub title: String,
+    pub summary: String,
+    pub todos: Vec<MeetingTodoDraft>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Meeting {
     pub id: String,
@@ -144,6 +160,15 @@ pub enum TranscriptJobClaim {
     Busy,
     Completed,
     Missing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryStageOutcome {
+    Queued,
+    Busy,
+    Completed,
+    Unavailable,
+    NotFound,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

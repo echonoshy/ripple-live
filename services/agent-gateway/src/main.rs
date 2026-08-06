@@ -46,7 +46,7 @@ mod meeting_api;
 
 use meeting_api::{
     create_meeting, delete_meeting, finalize_meeting, get_meeting, get_meeting_audio,
-    list_meetings, update_meeting_todo, upload_meeting_chunk,
+    list_meetings, retry_meeting, update_meeting_todo, upload_meeting_chunk,
 };
 
 const REALTIME_PROTOCOL_VERSION: u32 = 4;
@@ -660,6 +660,7 @@ fn app(state: AppState) -> Router {
             axum::routing::put(upload_meeting_chunk),
         )
         .route("/v1/meetings/{meeting_id}/finalize", post(finalize_meeting))
+        .route("/v1/meetings/{meeting_id}/retry", post(retry_meeting))
         .route("/v1/meetings/{meeting_id}/audio", get(get_meeting_audio))
         .route("/v1/assets/{asset_id}/content", get(asset_content))
         .route("/v1/responses", post(create_response))
@@ -4263,6 +4264,26 @@ mod tests {
             final_transcript,
             "finalization should replace provisional transcript"
         );
+        let mut organized = false;
+        for _ in 0..100 {
+            let meeting = state
+                .meetings
+                .get_owned(&user_id, meeting_id)
+                .await
+                .unwrap()
+                .unwrap();
+            organized = meeting.state
+                == ripple_agent_gateway::meeting::types::MeetingState::Completed
+                && meeting.title.as_deref() == Some("会议记录");
+            if organized {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            organized,
+            "final transcript should automatically schedule organization"
+        );
     }
 
     #[tokio::test]
@@ -4333,6 +4354,117 @@ mod tests {
             recovered,
             "idempotent finalize must retry a failed transcript job"
         );
+    }
+
+    #[tokio::test]
+    async fn meeting_retry_route_validates_stage_hides_ownership_and_is_idempotent() {
+        let (_directory, state, owner_token, other_token) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &owner_token, "retry-route").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+
+        let invalid = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/retry"),
+                &owner_token,
+                r#"{"stage":"upload"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let foreign = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/retry"),
+                &other_token,
+                r#"{"stage":"organization"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+
+        let unavailable = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/retry"),
+                &owner_token,
+                r#"{"stage":"organization"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::CONFLICT);
+
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
+             VALUES (?, 'transcript', 'completed', 1), (?, 'organization', 'completed', 1)",
+        )
+        .bind(meeting_id)
+        .bind(meeting_id)
+        .execute(&state.context.pool_clone())
+        .await
+        .unwrap();
+        let completed = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/retry"),
+                &owner_token,
+                r#"{"stage":"organization"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(completed.status(), StatusCode::OK);
+        assert_eq!(json_body(completed).await["data"]["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn meeting_retry_route_recovers_failed_organization_from_final_transcript() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "retry-organization").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
+             VALUES (?, 'transcript', 'completed', 1), (?, 'organization', 'failed', 1)",
+        )
+        .bind(meeting_id)
+        .bind(meeting_id)
+        .execute(&state.context.pool_clone())
+        .await
+        .unwrap();
+
+        let response = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/retry"),
+                &token,
+                r#"{"stage":"organization"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let mut completed = false;
+        for _ in 0..100 {
+            let status = sqlx::query_scalar::<_, String>(
+                "SELECT status FROM meeting_processing_jobs
+                 WHERE meeting_id = ? AND stage = 'organization'",
+            )
+            .bind(meeting_id)
+            .fetch_one(&state.context.pool_clone())
+            .await
+            .unwrap();
+            if status == "completed" {
+                completed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(completed);
+        let global_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM todos")
+            .fetch_one(&state.context.pool_clone())
+            .await
+            .unwrap();
+        assert_eq!(global_count, 0);
     }
 }
 

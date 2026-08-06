@@ -8,7 +8,8 @@ use sqlx::SqlitePool;
 use storage::VerifiedLegacyFinalization;
 use store::MeetingStore;
 use types::{
-    ChunkWrite, FinalAudioMetadata, FinalizeOutcome, Meeting, MeetingTodo, StoredChunkMetadata,
+    ChunkWrite, FinalAudioMetadata, FinalizeOutcome, Meeting, MeetingTodo, ProcessingStage,
+    RetryStageOutcome, StoredChunkMetadata,
 };
 
 #[derive(Clone)]
@@ -146,5 +147,16 @@ impl MeetingService {
         meeting_id: &str,
     ) -> anyhow::Result<Option<FinalAudioMetadata>> {
         self.store.owned_final_audio(user_id, meeting_id).await
+    }
+
+    pub async fn retry_stage(
+        &self,
+        user_id: &str,
+        meeting_id: &str,
+        stage: ProcessingStage,
+    ) -> anyhow::Result<RetryStageOutcome> {
+        self.store
+            .retry_stage_owned(user_id, meeting_id, stage)
+            .await
     }
 }

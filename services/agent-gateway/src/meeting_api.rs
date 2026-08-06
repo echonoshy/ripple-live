@@ -12,7 +12,7 @@ use ripple_agent_gateway::meeting::{
     storage::{PutChunkOutcome, StorageError},
     types::{
         ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_CHUNK_SEQUENCE,
-        MAX_MEETING_DURATION_MS, MeetingState,
+        MAX_MEETING_DURATION_MS, MeetingState, ProcessingStage, RetryStageOutcome,
     },
 };
 use serde::Deserialize;
@@ -39,6 +39,19 @@ pub(super) struct MeetingTodoPatch {
 pub(super) struct FinalizeMeetingRequest {
     last_sequence: i64,
     ended_at: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RetryMeetingRequest {
+    stage: RetryMeetingStage,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RetryMeetingStage {
+    Transcript,
+    Organization,
 }
 
 pub(super) async fn create_meeting(
@@ -257,7 +270,10 @@ pub(super) async fn finalize_meeting(
         Ok(FinalizeOutcome::Pending) => None,
         Ok(FinalizeOutcome::LegacyVerificationRequired(audio)) => Some(audio),
         Ok(FinalizeOutcome::Finalized(meeting_state)) => {
-            if meeting_state == MeetingState::Processing {
+            if matches!(
+                meeting_state,
+                MeetingState::Processing | MeetingState::Completed
+            ) {
                 let audio = match state
                     .meetings
                     .owned_final_audio(&user.id, &meeting_id)
@@ -413,6 +429,77 @@ fn finalized_response(meeting_id: &str, state: MeetingState) -> Response {
         Json(json!({"data": {"id": meeting_id, "state": state}})),
     )
         .into_response()
+}
+
+pub(super) async fn retry_meeting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(meeting_id): Path<String>,
+    request: Result<Json<RetryMeetingRequest>, JsonRejection>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "会议重试参数无效"),
+    };
+    let stage = match request.stage {
+        RetryMeetingStage::Transcript => ProcessingStage::Transcript,
+        RetryMeetingStage::Organization => ProcessingStage::Organization,
+    };
+    let outcome = match state
+        .meetings
+        .retry_stage(&user.id, &meeting_id, stage)
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => return meeting_internal_error(error),
+    };
+    match outcome {
+        RetryStageOutcome::NotFound => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
+        RetryStageOutcome::Unavailable => api_error(StatusCode::CONFLICT, "会议阶段尚不可重试"),
+        RetryStageOutcome::Completed => (
+            StatusCode::OK,
+            Json(json!({"data": {"id": meeting_id, "stage": stage, "status": "completed"}})),
+        )
+            .into_response(),
+        RetryStageOutcome::Busy => (
+            StatusCode::ACCEPTED,
+            Json(json!({"data": {"id": meeting_id, "stage": stage, "status": "running"}})),
+        )
+            .into_response(),
+        RetryStageOutcome::Queued => {
+            match stage {
+                ProcessingStage::Transcript => {
+                    let audio = match state
+                        .meetings
+                        .owned_final_audio(&user.id, &meeting_id)
+                        .await
+                    {
+                        Ok(Some(audio)) => audio,
+                        Ok(None) => return api_error(StatusCode::CONFLICT, "会议阶段尚不可重试"),
+                        Err(error) => return meeting_internal_error(error),
+                    };
+                    state
+                        .meeting_processor
+                        .spawn_finalize_transcript(meeting_id.clone(), audio.relative_path);
+                }
+                ProcessingStage::Organization => {
+                    state
+                        .meeting_processor
+                        .spawn_organize_meeting(meeting_id.clone());
+                }
+                ProcessingStage::Upload => unreachable!(),
+            }
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({"data": {"id": meeting_id, "stage": stage, "status": "pending"}})),
+            )
+                .into_response()
+        }
+    }
 }
 
 pub(super) async fn get_meeting_audio(
