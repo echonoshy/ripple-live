@@ -1,9 +1,13 @@
 use std::{f32::consts::PI, pin::Pin};
 
 #[cfg(test)]
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -37,6 +41,47 @@ pub(crate) struct EndpointingTestAdapter {
     transcript: Result<String, String>,
     classifier: Result<String, String>,
     classifier_calls: Arc<AtomicUsize>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct TranscriptionTestAdapter {
+    results: Arc<Mutex<VecDeque<Result<String, String>>>>,
+    delay: Duration,
+    probe: TranscriptionTestProbe,
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct TranscriptionTestProbe {
+    attempts: Arc<AtomicUsize>,
+    active: Arc<AtomicUsize>,
+    maximum_active: Arc<AtomicUsize>,
+}
+
+#[cfg(test)]
+impl TranscriptionTestProbe {
+    pub(crate) fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn active(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn maximum_active(&self) -> usize {
+        self.maximum_active.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+struct ActiveTranscriptionGuard(TranscriptionTestProbe);
+
+#[cfg(test)]
+impl Drop for ActiveTranscriptionGuard {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 fn agent_rejection_summary(body: &str) -> String {
@@ -265,6 +310,8 @@ pub struct ModelAdapters {
     client: reqwest::Client,
     #[cfg(test)]
     endpointing_test: Option<EndpointingTestAdapter>,
+    #[cfg(test)]
+    transcription_test: Option<TranscriptionTestAdapter>,
 }
 
 impl ModelAdapters {
@@ -279,6 +326,8 @@ impl ModelAdapters {
             client,
             #[cfg(test)]
             endpointing_test: None,
+            #[cfg(test)]
+            transcription_test: None,
         })
     }
 
@@ -298,7 +347,40 @@ impl ModelAdapters {
         Ok((adapters, classifier_calls))
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_transcription_test_results(
+        settings: Settings,
+        results: Vec<Result<String, String>>,
+        delay: Duration,
+    ) -> anyhow::Result<(Self, TranscriptionTestProbe)> {
+        let probe = TranscriptionTestProbe::default();
+        let mut adapters = Self::new(settings)?;
+        adapters.transcription_test = Some(TranscriptionTestAdapter {
+            results: Arc::new(Mutex::new(results.into())),
+            delay,
+            probe: probe.clone(),
+        });
+        Ok((adapters, probe))
+    }
+
     pub async fn transcribe(&self, samples: &[f32]) -> anyhow::Result<String> {
+        #[cfg(test)]
+        if let Some(test) = &self.transcription_test {
+            test.probe.attempts.fetch_add(1, Ordering::SeqCst);
+            let active = test.probe.active.fetch_add(1, Ordering::SeqCst) + 1;
+            test.probe
+                .maximum_active
+                .fetch_max(active, Ordering::SeqCst);
+            let _active = ActiveTranscriptionGuard(test.probe.clone());
+            tokio::time::sleep(test.delay).await;
+            return test
+                .results
+                .lock()
+                .expect("transcription test queue poisoned")
+                .pop_front()
+                .unwrap_or_else(|| Err("transcription test queue exhausted".to_owned()))
+                .map_err(anyhow::Error::msg);
+        }
         #[cfg(test)]
         if let Some(test) = &self.endpointing_test {
             return test.transcript.clone().map_err(anyhow::Error::msg);

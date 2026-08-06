@@ -468,6 +468,16 @@ impl MeetingStore {
         Ok(chunks)
     }
 
+    pub async fn recorded_duration_ms(&self, meeting_id: &str) -> anyhow::Result<i64> {
+        let duration = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(MAX(end_ms), 0) FROM meeting_chunks WHERE meeting_id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(duration)
+    }
+
     pub async fn claim_finalization(
         &self,
         user_id: &str,
@@ -855,6 +865,60 @@ impl MeetingStore {
             .await?;
         }
         transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn replace_provisional_segment(
+        &self,
+        meeting_id: &str,
+        segment_id: i64,
+        segment: Option<&TranscriptSegment>,
+    ) -> anyhow::Result<()> {
+        if segment_id < 0 {
+            bail!("invalid provisional transcript segment id");
+        }
+        if let Some(segment) = segment
+            && (segment.id != segment_id
+                || !segment.provisional
+                || segment.start_ms < 0
+                || segment.end_ms <= segment.start_ms)
+        {
+            bail!("invalid provisional transcript segment");
+        }
+        if let Some(segment) = segment {
+            sqlx::query(
+                "INSERT INTO meeting_transcript_segments(
+                    meeting_id, id, start_ms, end_ms, text, provisional
+                 ) SELECT ?, ?, ?, ?, ?, 1
+                   WHERE EXISTS (
+                       SELECT 1 FROM meetings
+                       WHERE id = ? AND state IN ('recording', 'paused', 'uploading', 'interrupted')
+                   )
+                 ON CONFLICT(meeting_id, id) DO UPDATE SET
+                    start_ms = excluded.start_ms,
+                    end_ms = excluded.end_ms,
+                    text = excluded.text,
+                    provisional = 1
+                 WHERE meeting_transcript_segments.provisional = 1",
+            )
+            .bind(meeting_id)
+            .bind(segment.id)
+            .bind(segment.start_ms)
+            .bind(segment.end_ms)
+            .bind(&segment.text)
+            .bind(meeting_id)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "DELETE FROM meeting_transcript_segments
+                 WHERE meeting_id = ? AND id = ? AND provisional = 1",
+            )
+            .bind(meeting_id)
+            .bind(segment_id)
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
     }
 

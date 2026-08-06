@@ -1,3 +1,4 @@
+pub mod processor;
 pub mod storage;
 pub mod store;
 pub mod types;

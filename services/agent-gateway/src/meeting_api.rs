@@ -179,22 +179,33 @@ pub(super) async fn upload_meeting_chunk(
             }
             api_error(StatusCode::CONFLICT, "音频分片元数据冲突")
         }
-        ChunkWrite::Inserted | ChunkWrite::Existing => (
+        ChunkWrite::Inserted | ChunkWrite::Existing => {
             if write == ChunkWrite::Inserted {
-                StatusCode::CREATED
-            } else {
-                StatusCode::OK
-            },
-            Json(json!({
-                "data": {
-                    "sequence": sequence,
-                    "size_bytes": size_bytes,
-                    "checksum": stored.checksum,
-                    "existing": write == ChunkWrite::Existing
-                }
-            })),
-        )
-            .into_response(),
+                state.meeting_processor.spawn_transcribe_chunk(
+                    meeting_id,
+                    sequence,
+                    start_ms,
+                    end_ms,
+                    stored.relative_path.clone(),
+                );
+            }
+            (
+                if write == ChunkWrite::Inserted {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                },
+                Json(json!({
+                    "data": {
+                        "sequence": sequence,
+                        "size_bytes": size_bytes,
+                        "checksum": stored.checksum,
+                        "existing": write == ChunkWrite::Existing
+                    }
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -282,6 +293,7 @@ pub(super) async fn finalize_meeting(
         .map(|chunk| chunk.relative_path.clone())
         .collect::<Vec<_>>();
     if let Some(expected) = legacy_audio {
+        let final_audio_path = expected.relative_path.clone();
         let proof = match state
             .meeting_storage
             .verify_legacy_finalization(
@@ -301,7 +313,12 @@ pub(super) async fn finalize_meeting(
             .recover_legacy_finalization(&user.id, proof)
             .await
         {
-            Ok(FinalizeOutcome::Finalized(state)) => finalized_response(&meeting_id, state),
+            Ok(FinalizeOutcome::Finalized(meeting_state)) => {
+                state
+                    .meeting_processor
+                    .spawn_finalize_transcript(meeting_id.clone(), final_audio_path);
+                finalized_response(&meeting_id, meeting_state)
+            }
             Ok(FinalizeOutcome::Conflict) => api_error(StatusCode::CONFLICT, "会议结束边界冲突"),
             Ok(FinalizeOutcome::NotFound) => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
             Ok(FinalizeOutcome::Pending) => meeting_internal_error(anyhow::anyhow!(
@@ -335,7 +352,12 @@ pub(super) async fn finalize_meeting(
         .complete_owned_finalization(&user.id, &meeting_id, request.last_sequence, &metadata)
         .await
     {
-        Ok(FinalizeOutcome::Finalized(state)) => finalized_response(&meeting_id, state),
+        Ok(FinalizeOutcome::Finalized(meeting_state)) => {
+            state
+                .meeting_processor
+                .spawn_finalize_transcript(meeting_id.clone(), metadata.relative_path.clone());
+            finalized_response(&meeting_id, meeting_state)
+        }
         Ok(FinalizeOutcome::Conflict) => api_error(StatusCode::CONFLICT, "会议结束边界冲突"),
         Ok(FinalizeOutcome::NotFound) => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
         Ok(FinalizeOutcome::Pending) => {

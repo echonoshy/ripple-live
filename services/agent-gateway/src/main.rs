@@ -24,7 +24,9 @@ use ripple_agent_gateway::{
     config::Settings,
     context::{ContextStore, LibraryAction, LibraryScope},
     endpointing::{EndpointEvaluation, is_stop_command},
-    meeting::{MeetingService, storage::MeetingStorage},
+    meeting::{
+        MeetingService, processor::MeetingProcessor, storage::MeetingStorage, store::MeetingStore,
+    },
     memory::{MemoryService, TodoUpdate},
     orchestrator::AgentOrchestrator,
     protocol::{ClientEvent, VideoFrame},
@@ -57,6 +59,7 @@ struct AppState {
     orchestrator: AgentOrchestrator,
     meetings: MeetingService,
     meeting_storage: MeetingStorage,
+    meeting_processor: MeetingProcessor,
 }
 
 struct ActiveResponse {
@@ -571,7 +574,7 @@ async fn main() -> anyhow::Result<()> {
     let orchestrator = AgentOrchestrator::new(
         Arc::clone(&settings),
         context.clone(),
-        adapters,
+        adapters.clone(),
         memories.clone(),
     )?;
     let meetings = MeetingService::new(context.pool_clone());
@@ -581,6 +584,12 @@ async fn main() -> anyhow::Result<()> {
         settings.meeting_max_chunk_bytes,
         settings.ffmpeg_bin.clone(),
     );
+    let meeting_processor = MeetingProcessor::new(
+        MeetingStore::new(context.pool_clone()),
+        meeting_storage.clone(),
+        adapters,
+        2,
+    )?;
     let state = AppState {
         settings: Arc::clone(&settings),
         context,
@@ -588,6 +597,7 @@ async fn main() -> anyhow::Result<()> {
         orchestrator,
         meetings,
         meeting_storage,
+        meeting_processor,
     };
     let app = app(state);
 
@@ -2985,6 +2995,13 @@ mod tests {
             settings.meeting_max_chunk_bytes,
             settings.ffmpeg_bin.clone(),
         );
+        let meeting_processor = MeetingProcessor::new(
+            MeetingStore::new(context.pool_clone()),
+            meeting_storage.clone(),
+            ModelAdapters::new((*settings).clone()).unwrap(),
+            2,
+        )
+        .unwrap();
         (
             directory,
             AppState {
@@ -2994,6 +3011,7 @@ mod tests {
                 orchestrator,
                 meetings,
                 meeting_storage,
+                meeting_processor,
             },
             token,
             conversation,
@@ -4165,6 +4183,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(global_count, 0);
+    }
+
+    #[tokio::test]
+    async fn accepted_chunk_and_finalization_drive_background_transcription() {
+        let (directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "background-transcript").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let bytes = generated_meeting_chunk(&directory.path().join("transcript.m4a"), 440).await;
+
+        let uploaded = upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &bytes).await;
+        assert_eq!(uploaded.status(), StatusCode::CREATED);
+        let user_id = state
+            .context
+            .authenticate(&token)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let mut provisional = false;
+        for _ in 0..100 {
+            let meeting = state
+                .meetings
+                .get_owned(&user_id, meeting_id)
+                .await
+                .unwrap()
+                .unwrap();
+            provisional = meeting.transcript.iter().any(|segment| segment.provisional);
+            if provisional {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(provisional, "accepted chunk should start provisional ASR");
+
+        let finalized =
+            finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_001.0).await;
+        assert_eq!(finalized.status(), StatusCode::ACCEPTED);
+        let mut final_transcript = false;
+        for _ in 0..100 {
+            let meeting = state
+                .meetings
+                .get_owned(&user_id, meeting_id)
+                .await
+                .unwrap()
+                .unwrap();
+            final_transcript = !meeting.transcript.is_empty()
+                && meeting
+                    .transcript
+                    .iter()
+                    .all(|segment| !segment.provisional);
+            if final_transcript {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            final_transcript,
+            "finalization should replace provisional transcript"
+        );
     }
 }
 
