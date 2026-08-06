@@ -24,7 +24,7 @@ use ripple_agent_gateway::{
     config::Settings,
     context::{ContextStore, LibraryAction, LibraryScope},
     endpointing::{EndpointEvaluation, is_stop_command},
-    meeting::MeetingService,
+    meeting::{MeetingService, storage::MeetingStorage},
     memory::{MemoryService, TodoUpdate},
     orchestrator::AgentOrchestrator,
     protocol::{ClientEvent, VideoFrame},
@@ -43,7 +43,8 @@ use uuid::Uuid;
 mod meeting_api;
 
 use meeting_api::{
-    create_meeting, delete_meeting, get_meeting, list_meetings, update_meeting_todo,
+    create_meeting, delete_meeting, finalize_meeting, get_meeting, get_meeting_audio,
+    list_meetings, update_meeting_todo, upload_meeting_chunk,
 };
 
 const REALTIME_PROTOCOL_VERSION: u32 = 4;
@@ -55,6 +56,7 @@ struct AppState {
     memories: MemoryService,
     orchestrator: AgentOrchestrator,
     meetings: MeetingService,
+    meeting_storage: MeetingStorage,
 }
 
 struct ActiveResponse {
@@ -574,12 +576,18 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let meetings = MeetingService::new(context.pool_clone());
     meetings.initialize().await?;
+    let meeting_storage = MeetingStorage::new(
+        settings.data_dir.join("meeting-recordings"),
+        settings.meeting_max_chunk_bytes,
+        settings.ffmpeg_bin.clone(),
+    );
     let state = AppState {
         settings: Arc::clone(&settings),
         context,
         memories,
         orchestrator,
         meetings,
+        meeting_storage,
     };
     let app = app(state);
 
@@ -592,7 +600,13 @@ async fn main() -> anyhow::Result<()> {
 fn app(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(HeaderValue::from_static("*"))
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
         .allow_headers(tower_http::cors::Any);
     Router::new()
         .route("/health", get(health))
@@ -631,6 +645,12 @@ fn app(state: AppState) -> Router {
             "/v1/meetings/{meeting_id}/todos/{todo_id}",
             axum::routing::patch(update_meeting_todo),
         )
+        .route(
+            "/v1/meetings/{meeting_id}/chunks/{sequence}",
+            axum::routing::put(upload_meeting_chunk),
+        )
+        .route("/v1/meetings/{meeting_id}/finalize", post(finalize_meeting))
+        .route("/v1/meetings/{meeting_id}/audio", get(get_meeting_audio))
         .route("/v1/assets/{asset_id}/content", get(asset_content))
         .route("/v1/responses", post(create_response))
         .route("/v1/agent/realtime", get(realtime))
@@ -2923,6 +2943,7 @@ mod tests {
         settings.agent_backend = "mock".to_owned();
         settings.asr_backend = "mock".to_owned();
         settings.tts_backend = "mock".to_owned();
+        settings.ffmpeg_bin = "/usr/bin/ffmpeg".into();
         tokio::fs::create_dir_all(&settings.skills_dir)
             .await
             .unwrap();
@@ -2958,6 +2979,11 @@ mod tests {
         .unwrap();
         let meetings = MeetingService::new(context.pool_clone());
         meetings.initialize().await.unwrap();
+        let meeting_storage = MeetingStorage::new(
+            settings.data_dir.join("meeting-recordings"),
+            settings.meeting_max_chunk_bytes,
+            settings.ffmpeg_bin.clone(),
+        );
         (
             directory,
             AppState {
@@ -2966,6 +2992,7 @@ mod tests {
                 memories,
                 orchestrator,
                 meetings,
+                meeting_storage,
             },
             token,
             conversation,
@@ -3205,6 +3232,78 @@ mod tests {
         (directory, state, owner_token, other_token)
     }
 
+    fn sha256(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    async fn generated_meeting_chunk(path: &std::path::Path, frequency: u32) -> Vec<u8> {
+        let source = format!("sine=frequency={frequency}:duration=0.12");
+        let status = tokio::process::Command::new("/usr/bin/ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg(source)
+            .args(["-c:a", "aac", "-movflags", "+faststart"])
+            .arg(path)
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+        tokio::fs::read(path).await.unwrap()
+    }
+
+    fn meeting_chunk_request(
+        token: &str,
+        meeting_id: &str,
+        sequence: i64,
+        start_ms: i64,
+        end_ms: i64,
+        checksum: &str,
+        bytes: Vec<u8>,
+    ) -> Request<Body> {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/meetings/{meeting_id}/chunks/{sequence}"))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(axum::http::header::CONTENT_TYPE, "audio/mp4")
+            .header("X-Chunk-SHA256", checksum)
+            .header("X-Start-Ms", start_ms.to_string())
+            .header("X-End-Ms", end_ms.to_string())
+            .body(Body::from(bytes))
+            .unwrap()
+    }
+
+    async fn upload_meeting_chunk(
+        state: &AppState,
+        token: &str,
+        meeting_id: &str,
+        sequence: i64,
+        start_ms: i64,
+        end_ms: i64,
+        bytes: &[u8],
+    ) -> Response {
+        app(state.clone())
+            .oneshot(meeting_chunk_request(
+                token,
+                meeting_id,
+                sequence,
+                start_ms,
+                end_ms,
+                &sha256(bytes),
+                bytes.to_vec(),
+            ))
+            .await
+            .unwrap()
+    }
+
     async fn meeting_api_state_with_broken_store() -> (TempDir, AppState, String) {
         let (directory, mut state, token, _) = meeting_api_state().await;
         let failing_pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
@@ -3242,6 +3341,158 @@ mod tests {
         assert_eq!(created["data"]["state"], "recording");
         assert_eq!(repeated_status, StatusCode::OK);
         assert_eq!(repeated["data"]["id"], created["data"]["id"]);
+    }
+
+    #[tokio::test]
+    async fn meeting_chunk_api_rejects_checksum_mismatch_without_leaking_storage_details() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "checksum-mismatch").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let request = meeting_chunk_request(
+            &token,
+            meeting_id,
+            0,
+            0,
+            120,
+            &"0".repeat(64),
+            b"not-the-claimed-content".to_vec(),
+        );
+
+        let response = app(state).oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = json_body(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["message"], "音频分片校验失败");
+        assert!(!body.to_string().contains("meeting-recordings"));
+    }
+
+    #[tokio::test]
+    async fn meeting_chunk_api_accepts_identical_retry_and_rejects_metadata_conflict() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "chunk-retry").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let bytes = b"stable chunk".to_vec();
+
+        let inserted = upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &bytes).await;
+        let identical = upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &bytes).await;
+        let metadata_conflict =
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 1, 120, &bytes).await;
+
+        assert_eq!(inserted.status(), StatusCode::CREATED);
+        assert_eq!(identical.status(), StatusCode::OK);
+        assert_eq!(metadata_conflict.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn meeting_chunk_api_reports_missing_sequences_before_finalization() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "missing-sequence").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let bytes = b"sequence one".to_vec();
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 1, 120, 240, &bytes)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+
+        let response = app(state)
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/finalize"),
+                &token,
+                r#"{"last_sequence":1,"ended_at":1700000001.0}"#,
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = json_body(response).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["missing_sequences"], json!([0]));
+    }
+
+    #[tokio::test]
+    async fn meeting_chunk_api_hides_foreign_upload_finalize_and_audio() {
+        let (_directory, state, owner_token, other_token) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &owner_token, "owned-audio").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let bytes = b"foreign attempt".to_vec();
+
+        let upload =
+            upload_meeting_chunk(&state, &other_token, meeting_id, 0, 0, 120, &bytes).await;
+        let finalize = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/finalize"),
+                &other_token,
+                r#"{"last_sequence":0,"ended_at":1700000001.0}"#,
+            ))
+            .await
+            .unwrap();
+        let audio = app(state)
+            .oneshot(authenticated_request(
+                "GET",
+                &format!("/v1/meetings/{meeting_id}/audio"),
+                &other_token,
+                "",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(upload.status(), StatusCode::NOT_FOUND);
+        assert_eq!(finalize.status(), StatusCode::NOT_FOUND);
+        assert_eq!(audio.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn meeting_chunk_api_finalizes_generated_m4a_and_fetches_authenticated_audio() {
+        let (directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "final-audio").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let first = generated_meeting_chunk(&directory.path().join("first.m4a"), 440).await;
+        let second = generated_meeting_chunk(&directory.path().join("second.m4a"), 660).await;
+
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &first)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 1, 120, 240, &second)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        let finalized = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/finalize"),
+                &token,
+                r#"{"last_sequence":1,"ended_at":1700000001.0}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(finalized.status(), StatusCode::ACCEPTED);
+
+        let audio = app(state)
+            .oneshot(authenticated_request(
+                "GET",
+                &format!("/v1/meetings/{meeting_id}/audio"),
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(audio.status(), StatusCode::OK);
+        assert_eq!(
+            audio.headers()[axum::http::header::CONTENT_TYPE],
+            "audio/mp4"
+        );
+        let bytes = to_bytes(audio.into_body(), usize::MAX).await.unwrap();
+        assert!(bytes.len() > 1_000);
     }
 
     #[tokio::test]

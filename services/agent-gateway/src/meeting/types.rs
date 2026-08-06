@@ -113,3 +113,18 @@ pub enum ChunkWrite {
     Existing,
     Conflict,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredChunkMetadata {
+    pub sequence: i64,
+    pub relative_path: String,
+    pub size_bytes: i64,
+    pub checksum: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalAudioMetadata {
+    pub relative_path: String,
+    pub size_bytes: i64,
+    pub checksum: String,
+}
