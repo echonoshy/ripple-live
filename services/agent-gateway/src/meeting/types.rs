@@ -2,6 +2,7 @@ use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_MEETING_CHUNK_SEQUENCE: i64 = 100_000;
+pub const MAX_MEETING_DURATION_MS: i64 = 4 * 60 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,6 +115,7 @@ pub enum ChunkWrite {
     Inserted,
     Existing,
     Conflict,
+    DurationExceeded,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,6 +125,7 @@ pub enum FinalizeOutcome {
     Finalized(MeetingState),
     Conflict,
     NotFound,
+    DurationExceeded,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

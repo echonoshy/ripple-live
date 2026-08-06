@@ -10,9 +10,9 @@ use uuid::Uuid;
 
 use super::storage::VerifiedLegacyFinalization;
 use super::types::{
-    ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_CHUNK_SEQUENCE, Meeting,
-    MeetingState, MeetingTodo, ProcessingStage, StoredChunkMetadata, TranscriptJobClaim,
-    TranscriptSegment,
+    ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_CHUNK_SEQUENCE,
+    MAX_MEETING_DURATION_MS, Meeting, MeetingState, MeetingTodo, ProcessingStage,
+    StoredChunkMetadata, TranscriptJobClaim, TranscriptSegment,
 };
 
 #[derive(Clone)]
@@ -229,6 +229,9 @@ impl MeetingStore {
         if sequence < 0 || start_ms < 0 || end_ms <= start_ms || size_bytes < 0 {
             bail!("invalid meeting chunk metadata");
         }
+        if end_ms - start_ms > MAX_MEETING_DURATION_MS {
+            return Ok(ChunkWrite::DurationExceeded);
+        }
         if checksum.trim().is_empty() {
             bail!("chunk checksum must not be empty");
         }
@@ -313,6 +316,9 @@ impl MeetingStore {
         if sequence < 0 || start_ms < 0 || end_ms <= start_ms || size_bytes < 0 {
             bail!("invalid meeting chunk metadata");
         }
+        if end_ms - start_ms > MAX_MEETING_DURATION_MS {
+            return Ok(ChunkWrite::DurationExceeded);
+        }
         if checksum.trim().is_empty() || !safe_relative_path(relative_path) {
             bail!("invalid verified meeting chunk metadata");
         }
@@ -340,7 +346,12 @@ impl MeetingStore {
                 "INSERT INTO meeting_chunks(
                     meeting_id, sequence, start_ms, end_ms, checksum, size_bytes,
                     content_path, verified, created_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                 )
+                 SELECT ?, ?, ?, ?, ?, ?, ?, 1, ?
+                 WHERE (
+                     SELECT COALESCE(SUM(end_ms - start_ms), 0)
+                     FROM meeting_chunks WHERE meeting_id = ?
+                 ) + (? - ?) <= ?
                  ON CONFLICT(meeting_id, sequence) DO NOTHING",
             )
             .bind(meeting_id)
@@ -351,6 +362,10 @@ impl MeetingStore {
             .bind(size_bytes)
             .bind(relative_path)
             .bind(unix_time())
+            .bind(meeting_id)
+            .bind(end_ms)
+            .bind(start_ms)
+            .bind(MAX_MEETING_DURATION_MS)
             .execute(&mut *transaction)
             .await?;
             if result.rows_affected() == 1 {
@@ -369,7 +384,11 @@ impl MeetingStore {
         .await?;
         let Some(row) = row else {
             transaction.rollback().await?;
-            return Ok(ChunkWrite::Conflict);
+            return Ok(if only_existing {
+                ChunkWrite::Conflict
+            } else {
+                ChunkWrite::DurationExceeded
+            });
         };
         let identical = row.get::<i64, _>("start_ms") == start_ms
             && row.get::<i64, _>("end_ms") == end_ms
@@ -664,6 +683,26 @@ impl MeetingStore {
         }
         if !ended_at.is_finite() {
             bail!("invalid meeting end timestamp");
+        }
+        let actual_duration_ms = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(meeting_chunks.end_ms - meeting_chunks.start_ms), 0)
+             FROM meetings
+             LEFT JOIN meeting_chunks
+               ON meeting_chunks.meeting_id = meetings.id
+              AND meeting_chunks.sequence <= ?
+             WHERE meetings.id = ? AND meetings.user_id = ?
+             GROUP BY meetings.id",
+        )
+        .bind(last_sequence)
+        .bind(meeting_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(actual_duration_ms) = actual_duration_ms else {
+            return Ok(FinalizeOutcome::NotFound);
+        };
+        if actual_duration_ms > MAX_MEETING_DURATION_MS {
+            return Ok(FinalizeOutcome::DurationExceeded);
         }
         let now = unix_time();
         let claimed = sqlx::query(
@@ -1344,8 +1383,8 @@ mod tests {
     use crate::{
         context::ContextStore,
         meeting::types::{
-            ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MeetingState, MeetingTodo,
-            ProcessingStage, TranscriptSegment,
+            ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_DURATION_MS, MeetingState,
+            MeetingTodo, ProcessingStage, TranscriptSegment,
         },
     };
 
@@ -1717,6 +1756,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actual_audio_duration_is_capped_at_four_hours_without_counting_declared_gaps()
+    -> anyhow::Result<()> {
+        let (_directory, _context, store) = test_store().await;
+        let (meeting, _) = store
+            .create_with_status("user-a", "four-hour-cap", 1.0)
+            .await?;
+        assert_eq!(
+            store
+                .record_verified_chunk(
+                    &meeting.id,
+                    0,
+                    0,
+                    MAX_MEETING_DURATION_MS,
+                    "a",
+                    1,
+                    &format!("{}/chunks/0.m4a", meeting.id),
+                )
+                .await?,
+            ChunkWrite::Inserted
+        );
+        assert_eq!(
+            store
+                .record_verified_chunk(
+                    &meeting.id,
+                    1,
+                    MAX_MEETING_DURATION_MS,
+                    MAX_MEETING_DURATION_MS + 1,
+                    "b",
+                    1,
+                    &format!("{}/chunks/1.m4a", meeting.id),
+                )
+                .await?,
+            ChunkWrite::DurationExceeded
+        );
+
+        let (gapped, _) = store.create_with_status("user-a", "large-gap", 1.0).await?;
+        assert_eq!(
+            store
+                .record_verified_chunk(
+                    &gapped.id,
+                    0,
+                    0,
+                    100,
+                    "c",
+                    1,
+                    &format!("{}/chunks/0.m4a", gapped.id),
+                )
+                .await?,
+            ChunkWrite::Inserted
+        );
+        assert_eq!(
+            store
+                .record_verified_chunk(
+                    &gapped.id,
+                    1,
+                    MAX_MEETING_DURATION_MS * 10,
+                    MAX_MEETING_DURATION_MS * 10 + 100,
+                    "d",
+                    1,
+                    &format!("{}/chunks/1.m4a", gapped.id),
+                )
+                .await?,
+            ChunkWrite::Inserted
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn finalization_rejects_legacy_audio_over_four_hours_before_creating_a_job()
+    -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let (meeting, _) = store
+            .create_with_status("user-a", "legacy-over-four-hours", 1.0)
+            .await?;
+        sqlx::query(
+            "INSERT INTO meeting_chunks(
+                meeting_id, sequence, start_ms, end_ms, checksum, size_bytes,
+                content_path, verified, created_at
+             ) VALUES (?, 0, 0, ?, 'legacy', 1, ?, 1, 1)",
+        )
+        .bind(&meeting.id)
+        .bind(MAX_MEETING_DURATION_MS + 1)
+        .bind(format!("{}/chunks/0.m4a", meeting.id))
+        .execute(&context.pool_clone())
+        .await?;
+
+        assert_eq!(
+            store
+                .claim_finalization("user-a", &meeting.id, 0, 2.0)
+                .await?,
+            FinalizeOutcome::DurationExceeded
+        );
+        assert_eq!(
+            store.get_owned("user-a", &meeting.id).await?.unwrap().state,
+            MeetingState::Recording
+        );
+        let jobs = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM meeting_processing_jobs WHERE meeting_id = ?",
+        )
+        .bind(&meeting.id)
+        .fetch_one(&context.pool_clone())
+        .await?;
+        assert_eq!(jobs, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn missing_sequence_query_rejects_excessive_boundary() -> anyhow::Result<()> {
         let (_directory, _context, store) = test_store().await;
         let meeting = store
@@ -1861,7 +2007,9 @@ mod tests {
             match task.await?? {
                 ChunkWrite::Inserted => inserted += 1,
                 ChunkWrite::Existing => existing += 1,
-                ChunkWrite::Conflict => anyhow::bail!("identical retry must not conflict"),
+                ChunkWrite::Conflict | ChunkWrite::DurationExceeded => {
+                    anyhow::bail!("identical retry must not conflict")
+                }
             }
         }
         assert_eq!(inserted, 1);

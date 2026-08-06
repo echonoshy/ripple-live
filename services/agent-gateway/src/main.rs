@@ -3524,6 +3524,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn meeting_chunk_api_rejects_more_than_four_hours_before_storage() {
+        let (directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "duration-bounded-upload").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let bytes = b"must not be stored".to_vec();
+
+        let response =
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 14_400_001, &bytes).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            !directory
+                .path()
+                .join("data/meeting-recordings")
+                .join(meeting_id)
+                .join("chunks/0.m4a")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
     async fn meeting_chunk_api_rejects_excessive_final_boundary() {
         let (_directory, state, token, _) = meeting_api_state().await;
         let (_, meeting) = create_meeting(&state, &token, "bounded-finalize").await;

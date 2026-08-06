@@ -15,7 +15,7 @@ use super::types::{
 use super::{storage::MeetingStorage, store::MeetingStore};
 
 const PCM_SAMPLE_RATE: usize = 16_000;
-const DEFAULT_WINDOW_MS: usize = 60_000;
+const DEFAULT_WINDOW_MS: usize = 58_000;
 const DEFAULT_OVERLAP_MS: usize = 1_000;
 const MAX_ASR_ATTEMPTS: usize = 3;
 const VAD_FRAME_MS: i64 = 20;
@@ -23,6 +23,8 @@ const VAD_ENERGY_THRESHOLD: i64 = 500;
 const VAD_MIN_SPEECH_MS: i64 = 200;
 const VAD_MAX_SILENCE_MS: i64 = 500;
 const VAD_MAX_SPAN_MS: i64 = 20_000;
+const VAD_SPAN_OVERLAP_MS: i64 = 1_000;
+const MAX_DECODE_PADDING_MS: usize = 100;
 
 #[derive(Clone)]
 pub struct MeetingProcessor {
@@ -179,7 +181,7 @@ impl MeetingProcessor {
     pub async fn finalize_transcript(
         &self,
         meeting_id: &str,
-        _relative_path: &str,
+        relative_path: &str,
     ) -> anyhow::Result<Option<Vec<TranscriptSegment>>> {
         let claim = self.store.claim_transcript_job(meeting_id).await?;
         let claim = if claim == TranscriptJobClaim::Missing {
@@ -191,7 +193,10 @@ impl MeetingProcessor {
         let TranscriptJobClaim::Claimed { attempt } = claim else {
             return Ok(None);
         };
-        match self.process_final_transcript(meeting_id, attempt).await {
+        match self
+            .process_final_transcript(meeting_id, attempt, relative_path)
+            .await
+        {
             Ok(segments) => {
                 if let Err(error) = self
                     .store
@@ -217,6 +222,7 @@ impl MeetingProcessor {
         &self,
         meeting_id: &str,
         attempt: i64,
+        relative_path: &str,
     ) -> anyhow::Result<Vec<TranscriptSegment>> {
         let chunks = self
             .store
@@ -229,15 +235,8 @@ impl MeetingProcessor {
         validate_chunk_timeline(&chunks)?;
         let window_ms = samples_to_ms(self.window_samples).max(1);
         let overlap_ms = samples_to_ms(self.overlap_samples);
-        let timeline = chunks
-            .iter()
-            .map(|chunk| (chunk.sequence, chunk.start_ms, chunk.end_ms))
-            .collect::<Vec<_>>();
-        let windows = timeline_windows(&timeline, window_ms, overlap_ms);
-        let by_sequence = chunks
-            .iter()
-            .map(|chunk| (chunk.sequence, chunk))
-            .collect::<std::collections::HashMap<_, _>>();
+        let groups = continuity_groups(&chunks);
+        let windows = continuity_windows(&groups, window_ms, overlap_ms);
         let mut raw = Vec::new();
         for window in windows {
             if !self
@@ -247,9 +246,6 @@ impl MeetingProcessor {
             {
                 bail!("transcript job lease was lost");
             }
-            let chunk = by_sequence
-                .get(&window.sequence)
-                .context("meeting timeline referenced missing chunk")?;
             let _permit = self
                 .asr_permits
                 .clone()
@@ -257,17 +253,20 @@ impl MeetingProcessor {
                 .await
                 .context("meeting ASR semaphore closed")?;
             let duration_ms = window.end_ms - window.start_ms;
-            let maximum_samples = duration_ms as usize * PCM_SAMPLE_RATE / 1_000;
-            let pcm = self
+            let requested_samples = duration_ms as usize * PCM_SAMPLE_RATE / 1_000;
+            let maximum_samples =
+                requested_samples + MAX_DECODE_PADDING_MS * PCM_SAMPLE_RATE / 1_000;
+            let mut pcm = self
                 .storage
                 .decode_window_to_pcm16k(
-                    &chunk.relative_path,
-                    window.local_start_ms,
+                    relative_path,
+                    window.media_start_ms,
                     duration_ms,
                     maximum_samples,
                 )
                 .await
                 .context("decode bounded meeting audio window")?;
+            pcm.truncate(requested_samples);
             for span in detect_speech_spans(&pcm) {
                 if !self
                     .store
@@ -358,14 +357,41 @@ fn window_ranges(total: usize, window: usize, overlap: usize) -> Vec<(usize, usi
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TimelineWindow {
-    sequence: i64,
-    local_start_ms: i64,
+    media_start_ms: i64,
     start_ms: i64,
     end_ms: i64,
 }
 
-fn timeline_windows(
-    chunks: &[(i64, i64, i64)],
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ContinuityGroup {
+    media_start_ms: i64,
+    start_ms: i64,
+    end_ms: i64,
+}
+
+fn continuity_groups(chunks: &[StoredChunkMetadata]) -> Vec<ContinuityGroup> {
+    let mut groups = Vec::<ContinuityGroup>::new();
+    let mut media_cursor_ms = 0_i64;
+    for chunk in chunks {
+        let duration_ms = chunk.end_ms - chunk.start_ms;
+        if let Some(group) = groups.last_mut()
+            && group.end_ms == chunk.start_ms
+        {
+            group.end_ms = chunk.end_ms;
+        } else {
+            groups.push(ContinuityGroup {
+                media_start_ms: media_cursor_ms,
+                start_ms: chunk.start_ms,
+                end_ms: chunk.end_ms,
+            });
+        }
+        media_cursor_ms += duration_ms;
+    }
+    groups
+}
+
+fn continuity_windows(
+    groups: &[ContinuityGroup],
     window_ms: i64,
     overlap_ms: i64,
 ) -> Vec<TimelineWindow> {
@@ -373,19 +399,18 @@ fn timeline_windows(
         return Vec::new();
     }
     let mut windows = Vec::new();
-    for &(sequence, chunk_start, chunk_end) in chunks {
-        if chunk_start < 0 || chunk_end <= chunk_start {
+    for group in groups {
+        if group.start_ms < 0 || group.end_ms <= group.start_ms {
             continue;
         }
-        let duration = chunk_end - chunk_start;
+        let duration = group.end_ms - group.start_ms;
         let mut local_start = 0;
         loop {
             let local_end = (local_start + window_ms).min(duration);
             windows.push(TimelineWindow {
-                sequence,
-                local_start_ms: local_start,
-                start_ms: chunk_start + local_start,
-                end_ms: chunk_start + local_end,
+                media_start_ms: group.media_start_ms + local_start,
+                start_ms: group.start_ms + local_start,
+                end_ms: group.start_ms + local_end,
             });
             if local_end == duration {
                 break;
@@ -458,6 +483,7 @@ fn detect_speech_spans(pcm: &[i16]) -> Vec<SpeechSpan> {
     }
     let minimum_frames = (VAD_MIN_SPEECH_MS / VAD_FRAME_MS) as usize;
     let maximum_frames = (VAD_MAX_SPAN_MS / VAD_FRAME_MS) as usize;
+    let overlap_frames = (VAD_SPAN_OVERLAP_MS / VAD_FRAME_MS) as usize;
     let mut spans = Vec::new();
     for (start, end) in merged {
         if end.saturating_sub(start) < minimum_frames {
@@ -470,17 +496,13 @@ fn detect_speech_spans(pcm: &[i16]) -> Vec<SpeechSpan> {
                 start_ms: part_start as i64 * VAD_FRAME_MS,
                 end_ms: (part_end as i64 * VAD_FRAME_MS).min(samples_to_ms(pcm.len())),
             });
-            part_start = part_end;
+            if part_end == end {
+                break;
+            }
+            part_start = part_end.saturating_sub(overlap_frames);
         }
     }
     spans
-}
-
-#[cfg(test)]
-fn maximum_asr_calls(duration_ms: i64, minimum_chunk_ms: i64) -> i64 {
-    let duration_ms = duration_ms.max(0);
-    let effective_span = VAD_MAX_SPAN_MS.min(minimum_chunk_ms.max(1));
-    (duration_ms + effective_span - 1) / effective_span
 }
 
 pub fn reconcile_overlap(segments: &[(i64, i64, &str)]) -> Vec<TranscriptSegment> {
@@ -581,8 +603,8 @@ mod tests {
     use std::{path::Path, time::Duration};
 
     use super::{
-        MeetingProcessor, detect_speech_spans, maximum_asr_calls, reconcile_overlap,
-        timeline_windows, window_ranges,
+        ContinuityGroup, MeetingProcessor, continuity_windows, detect_speech_spans,
+        reconcile_overlap, window_ranges,
     };
     use crate::{
         adapters::ModelAdapters,
@@ -683,6 +705,103 @@ mod tests {
         Ok(())
     }
 
+    async fn generated_meeting_with_chunks(
+        durations_ms: &[i64],
+        starts_ms: &[i64],
+        results: Vec<Result<&str, &str>>,
+        ffmpeg_bin: &Path,
+    ) -> anyhow::Result<(
+        tempfile::TempDir,
+        MeetingStore,
+        MeetingStorage,
+        MeetingProcessor,
+        crate::adapters::TranscriptionTestProbe,
+        String,
+        String,
+    )> {
+        anyhow::ensure!(durations_ms.len() == starts_ms.len());
+        let directory = tempfile::tempdir()?;
+        let context = ContextStore::open(&directory.path().join("meeting.sqlite3")).await?;
+        let store = MeetingStore::new(context.pool_clone());
+        store.initialize().await?;
+        let (meeting, _) = store
+            .create_with_status("user-a", "multi-chunk", 1.0)
+            .await?;
+        let storage = MeetingStorage::new(
+            directory.path().join("audio"),
+            2 * 1024 * 1024,
+            ffmpeg_bin.to_path_buf(),
+        );
+        for (sequence, (&duration_ms, &start_ms)) in durations_ms.iter().zip(starts_ms).enumerate()
+        {
+            let relative_path = format!("{}/chunks/{sequence}.m4a", meeting.id);
+            store
+                .record_verified_chunk(
+                    &meeting.id,
+                    sequence as i64,
+                    start_ms,
+                    start_ms + duration_ms,
+                    &format!("{sequence:064x}"),
+                    1,
+                    &relative_path,
+                )
+                .await?;
+        }
+        store.enqueue_transcript_job(&meeting.id).await?;
+        let settings = Settings::from_env()?;
+        let (adapters, probe) = ModelAdapters::with_transcription_test_results(
+            settings,
+            results
+                .into_iter()
+                .map(|result| result.map(str::to_owned).map_err(str::to_owned))
+                .collect(),
+            Duration::ZERO,
+        )?;
+        let processor = MeetingProcessor::new(store.clone(), storage.clone(), adapters, 1)?
+            .with_retry_delays_for_test(vec![Duration::ZERO; 2]);
+        Ok((
+            directory,
+            store,
+            storage,
+            processor,
+            probe,
+            meeting.id.clone(),
+            format!("{}/recording.m4a", meeting.id),
+        ))
+    }
+
+    async fn voiced_decoder(path: &Path) -> anyhow::Result<()> {
+        tokio::fs::write(
+            path,
+            "#!/usr/bin/python3\nimport sys\nargs=sys.argv\nduration=float(args[args.index('-t')+1])\nsys.stdout.buffer.write(b'\\xa0\\x0f' * int(duration * 16000))\n",
+        )
+        .await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = tokio::fs::metadata(path).await?.permissions();
+            permissions.set_mode(0o755);
+            tokio::fs::set_permissions(path, permissions).await?;
+        }
+        Ok(())
+    }
+
+    async fn silent_decoder(path: &Path) -> anyhow::Result<()> {
+        tokio::fs::write(
+            path,
+            "#!/usr/bin/python3\nimport sys\nargs=sys.argv\nduration=float(args[args.index('-t')+1])\nsys.stdout.buffer.write(b'\\x00\\x00' * int(duration * 16000))\n",
+        )
+        .await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = tokio::fs::metadata(path).await?.permissions();
+            permissions.set_mode(0o755);
+            tokio::fs::set_permissions(path, permissions).await?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn removes_duplicate_chinese_boundary_text_and_overlap_time() {
         let merged = reconcile_overlap(&[
@@ -727,7 +846,22 @@ mod tests {
 
     #[test]
     fn preserves_declared_chunk_gaps_in_global_window_timeline() {
-        let windows = timeline_windows(&[(0, 0, 15_000), (1, 30_000, 45_000)], 60_000, 1_000);
+        let windows = continuity_windows(
+            &[
+                ContinuityGroup {
+                    media_start_ms: 0,
+                    start_ms: 0,
+                    end_ms: 15_000,
+                },
+                ContinuityGroup {
+                    media_start_ms: 15_000,
+                    start_ms: 30_000,
+                    end_ms: 45_000,
+                },
+            ],
+            60_000,
+            1_000,
+        );
 
         assert!(windows.iter().any(|window| window.end_ms == 15_000));
         assert!(windows.iter().any(|window| window.start_ms == 30_000));
@@ -766,12 +900,182 @@ mod tests {
         let continuous = vec![4_000_i16; 45 * 16_000];
         let spans = detect_speech_spans(&continuous);
         assert_eq!(spans.len(), 3);
+        assert_eq!(
+            spans,
+            vec![
+                super::SpeechSpan {
+                    start_ms: 0,
+                    end_ms: 20_000,
+                },
+                super::SpeechSpan {
+                    start_ms: 19_000,
+                    end_ms: 39_000,
+                },
+                super::SpeechSpan {
+                    start_ms: 38_000,
+                    end_ms: 45_000,
+                },
+            ]
+        );
         assert!(
             spans
                 .iter()
                 .all(|span| span.end_ms - span.start_ms <= 20_000)
         );
-        assert_eq!(maximum_asr_calls(4 * 60 * 60 * 1_000, 10_000), 1_440);
+    }
+
+    #[tokio::test]
+    async fn finalization_decodes_across_real_contiguous_m4a_boundaries_and_reconciles_overlap()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let context = ContextStore::open(&directory.path().join("meeting.sqlite3")).await?;
+        let store = MeetingStore::new(context.pool_clone());
+        store.initialize().await?;
+        let (meeting, _) = store
+            .create_with_status("user-a", "real-boundary", 1.0)
+            .await?;
+        let storage = MeetingStorage::new(
+            directory.path().join("audio"),
+            2 * 1024 * 1024,
+            "/usr/bin/ffmpeg".into(),
+        );
+        let mut paths = Vec::new();
+        for sequence in 0..2 {
+            let relative_path = format!("{}/chunks/{sequence}.m4a", meeting.id);
+            let absolute_path = directory.path().join("audio").join(&relative_path);
+            tokio::fs::create_dir_all(absolute_path.parent().unwrap()).await?;
+            generate_m4a(&absolute_path, 1.2).await?;
+            let bytes = tokio::fs::read(&absolute_path).await?;
+            store
+                .record_verified_chunk(
+                    &meeting.id,
+                    sequence,
+                    sequence * 1_200,
+                    sequence * 1_200 + 1_200,
+                    &format!("{:x}", Sha256::digest(&bytes)),
+                    bytes.len() as i64,
+                    &relative_path,
+                )
+                .await?;
+            paths.push(relative_path);
+        }
+        let final_audio = storage.assemble_final_audio(&meeting.id, &paths).await?;
+        store.enqueue_transcript_job(&meeting.id).await?;
+        let (adapters, probe) = ModelAdapters::with_transcription_test_results(
+            Settings::from_env()?,
+            vec![
+                Ok("alpha boundary".to_owned()),
+                Ok("boundary omega".to_owned()),
+            ],
+            Duration::ZERO,
+        )?;
+        let processor = MeetingProcessor::new(store, storage, adapters, 1)?
+            .with_window_for_test(1_500, 500)
+            .with_retry_delays_for_test(vec![Duration::ZERO; 2]);
+
+        let segments = processor
+            .finalize_transcript(&meeting.id, &final_audio.relative_path)
+            .await?
+            .unwrap();
+
+        assert_eq!(probe.attempts(), 2);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "alpha boundary");
+        assert_eq!(segments[1].text, "omega");
+        assert_eq!(segments[0].end_ms, 1_500);
+        assert_eq!(segments[1].start_ms, 1_500);
+        assert_eq!(segments[1].end_ms, 2_400);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn finalization_keeps_real_declared_gaps_out_of_continuity_groups() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let decoder = directory.path().join("voiced-decoder.py");
+        voiced_decoder(&decoder).await?;
+        let (_files, _store, _storage, processor, probe, meeting_id, final_path) =
+            generated_meeting_with_chunks(
+                &[1_200, 1_200],
+                &[0, 3_000],
+                vec![Ok("first"), Ok("second")],
+                &decoder,
+            )
+            .await?;
+
+        let segments = processor
+            .finalize_transcript(&meeting_id, &final_path)
+            .await?
+            .unwrap();
+
+        assert_eq!(probe.attempts(), 2);
+        assert_eq!((segments[0].start_ms, segments[0].end_ms), (0, 1_200));
+        assert_eq!((segments[1].start_ms, segments[1].end_ms), (3_000, 4_200));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn two_hundred_ms_contiguous_chunks_do_not_amplify_asr_calls() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let decoder = directory.path().join("voiced-decoder.py");
+        voiced_decoder(&decoder).await?;
+        let durations = vec![200; 100];
+        let starts = (0..100).map(|index| index * 200).collect::<Vec<_>>();
+        let (_files, _store, _storage, processor, probe, meeting_id, final_path) =
+            generated_meeting_with_chunks(
+                &durations,
+                &starts,
+                vec![Ok("twenty seconds")],
+                &decoder,
+            )
+            .await?;
+
+        processor
+            .finalize_transcript(&meeting_id, &final_path)
+            .await?;
+
+        assert_eq!(probe.attempts(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn silent_contiguous_processor_input_makes_zero_asr_calls() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let decoder = directory.path().join("silent-decoder.py");
+        silent_decoder(&decoder).await?;
+        let durations = vec![200; 100];
+        let starts = (0..100).map(|index| index * 200).collect::<Vec<_>>();
+        let (_files, _store, _storage, processor, probe, meeting_id, final_path) =
+            generated_meeting_with_chunks(&durations, &starts, Vec::new(), &decoder).await?;
+
+        let segments = processor
+            .finalize_transcript(&meeting_id, &final_path)
+            .await?
+            .unwrap();
+
+        assert_eq!(probe.attempts(), 0);
+        assert!(segments.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn four_hour_continuous_processor_input_has_a_bounded_asr_call_count()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let decoder = directory.path().join("voiced-decoder.py");
+        voiced_decoder(&decoder).await?;
+        let durations = vec![60_000; 240];
+        let starts = (0..240).map(|index| index * 60_000).collect::<Vec<_>>();
+        let results = (0..758).map(|_| Ok("voice")).collect::<Vec<_>>();
+        let (_files, _store, _storage, processor, probe, meeting_id, final_path) =
+            generated_meeting_with_chunks(&durations, &starts, results, &decoder).await?;
+
+        processor
+            .finalize_transcript(&meeting_id, &final_path)
+            .await?;
+
+        assert_eq!(probe.attempts(), 758);
+        Ok(())
     }
 
     #[test]

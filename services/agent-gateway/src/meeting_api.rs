@@ -11,7 +11,8 @@ use axum::{
 use ripple_agent_gateway::meeting::{
     storage::{PutChunkOutcome, StorageError},
     types::{
-        ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_CHUNK_SEQUENCE, MeetingState,
+        ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_CHUNK_SEQUENCE,
+        MAX_MEETING_DURATION_MS, MeetingState,
     },
 };
 use serde::Deserialize;
@@ -121,7 +122,7 @@ pub(super) async fn upload_meeting_chunk(
     let Some(end_ms) = parsed_header::<i64>(&headers, "X-End-Ms") else {
         return api_error(StatusCode::BAD_REQUEST, "音频分片参数无效");
     };
-    if start_ms < 0 || end_ms <= start_ms {
+    if start_ms < 0 || end_ms <= start_ms || end_ms - start_ms > MAX_MEETING_DURATION_MS {
         return api_error(StatusCode::BAD_REQUEST, "音频分片参数无效");
     }
 
@@ -170,6 +171,15 @@ pub(super) async fn upload_meeting_chunk(
         }
     };
     match write {
+        ChunkWrite::DurationExceeded => {
+            if stored.outcome == PutChunkOutcome::Inserted {
+                let _ = state
+                    .meeting_storage
+                    .remove_chunk(&stored.relative_path)
+                    .await;
+            }
+            api_error(StatusCode::PAYLOAD_TOO_LARGE, "会议录音超过4小时限制")
+        }
         ChunkWrite::Conflict => {
             if stored.outcome == PutChunkOutcome::Inserted {
                 let _ = state
@@ -273,6 +283,9 @@ pub(super) async fn finalize_meeting(
         Ok(FinalizeOutcome::NotFound) => {
             return api_error(StatusCode::NOT_FOUND, "会议记录不存在");
         }
+        Ok(FinalizeOutcome::DurationExceeded) => {
+            return api_error(StatusCode::PAYLOAD_TOO_LARGE, "会议录音超过4小时限制");
+        }
         Err(error) => return meeting_internal_error(error),
     };
     let missing = match state
@@ -339,6 +352,9 @@ pub(super) async fn finalize_meeting(
             }
             Ok(FinalizeOutcome::Conflict) => api_error(StatusCode::CONFLICT, "会议结束边界冲突"),
             Ok(FinalizeOutcome::NotFound) => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
+            Ok(FinalizeOutcome::DurationExceeded) => {
+                api_error(StatusCode::PAYLOAD_TOO_LARGE, "会议录音超过4小时限制")
+            }
             Ok(FinalizeOutcome::Pending) => meeting_internal_error(anyhow::anyhow!(
                 "legacy meeting finalization remained pending"
             )),
@@ -378,6 +394,9 @@ pub(super) async fn finalize_meeting(
         }
         Ok(FinalizeOutcome::Conflict) => api_error(StatusCode::CONFLICT, "会议结束边界冲突"),
         Ok(FinalizeOutcome::NotFound) => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
+        Ok(FinalizeOutcome::DurationExceeded) => {
+            api_error(StatusCode::PAYLOAD_TOO_LARGE, "会议录音超过4小时限制")
+        }
         Ok(FinalizeOutcome::Pending) => {
             meeting_internal_error(anyhow::anyhow!("meeting finalization remained pending"))
         }
