@@ -181,7 +181,7 @@ pub(super) async fn upload_meeting_chunk(
         }
         ChunkWrite::Inserted | ChunkWrite::Existing => {
             if write == ChunkWrite::Inserted {
-                state.meeting_processor.spawn_transcribe_chunk(
+                let _ = state.meeting_processor.spawn_transcribe_chunk(
                     meeting_id,
                     sequence,
                     start_ms,
@@ -246,8 +246,26 @@ pub(super) async fn finalize_meeting(
     {
         Ok(FinalizeOutcome::Pending) => None,
         Ok(FinalizeOutcome::LegacyVerificationRequired(audio)) => Some(audio),
-        Ok(FinalizeOutcome::Finalized(state)) => {
-            return finalized_response(&meeting_id, state);
+        Ok(FinalizeOutcome::Finalized(meeting_state)) => {
+            if meeting_state == MeetingState::Processing {
+                let audio = match state
+                    .meetings
+                    .owned_final_audio(&user.id, &meeting_id)
+                    .await
+                {
+                    Ok(Some(audio)) => audio,
+                    Ok(None) => {
+                        return meeting_internal_error(anyhow::anyhow!(
+                            "processing meeting has no final audio"
+                        ));
+                    }
+                    Err(error) => return meeting_internal_error(error),
+                };
+                state
+                    .meeting_processor
+                    .spawn_finalize_transcript(meeting_id.clone(), audio.relative_path);
+            }
+            return finalized_response(&meeting_id, meeting_state);
         }
         Ok(FinalizeOutcome::Conflict) => {
             return api_error(StatusCode::CONFLICT, "会议结束边界冲突");

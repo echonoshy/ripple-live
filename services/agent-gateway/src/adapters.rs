@@ -373,13 +373,16 @@ impl ModelAdapters {
                 .fetch_max(active, Ordering::SeqCst);
             let _active = ActiveTranscriptionGuard(test.probe.clone());
             tokio::time::sleep(test.delay).await;
-            return test
+            let result = test
                 .results
                 .lock()
                 .expect("transcription test queue poisoned")
                 .pop_front()
-                .unwrap_or_else(|| Err("transcription test queue exhausted".to_owned()))
-                .map_err(anyhow::Error::msg);
+                .unwrap_or_else(|| Err("transcription test queue exhausted".to_owned()));
+            if matches!(&result, Err(error) if error == "__panic__") {
+                panic!("injected transcription panic");
+            }
+            return result.map_err(anyhow::Error::msg);
         }
         #[cfg(test)]
         if let Some(test) = &self.endpointing_test {

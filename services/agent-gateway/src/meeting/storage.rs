@@ -327,6 +327,69 @@ impl MeetingStorage {
             .collect())
     }
 
+    pub async fn decode_window_to_pcm16k(
+        &self,
+        relative_path: &str,
+        start_ms: i64,
+        duration_ms: i64,
+        maximum_samples: usize,
+    ) -> Result<Vec<i16>, StorageError> {
+        if start_ms < 0 || duration_ms <= 0 || duration_ms > 60_000 || maximum_samples == 0 {
+            return Err(StorageError::Conflict);
+        }
+        let path = self.resolve_relative(relative_path)?;
+        let maximum_bytes = maximum_samples
+            .checked_mul(2)
+            .ok_or(StorageError::TooLarge)?;
+        let mut child = Command::new(&self.ffmpeg_bin)
+            .args(["-hide_banner", "-loglevel", "error", "-ss"])
+            .arg(format!("{:.3}", start_ms as f64 / 1_000.0))
+            .arg("-i")
+            .arg(&path)
+            .args(["-t"])
+            .arg(format!("{:.3}", duration_ms as f64 / 1_000.0))
+            .args([
+                "-f",
+                "s16le",
+                "-acodec",
+                "pcm_s16le",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "pipe:1",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let stdout = child.stdout.take().ok_or(StorageError::Conflict)?;
+        let mut bounded = stdout.take(maximum_bytes as u64 + 1);
+        let mut bytes = Vec::with_capacity(maximum_bytes.min(64 * 1024));
+        bounded.read_to_end(&mut bytes).await?;
+        if bytes.len() > maximum_bytes {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(StorageError::TooLarge);
+        }
+        let status = child.wait().await?;
+        if !status.success() {
+            return Err(StorageError::Ffmpeg(
+                "bounded window decode failed".to_owned(),
+            ));
+        }
+        if bytes.len() % 2 != 0 {
+            return Err(StorageError::Ffmpeg(
+                "bounded window decode returned incomplete PCM".to_owned(),
+            ));
+        }
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect())
+    }
+
     pub async fn open_audio(&self, relative_path: &str) -> Result<File, StorageError> {
         Ok(File::open(self.resolve_relative(relative_path)?).await?)
     }
@@ -728,6 +791,52 @@ mod tests {
         );
         storage.delete_meeting(&meeting_id).await?;
         assert!(!directory.path().join(meeting_id).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn window_decode_caps_memory_independently_of_source_duration() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let meeting_id = Uuid::new_v4().to_string();
+        let relative_path = format!("{meeting_id}/recording.m4a");
+        let absolute_path = directory.path().join(&relative_path);
+        tokio::fs::create_dir_all(absolute_path.parent().unwrap()).await?;
+        generate_m4a(&absolute_path, 440).await?;
+        let storage = storage(directory.path(), 1024 * 1024);
+
+        let samples = storage
+            .decode_window_to_pcm16k(&relative_path, 0, 1_000, 16_000)
+            .await?;
+
+        assert!(samples.len() <= 16_000);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn window_decode_kills_an_unbounded_decoder_after_one_window() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let meeting_id = Uuid::new_v4().to_string();
+        let relative_path = format!("{meeting_id}/recording.m4a");
+        let absolute_path = directory.path().join(&relative_path);
+        tokio::fs::create_dir_all(absolute_path.parent().unwrap()).await?;
+        tokio::fs::write(&absolute_path, b"fixture").await?;
+        let ffmpeg = directory.path().join("fake-ffmpeg");
+        tokio::fs::write(
+            &ffmpeg,
+            "#!/bin/sh\nwhile true; do printf '0000000000000000'; done\n",
+        )
+        .await?;
+        let mut permissions = std::fs::metadata(&ffmpeg)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&ffmpeg, permissions)?;
+        let storage = MeetingStorage::new(directory.path().into(), 1024, ffmpeg);
+
+        let error = storage
+            .decode_window_to_pcm16k(&relative_path, 0, 1_000, 16_000)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StorageError::TooLarge));
         Ok(())
     }
 

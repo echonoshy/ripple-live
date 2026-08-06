@@ -128,9 +128,19 @@ pub enum FinalizeOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredChunkMetadata {
     pub sequence: i64,
+    pub start_ms: i64,
+    pub end_ms: i64,
     pub relative_path: String,
     pub size_bytes: i64,
     pub checksum: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptJobClaim {
+    Claimed { attempt: i64 },
+    Busy,
+    Completed,
+    Missing,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

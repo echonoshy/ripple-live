@@ -3258,7 +3258,7 @@ mod tests {
     }
 
     async fn generated_meeting_chunk(path: &std::path::Path, frequency: u32) -> Vec<u8> {
-        let source = format!("sine=frequency={frequency}:duration=0.12");
+        let source = format!("sine=frequency={frequency}:duration=0.36");
         let status = tokio::process::Command::new("/usr/bin/ffmpeg")
             .args([
                 "-y",
@@ -4192,7 +4192,7 @@ mod tests {
         let meeting_id = meeting["data"]["id"].as_str().unwrap();
         let bytes = generated_meeting_chunk(&directory.path().join("transcript.m4a"), 440).await;
 
-        let uploaded = upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &bytes).await;
+        let uploaded = upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 360, &bytes).await;
         assert_eq!(uploaded.status(), StatusCode::CREATED);
         let user_id = state
             .context
@@ -4241,6 +4241,76 @@ mod tests {
         assert!(
             final_transcript,
             "finalization should replace provisional transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotent_finalize_recovers_a_failed_transcript_job() {
+        let (directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "recover-transcript").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let bytes = generated_meeting_chunk(&directory.path().join("recover.m4a"), 440).await;
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 360, &bytes)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_001.0)
+                .await
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        for _ in 0..100 {
+            let status = sqlx::query_scalar::<_, String>(
+                "SELECT status FROM meeting_processing_jobs
+                 WHERE meeting_id = ? AND stage = 'transcript'",
+            )
+            .bind(meeting_id)
+            .fetch_one(&state.context.pool_clone())
+            .await
+            .unwrap();
+            if status == "completed" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        sqlx::query(
+            "UPDATE meeting_processing_jobs
+             SET status = 'failed', diagnostic_error = 'safe', updated_at = 1
+             WHERE meeting_id = ? AND stage = 'transcript'",
+        )
+        .bind(meeting_id)
+        .execute(&state.context.pool_clone())
+        .await
+        .unwrap();
+
+        assert_eq!(
+            finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_001.0)
+                .await
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        let mut recovered = false;
+        for _ in 0..100 {
+            let status = sqlx::query_scalar::<_, String>(
+                "SELECT status FROM meeting_processing_jobs
+                 WHERE meeting_id = ? AND stage = 'transcript'",
+            )
+            .bind(meeting_id)
+            .fetch_one(&state.context.pool_clone())
+            .await
+            .unwrap();
+            if status == "completed" {
+                recovered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            recovered,
+            "idempotent finalize must retry a failed transcript job"
         );
     }
 }
