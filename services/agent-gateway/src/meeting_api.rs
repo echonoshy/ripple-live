@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use tracing::error;
 
 use crate::{AppState, api_error, authenticated_user};
 
@@ -55,7 +56,7 @@ pub(super) async fn create_meeting(
             Json(json!({"data": meeting})),
         )
             .into_response(),
-        Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "会议记录暂时不可用"),
+        Err(error) => meeting_internal_error(error),
     }
 }
 
@@ -66,7 +67,7 @@ pub(super) async fn list_meetings(State(state): State<AppState>, headers: Header
     };
     match state.meetings.list(&user.id).await {
         Ok(meetings) => Json(json!({"data": meetings})).into_response(),
-        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        Err(error) => meeting_internal_error(error),
     }
 }
 
@@ -82,7 +83,7 @@ pub(super) async fn get_meeting(
     match state.meetings.get_owned(&user.id, &meeting_id).await {
         Ok(Some(meeting)) => Json(json!({"data": meeting})).into_response(),
         Ok(None) => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
-        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        Err(error) => meeting_internal_error(error),
     }
 }
 
@@ -98,7 +99,7 @@ pub(super) async fn delete_meeting(
     match state.meetings.delete_owned(&user.id, &meeting_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
-        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        Err(error) => meeting_internal_error(error),
     }
 }
 
@@ -123,6 +124,11 @@ pub(super) async fn update_meeting_todo(
     {
         Ok(Some(todo)) => Json(json!({"data": todo})).into_response(),
         Ok(None) => api_error(StatusCode::NOT_FOUND, "会议待办不存在"),
-        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        Err(error) => meeting_internal_error(error),
     }
+}
+
+fn meeting_internal_error(error: anyhow::Error) -> Response {
+    error!(error = %error, "meeting persistence request failed");
+    api_error(StatusCode::INTERNAL_SERVER_ERROR, "会议记录暂时不可用")
 }

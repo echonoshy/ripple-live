@@ -3205,6 +3205,14 @@ mod tests {
         (directory, state, owner_token, other_token)
     }
 
+    async fn meeting_api_state_with_broken_store() -> (TempDir, AppState, String) {
+        let (directory, mut state, token, _) = meeting_api_state().await;
+        let failing_pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        failing_pool.close().await;
+        state.meetings = MeetingService::new(failing_pool);
+        (directory, state, token)
+    }
+
     async fn create_meeting(state: &AppState, token: &str, key: &str) -> (StatusCode, Value) {
         let response = app(state.clone())
             .oneshot(authenticated_request(
@@ -3267,10 +3275,7 @@ mod tests {
 
     #[tokio::test]
     async fn meeting_api_create_hides_persistence_failures_behind_generic_server_error() {
-        let (_directory, mut state, token, _) = meeting_api_state().await;
-        let failing_pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        failing_pool.close().await;
-        state.meetings = MeetingService::new(failing_pool);
+        let (_directory, state, token) = meeting_api_state_with_broken_store().await;
 
         let response = app(state)
             .oneshot(authenticated_request(
@@ -3278,6 +3283,81 @@ mod tests {
                 "/v1/meetings",
                 &token,
                 r#"{"idempotency_key":"device-uuid","started_at":1700000000.0}"#,
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = json_body(response).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "会议记录暂时不可用");
+    }
+
+    #[tokio::test]
+    async fn meeting_api_list_hides_persistence_failures_behind_generic_server_error() {
+        let (_directory, state, token) = meeting_api_state_with_broken_store().await;
+
+        let response = app(state)
+            .oneshot(authenticated_request("GET", "/v1/meetings", &token, ""))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = json_body(response).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "会议记录暂时不可用");
+    }
+
+    #[tokio::test]
+    async fn meeting_api_detail_hides_persistence_failures_behind_generic_server_error() {
+        let (_directory, state, token) = meeting_api_state_with_broken_store().await;
+
+        let response = app(state)
+            .oneshot(authenticated_request(
+                "GET",
+                "/v1/meetings/missing-meeting",
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = json_body(response).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "会议记录暂时不可用");
+    }
+
+    #[tokio::test]
+    async fn meeting_api_delete_hides_persistence_failures_behind_generic_server_error() {
+        let (_directory, state, token) = meeting_api_state_with_broken_store().await;
+
+        let response = app(state)
+            .oneshot(authenticated_request(
+                "DELETE",
+                "/v1/meetings/missing-meeting",
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = json_body(response).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "会议记录暂时不可用");
+    }
+
+    #[tokio::test]
+    async fn meeting_api_todo_patch_hides_persistence_failures_behind_generic_server_error() {
+        let (_directory, state, token) = meeting_api_state_with_broken_store().await;
+
+        let response = app(state)
+            .oneshot(authenticated_request(
+                "PATCH",
+                "/v1/meetings/missing-meeting/todos/missing-todo",
+                &token,
+                r#"{"completed":true}"#,
             ))
             .await
             .unwrap();
