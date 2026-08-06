@@ -1517,8 +1517,11 @@ fn validate_transcript_segments(
 }
 
 fn validate_meeting_artifact(artifact: &MeetingArtifact) -> anyhow::Result<()> {
-    if artifact.title.trim().is_empty() || artifact.todos.len() > 50 {
-        bail!("invalid meeting artifact title or todo count");
+    if artifact.title.trim().is_empty()
+        || artifact.summary.trim().is_empty()
+        || artifact.todos.len() > 50
+    {
+        bail!("invalid meeting artifact title, summary, or todo count");
     }
     for todo in &artifact.todos {
         if todo.text.trim().is_empty() {
@@ -2680,6 +2683,59 @@ mod tests {
                 .await
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blank_organization_summary_cannot_complete_or_replace_existing_artifact()
+    -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store.create("user-a", "blank-summary", 100.0).await?;
+        store
+            .replace_artifact(
+                &meeting.id,
+                "旧标题",
+                "旧摘要",
+                &[MeetingTodo {
+                    id: "old".to_owned(),
+                    text: "旧待办".to_owned(),
+                    completed: false,
+                    source_start_ms: None,
+                    source_end_ms: None,
+                }],
+            )
+            .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, attempt, status, updated_at)
+             VALUES (?, 'organization', 1, 'running', 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+        let invalid = MeetingArtifact {
+            title: "新标题".to_owned(),
+            summary: "   ".to_owned(),
+            todos: Vec::new(),
+        };
+
+        assert!(
+            store
+                .complete_organization_job(&meeting.id, 1, &invalid)
+                .await
+                .is_err()
+        );
+        let detail = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(detail.title.as_deref(), Some("旧标题"));
+        assert_eq!(detail.summary.as_deref(), Some("旧摘要"));
+        assert_eq!(detail.todos[0].text, "旧待办");
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM meeting_processing_jobs
+             WHERE meeting_id = ? AND stage = 'organization'",
+        )
+        .bind(&meeting.id)
+        .fetch_one(&context.pool_clone())
+        .await?;
+        assert_eq!(status, "running");
         Ok(())
     }
 

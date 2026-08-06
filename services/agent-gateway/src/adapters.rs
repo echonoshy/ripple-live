@@ -746,7 +746,7 @@ fn meeting_artifact_tool() -> Value {
             "type": "object",
             "properties": {
                 "title": {"type": "string", "minLength": 1},
-                "summary": {"type": "string"},
+                "summary": {"type": "string", "minLength": 1},
                 "todos": {
                     "type": "array",
                     "maxItems": 50,

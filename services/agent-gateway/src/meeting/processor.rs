@@ -28,6 +28,7 @@ const VAD_MAX_SPAN_MS: i64 = 20_000;
 const VAD_SPAN_OVERLAP_MS: i64 = 1_000;
 const MAX_DECODE_PADDING_MS: usize = 100;
 const ORGANIZATION_SECTION_CHARS: usize = 12_000;
+const MAX_ORGANIZATION_SUMMARY_LAYERS: usize = 8;
 
 #[derive(Clone)]
 pub struct MeetingProcessor {
@@ -39,6 +40,7 @@ pub struct MeetingProcessor {
     overlap_samples: usize,
     scheduled_chunks: Arc<Mutex<HashSet<(String, i64)>>>,
     retry_delays: Arc<Vec<Duration>>,
+    organization_input_chars: usize,
 }
 
 struct ChunkFlightGuard {
@@ -76,6 +78,7 @@ impl MeetingProcessor {
             overlap_samples: DEFAULT_OVERLAP_MS * PCM_SAMPLE_RATE / 1_000,
             scheduled_chunks: Arc::new(Mutex::new(HashSet::new())),
             retry_delays: Arc::new(vec![Duration::from_millis(50), Duration::from_millis(100)]),
+            organization_input_chars: ORGANIZATION_SECTION_CHARS,
         })
     }
 
@@ -204,12 +207,12 @@ impl MeetingProcessor {
                 todos: Vec::new(),
             });
         }
-        let sections = meeting_organization_sections(&transcript, ORGANIZATION_SECTION_CHARS)?;
+        let sections = meeting_organization_sections(&transcript, self.organization_input_chars)?;
         let organized_input = if sections.len() == 1 {
             sections[0].clone()
         } else {
             let mut summaries = Vec::with_capacity(sections.len());
-            for section in sections {
+            for (index, section) in sections.into_iter().enumerate() {
                 if !self
                     .store
                     .heartbeat_organization_job(meeting_id, attempt)
@@ -217,15 +220,18 @@ impl MeetingProcessor {
                 {
                     bail!("organization job lease was lost");
                 }
-                summaries.push(self.adapters.summarize_meeting_section(&section).await?);
+                let summary = self.adapters.summarize_meeting_section(&section).await?;
+                if summary.chars().count() > self.organization_input_chars {
+                    bail!("meeting section summary exceeded the organization input limit");
+                }
+                summaries.push(format!("分段摘要 {}:\n{}", index + 1, summary));
             }
-            summaries
-                .into_iter()
-                .enumerate()
-                .map(|(index, summary)| format!("分段摘要 {}:\n{}", index + 1, summary))
-                .collect::<Vec<_>>()
-                .join("\n\n")
+            self.compact_organization_summaries(meeting_id, attempt, summaries)
+                .await?
         };
+        if organized_input.chars().count() > self.organization_input_chars {
+            bail!("final meeting organization input exceeded the hard limit");
+        }
         if !self
             .store
             .heartbeat_organization_job(meeting_id, attempt)
@@ -264,6 +270,59 @@ impl MeetingProcessor {
             bail!("meeting todo source range is outside the transcript timeline");
         }
         Ok(artifact)
+    }
+
+    async fn compact_organization_summaries(
+        &self,
+        meeting_id: &str,
+        attempt: i64,
+        mut summaries: Vec<String>,
+    ) -> anyhow::Result<String> {
+        for layer in 0..MAX_ORGANIZATION_SUMMARY_LAYERS {
+            let joined = summaries.join("\n\n");
+            let previous_chars = joined.chars().count();
+            if previous_chars <= self.organization_input_chars {
+                return Ok(joined);
+            }
+            let batches = organization_summary_batches(&summaries, self.organization_input_chars)?;
+            let mut compacted = Vec::with_capacity(batches.len());
+            for (batch_index, batch) in batches.into_iter().enumerate() {
+                let batch_input = batch.join("\n\n");
+                if batch_input.chars().count() > self.organization_input_chars {
+                    bail!("meeting summary batch exceeded the organization input limit");
+                }
+                if !self
+                    .store
+                    .heartbeat_organization_job(meeting_id, attempt)
+                    .await?
+                {
+                    bail!("organization job lease was lost");
+                }
+                let summary = self
+                    .adapters
+                    .summarize_meeting_section(&batch_input)
+                    .await?;
+                let compacted_item =
+                    format!("层级摘要 {}-{}:\n{}", layer + 1, batch_index + 1, summary);
+                if compacted_item.chars().count() >= batch_input.chars().count()
+                    || compacted_item.chars().count() > self.organization_input_chars
+                {
+                    bail!("meeting summary compaction did not shrink safely");
+                }
+                compacted.push(compacted_item);
+            }
+            let compacted_chars = compacted.join("\n\n").chars().count();
+            if compacted_chars >= previous_chars {
+                bail!("meeting summary compaction made no progress");
+            }
+            summaries = compacted;
+        }
+        let joined = summaries.join("\n\n");
+        if joined.chars().count() <= self.organization_input_chars {
+            Ok(joined)
+        } else {
+            bail!("meeting summary compaction exceeded the maximum layer count")
+        }
     }
 
     pub async fn transcribe_chunk(
@@ -465,6 +524,12 @@ impl MeetingProcessor {
         self.retry_delays = Arc::new(delays);
         self
     }
+
+    #[cfg(test)]
+    fn with_organization_input_chars_for_test(mut self, maximum_chars: usize) -> Self {
+        self.organization_input_chars = maximum_chars;
+        self
+    }
 }
 
 pub fn meeting_organization_sections(
@@ -509,6 +574,38 @@ pub fn meeting_organization_sections(
     Ok(sections)
 }
 
+fn organization_summary_batches(
+    summaries: &[String],
+    maximum_chars: usize,
+) -> anyhow::Result<Vec<Vec<String>>> {
+    if maximum_chars == 0 {
+        bail!("meeting organization character bound must be positive");
+    }
+    let mut batches = Vec::<Vec<String>>::new();
+    let mut current = Vec::<String>::new();
+    let mut current_chars = 0_usize;
+    for summary in summaries {
+        let summary_chars = summary.chars().count();
+        if summary_chars > maximum_chars {
+            bail!("meeting summary item exceeded the organization input limit");
+        }
+        let separator = usize::from(!current.is_empty()) * 2;
+        if !current.is_empty() && current_chars + separator + summary_chars > maximum_chars {
+            batches.push(std::mem::take(&mut current));
+            current_chars = 0;
+        }
+        if !current.is_empty() {
+            current_chars += 2;
+        }
+        current.push(summary.clone());
+        current_chars += summary_chars;
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    Ok(batches)
+}
+
 pub fn parse_meeting_artifact(arguments: &str) -> anyhow::Result<MeetingArtifact> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -543,8 +640,11 @@ pub fn parse_meeting_artifact(arguments: &str) -> anyhow::Result<MeetingArtifact
             })
             .collect::<anyhow::Result<Vec<_>>>()?,
     };
-    if artifact.title.trim().is_empty() || artifact.todos.len() > 50 {
-        bail!("meeting artifact title or todo count is invalid");
+    if artifact.title.trim().is_empty()
+        || artifact.summary.trim().is_empty()
+        || artifact.todos.len() > 50
+    {
+        bail!("meeting artifact title, summary, or todo count is invalid");
     }
     for MeetingTodoDraft {
         text,
@@ -1615,6 +1715,9 @@ mod tests {
     fn meeting_organization_rejects_invalid_structured_outputs() {
         assert!(parse_meeting_artifact("plain text").is_err());
         assert!(parse_meeting_artifact(r#"{"title":"","summary":"x","todos":[]}"#).is_err());
+        assert!(
+            parse_meeting_artifact(r#"{"title":"发布会","summary":"   ","todos":[]}"#).is_err()
+        );
         assert!(parse_meeting_artifact(
             r#"{"title":"t","summary":"s","todos":[{"text":"x","source_start_ms":1,"source_end_ms":null}]}"#
         )
@@ -1779,18 +1882,17 @@ mod tests {
         else {
             anyhow::bail!("transcript job was not claimable");
         };
+        let segments = (0..13)
+            .map(|index| TranscriptSegment {
+                id: index,
+                start_ms: index * 1_000,
+                end_ms: index * 1_000 + 1_000,
+                text: "会".repeat(11_900),
+                provisional: false,
+            })
+            .collect::<Vec<_>>();
         store
-            .complete_transcript_job(
-                &meeting.id,
-                attempt,
-                &[TranscriptSegment {
-                    id: 0,
-                    start_ms: 0,
-                    end_ms: 10_000,
-                    text: "会".repeat(ORGANIZATION_SECTION_CHARS),
-                    provisional: false,
-                }],
-            )
+            .complete_transcript_job(&meeting.id, attempt, &segments)
             .await?;
         let summary = |text: &str| crate::adapters::ResponsesOutput {
             text: text.to_owned(),
@@ -1806,14 +1908,14 @@ mod tests {
             }],
             output_items: Vec::new(),
         };
-        let (adapters, probe) = ModelAdapters::with_meeting_organization_test_results(
-            Settings::from_env()?,
-            vec![
-                Ok(summary("第一段")),
-                Ok(summary("第二段")),
-                Ok(final_output),
-            ],
-        )?;
+        let mut outputs = (0..13)
+            .map(|_| Ok(summary(&"摘要".repeat(512))))
+            .collect::<Vec<_>>();
+        outputs.push(Ok(summary("第一批压缩摘要")));
+        outputs.push(Ok(summary("第二批压缩摘要")));
+        outputs.push(Ok(final_output));
+        let (adapters, probe) =
+            ModelAdapters::with_meeting_organization_test_results(Settings::from_env()?, outputs)?;
         let processor = MeetingProcessor::new(
             store,
             MeetingStorage::new(
@@ -1828,18 +1930,99 @@ mod tests {
         processor.organize_meeting(&meeting.id).await?;
 
         let requests = probe.requests();
-        assert_eq!(requests.len(), 3);
-        for request in &requests[..2] {
+        assert_eq!(requests.len(), 16);
+        for request in &requests {
+            let input = request["input"][0]["content"][0]["text"].as_str().unwrap();
+            assert!(
+                input.chars().count() <= ORGANIZATION_SECTION_CHARS,
+                "request exceeded hard cap"
+            );
+        }
+        for request in &requests[..15] {
             assert_eq!(request["tool_choice"], "none");
             assert_eq!(request["tools"], serde_json::json!([]));
-            let input = request["input"][0]["content"][0]["text"].as_str().unwrap();
-            assert!(input.chars().count() <= ORGANIZATION_SECTION_CHARS);
-            assert!(input.starts_with("[0-10000] "));
         }
-        assert_eq!(requests[2]["tools"][0]["strict"], true);
+        assert_eq!(requests[15]["tools"][0]["strict"], true);
         assert_eq!(
-            requests[2]["tools"][0]["parameters"]["required"],
+            requests[15]["tools"][0]["parameters"]["required"],
             serde_json::json!(["title", "summary", "todos"])
+        );
+        assert_eq!(
+            requests[15]["tools"][0]["parameters"]["properties"]["summary"]["minLength"],
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn meeting_organization_stops_when_recursive_summary_does_not_shrink()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let context = ContextStore::open(&directory.path().join("meeting.sqlite3")).await?;
+        let store = MeetingStore::new(context.pool_clone());
+        store.initialize().await?;
+        let (meeting, _) = store.create_with_status("user-a", "no-shrink", 1.0).await?;
+        store.enqueue_transcript_job(&meeting.id).await?;
+        let crate::meeting::types::TranscriptJobClaim::Claimed { attempt } =
+            store.claim_transcript_job(&meeting.id).await?
+        else {
+            anyhow::bail!("transcript job was not claimable");
+        };
+        store
+            .complete_transcript_job(
+                &meeting.id,
+                attempt,
+                &[TranscriptSegment {
+                    id: 0,
+                    start_ms: 0,
+                    end_ms: 10_000,
+                    text: "会".repeat(300),
+                    provisional: false,
+                }],
+            )
+            .await?;
+        let summary = |text: String| crate::adapters::ResponsesOutput {
+            text,
+            function_calls: Vec::new(),
+            output_items: Vec::new(),
+        };
+        let (adapters, probe) = ModelAdapters::with_meeting_organization_test_results(
+            Settings::from_env()?,
+            vec![
+                Ok(summary("甲".repeat(40))),
+                Ok(summary("乙".repeat(40))),
+                Ok(summary("丙".repeat(40))),
+                Ok(summary("坏".repeat(120))),
+            ],
+        )?;
+        let processor = MeetingProcessor::new(
+            store.clone(),
+            MeetingStorage::new(
+                directory.path().join("audio"),
+                2 * 1024 * 1024,
+                "/usr/bin/ffmpeg".into(),
+            ),
+            adapters,
+            1,
+        )?
+        .with_organization_input_chars_for_test(120);
+
+        assert!(processor.organize_meeting(&meeting.id).await.is_err());
+        let requests = probe.requests();
+        assert!(requests.iter().all(|request| {
+            request["input"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count()
+                <= 120
+        }));
+        assert_eq!(requests.len(), 4);
+        let detail = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(detail.title, None);
+        assert_eq!(
+            detail.error_stage,
+            Some(crate::meeting::types::ProcessingStage::Organization)
         );
         Ok(())
     }
