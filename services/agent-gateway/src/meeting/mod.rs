@@ -4,6 +4,7 @@ pub mod types;
 
 use sqlx::SqlitePool;
 
+use storage::VerifiedLegacyFinalization;
 use store::MeetingStore;
 use types::{
     ChunkWrite, FinalAudioMetadata, FinalizeOutcome, Meeting, MeetingTodo, StoredChunkMetadata,
@@ -116,6 +117,14 @@ impl MeetingService {
         self.store
             .claim_finalization(user_id, meeting_id, last_sequence, ended_at)
             .await
+    }
+
+    pub async fn recover_legacy_finalization(
+        &self,
+        user_id: &str,
+        proof: VerifiedLegacyFinalization,
+    ) -> anyhow::Result<FinalizeOutcome> {
+        self.store.recover_legacy_finalization(user_id, proof).await
     }
 
     pub async fn complete_owned_finalization(

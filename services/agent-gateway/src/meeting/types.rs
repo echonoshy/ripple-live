@@ -116,9 +116,10 @@ pub enum ChunkWrite {
     Conflict,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FinalizeOutcome {
     Pending,
+    LegacyVerificationRequired(FinalAudioMetadata),
     Finalized(MeetingState),
     Conflict,
     NotFound,

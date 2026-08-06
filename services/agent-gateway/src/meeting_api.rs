@@ -223,7 +223,7 @@ pub(super) async fn finalize_meeting(
     {
         return api_error(StatusCode::BAD_REQUEST, "会议结束参数无效");
     }
-    match state
+    let legacy_audio = match state
         .meetings
         .claim_finalization(
             &user.id,
@@ -233,7 +233,8 @@ pub(super) async fn finalize_meeting(
         )
         .await
     {
-        Ok(FinalizeOutcome::Pending) => {}
+        Ok(FinalizeOutcome::Pending) => None,
+        Ok(FinalizeOutcome::LegacyVerificationRequired(audio)) => Some(audio),
         Ok(FinalizeOutcome::Finalized(state)) => {
             return finalized_response(&meeting_id, state);
         }
@@ -244,7 +245,7 @@ pub(super) async fn finalize_meeting(
             return api_error(StatusCode::NOT_FOUND, "会议记录不存在");
         }
         Err(error) => return meeting_internal_error(error),
-    }
+    };
     let missing = match state
         .meetings
         .missing_verified_sequences(&meeting_id, request.last_sequence)
@@ -280,6 +281,38 @@ pub(super) async fn finalize_meeting(
         .iter()
         .map(|chunk| chunk.relative_path.clone())
         .collect::<Vec<_>>();
+    if let Some(expected) = legacy_audio {
+        let proof = match state
+            .meeting_storage
+            .verify_legacy_finalization(
+                &meeting_id,
+                request.last_sequence,
+                &relative_paths,
+                &expected,
+            )
+            .await
+        {
+            Ok(Some(proof)) => proof,
+            Ok(None) => return api_error(StatusCode::CONFLICT, "会议结束边界冲突"),
+            Err(error) => return meeting_storage_error(error),
+        };
+        return match state
+            .meetings
+            .recover_legacy_finalization(&user.id, proof)
+            .await
+        {
+            Ok(FinalizeOutcome::Finalized(state)) => finalized_response(&meeting_id, state),
+            Ok(FinalizeOutcome::Conflict) => api_error(StatusCode::CONFLICT, "会议结束边界冲突"),
+            Ok(FinalizeOutcome::NotFound) => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
+            Ok(FinalizeOutcome::Pending) => meeting_internal_error(anyhow::anyhow!(
+                "legacy meeting finalization remained pending"
+            )),
+            Ok(FinalizeOutcome::LegacyVerificationRequired(_)) => meeting_internal_error(
+                anyhow::anyhow!("legacy meeting finalization still requires verification"),
+            ),
+            Err(error) => meeting_internal_error(error),
+        };
+    }
     let audio = match state
         .meeting_storage
         .assemble_final_audio(&meeting_id, &relative_paths)
@@ -308,6 +341,9 @@ pub(super) async fn finalize_meeting(
         Ok(FinalizeOutcome::Pending) => {
             meeting_internal_error(anyhow::anyhow!("meeting finalization remained pending"))
         }
+        Ok(FinalizeOutcome::LegacyVerificationRequired(_)) => meeting_internal_error(
+            anyhow::anyhow!("meeting finalization unexpectedly requires legacy verification"),
+        ),
         Err(error) => meeting_internal_error(error),
     }
 }

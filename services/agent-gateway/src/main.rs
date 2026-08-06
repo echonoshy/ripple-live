@@ -2469,6 +2469,7 @@ mod tests {
         adapters::ModelAdapters, memory::CreateMemoryRequest, readiness::check as check_readiness,
     };
     use serde_json::Value;
+    use sqlx::Row;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -3322,6 +3323,136 @@ mod tests {
             .unwrap()
     }
 
+    async fn assert_legacy_closed_finalization_recovery(closed_state: &str) {
+        let (directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) =
+            create_meeting(&state, &token, &format!("legacy-{closed_state}-boundary")).await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let first = generated_meeting_chunk(
+            &directory
+                .path()
+                .join(format!("legacy-{closed_state}-first.m4a")),
+            440,
+        )
+        .await;
+        let later = generated_meeting_chunk(
+            &directory
+                .path()
+                .join(format!("legacy-{closed_state}-later.m4a")),
+            660,
+        )
+        .await;
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &first)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 1, 120, 240, &later)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        let audio = state
+            .meeting_storage
+            .assemble_final_audio(meeting_id, &[format!("{meeting_id}/chunks/0.m4a")])
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE meetings
+             SET state = ?, ended_at = 1700000001, duration_ms = 120,
+                 final_audio_path = ?, final_audio_size_bytes = ?, final_audio_checksum = ?,
+                 final_sequence = NULL
+             WHERE id = ?",
+        )
+        .bind(closed_state)
+        .bind(&audio.relative_path)
+        .bind(i64::try_from(audio.size_bytes).unwrap())
+        .bind(&audio.checksum)
+        .bind(meeting_id)
+        .execute(&state.context.pool_clone())
+        .await
+        .unwrap();
+
+        let wrong = finalize_meeting_request(&state, &token, meeting_id, 1, 1_700_000_099.0).await;
+        assert_eq!(wrong.status(), StatusCode::CONFLICT);
+        let boundary: Option<i64> =
+            sqlx::query_scalar("SELECT final_sequence FROM meetings WHERE id = ?")
+                .bind(meeting_id)
+                .fetch_one(&state.context.pool_clone())
+                .await
+                .unwrap();
+        assert_eq!(boundary, None, "an unverified boundary must remain unknown");
+
+        let after_close = generated_meeting_chunk(
+            &directory
+                .path()
+                .join(format!("legacy-{closed_state}-after-close.m4a")),
+            880,
+        )
+        .await;
+        let rejected =
+            upload_meeting_chunk(&state, &token, meeting_id, 2, 240, 360, &after_close).await;
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+        assert!(
+            !tokio::fs::try_exists(
+                state
+                    .settings
+                    .data_dir
+                    .join("meeting-recordings")
+                    .join(meeting_id)
+                    .join("chunks/2.m4a")
+            )
+            .await
+            .unwrap()
+        );
+
+        let exact = finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_099.0).await;
+        let status = exact.status();
+        let body = json_body(exact).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["data"]["state"], closed_state);
+        let row = sqlx::query(
+            "SELECT state, final_sequence, ended_at, duration_ms,
+                    final_audio_path, final_audio_size_bytes, final_audio_checksum
+             FROM meetings WHERE id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_one(&state.context.pool_clone())
+        .await
+        .unwrap();
+        assert_eq!(row.get::<String, _>("state"), closed_state);
+        assert_eq!(row.get::<Option<i64>, _>("final_sequence"), Some(0));
+        assert_eq!(row.get::<Option<f64>, _>("ended_at"), Some(1_700_000_001.0));
+        assert_eq!(row.get::<Option<i64>, _>("duration_ms"), Some(120));
+        assert_eq!(
+            row.get::<Option<String>, _>("final_audio_path"),
+            Some(audio.relative_path)
+        );
+        assert_eq!(
+            row.get::<Option<i64>, _>("final_audio_size_bytes"),
+            Some(i64::try_from(audio.size_bytes).unwrap())
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("final_audio_checksum"),
+            Some(audio.checksum)
+        );
+
+        assert_eq!(
+            finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_199.0)
+                .await
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            finalize_meeting_request(&state, &token, meeting_id, 1, 1_700_000_199.0)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+    }
+
     async fn meeting_api_state_with_broken_store() -> (TempDir, AppState, String) {
         let (directory, mut state, token, _) = meeting_api_state().await;
         let failing_pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
@@ -3610,6 +3741,16 @@ mod tests {
         let conflicting =
             finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_002.0).await;
         assert_eq!(conflicting.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn legacy_processing_finalize_recovers_only_content_verified_boundary() {
+        assert_legacy_closed_finalization_recovery("processing").await;
+    }
+
+    #[tokio::test]
+    async fn legacy_completed_finalize_recovers_only_content_verified_boundary() {
+        assert_legacy_closed_finalization_recovery("completed").await;
     }
 
     #[tokio::test]

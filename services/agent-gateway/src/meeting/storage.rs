@@ -15,6 +15,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use super::types::FinalAudioMetadata;
+
 #[derive(Clone)]
 pub struct MeetingStorage {
     root: PathBuf,
@@ -42,6 +44,13 @@ pub struct FinalAudio {
     pub relative_path: String,
     pub size_bytes: u64,
     pub checksum: String,
+}
+
+#[derive(Debug)]
+pub struct VerifiedLegacyFinalization {
+    pub(super) meeting_id: String,
+    pub(super) last_sequence: i64,
+    pub(super) audio: FinalAudioMetadata,
 }
 
 #[derive(Debug)]
@@ -218,64 +227,8 @@ impl MeetingStorage {
                 checksum: metadata.checksum,
             });
         }
-
-        let operation_id = Uuid::new_v4().hyphenated().to_string();
-        let list_name = format!(".concat-{operation_id}.txt");
-        let output_name = format!(".recording-{operation_id}.tmp.m4a");
-        let list_path = meeting_directory.join(&list_name);
-        let output_path = meeting_directory.join(&output_name);
-        let _temporary_files = TemporaryFiles::new([list_path.clone(), output_path.clone()]);
-        let mut list = Vec::new();
-        for sequence in 0..chunks.len() {
-            list.extend_from_slice(format!("file 'chunks/{sequence}.m4a'\n").as_bytes());
-        }
-        let mut list_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&list_path)
-            .await?;
-        list_file.write_all(&list).await?;
-        list_file.sync_all().await?;
-        drop(list_file);
-
-        let output = Command::new(&self.ffmpeg_bin)
-            .current_dir(&meeting_directory)
-            .args([
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "concat",
-                "-safe",
-                "1",
-                "-i",
-            ])
-            .arg(&list_name)
-            .args(["-c", "copy"])
-            .arg(&output_name)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .output()
-            .await;
-        remove_if_present(&list_path).await;
-        let output = match output {
-            Ok(output) => output,
-            Err(error) => {
-                remove_if_present(&output_path).await;
-                return Err(error.into());
-            }
-        };
-        if !output.status.success() {
-            remove_if_present(&output_path).await;
-            return Err(StorageError::Ffmpeg(
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            ));
-        }
-        File::open(&output_path).await?.sync_all().await?;
-        fs::rename(&output_path, &final_path).await?;
+        let candidate = self.concatenate_chunks(meeting_id, chunks.len()).await?;
+        fs::rename(&candidate.output_path, &final_path).await?;
         sync_directory(&meeting_directory).await?;
         let metadata = file_metadata(&final_path).await?;
         Ok(FinalAudio {
@@ -283,6 +236,59 @@ impl MeetingStorage {
             size_bytes: metadata.size_bytes,
             checksum: metadata.checksum,
         })
+    }
+
+    pub async fn verify_legacy_finalization(
+        &self,
+        meeting_id: &str,
+        last_sequence: i64,
+        chunks: &[String],
+        expected: &FinalAudioMetadata,
+    ) -> Result<Option<VerifiedLegacyFinalization>, StorageError> {
+        validate_meeting_id(meeting_id)?;
+        let expected_count = usize::try_from(last_sequence)
+            .ok()
+            .and_then(|sequence| sequence.checked_add(1));
+        if expected_count != Some(chunks.len()) || chunks.is_empty() {
+            return Ok(None);
+        }
+        for (sequence, relative_path) in chunks.iter().enumerate() {
+            if relative_path != &format!("{meeting_id}/chunks/{sequence}.m4a")
+                || !fs::try_exists(self.resolve_relative(relative_path)?).await?
+            {
+                return Ok(None);
+            }
+        }
+        let final_relative_path = format!("{meeting_id}/recording.m4a");
+        if expected.relative_path != final_relative_path || expected.size_bytes < 0 {
+            return Ok(None);
+        }
+        let expected_checksum = match normalize_checksum(&expected.checksum) {
+            Ok(checksum) => checksum,
+            Err(_) => return Ok(None),
+        };
+        let expected_size =
+            u64::try_from(expected.size_bytes).map_err(|_| StorageError::Conflict)?;
+        let final_path = self.resolve_relative(&final_relative_path)?;
+        let _guard = self.mutation_lock.lock().await;
+        let metadata = file_metadata(&final_path).await?;
+        if metadata.size_bytes != expected_size || metadata.checksum != expected_checksum {
+            return Ok(None);
+        }
+        let candidate = self.concatenate_chunks(meeting_id, chunks.len()).await?;
+        let candidate_metadata = file_metadata(&candidate.output_path).await?;
+        if candidate_metadata != metadata {
+            return Ok(None);
+        }
+        Ok(Some(VerifiedLegacyFinalization {
+            meeting_id: meeting_id.to_owned(),
+            last_sequence,
+            audio: FinalAudioMetadata {
+                relative_path: final_relative_path,
+                size_bytes: expected.size_bytes,
+                checksum: expected_checksum,
+            },
+        }))
     }
 
     pub async fn decode_to_pcm16k(&self, relative_path: &str) -> Result<Vec<i16>, StorageError> {
@@ -339,6 +345,65 @@ impl MeetingStorage {
         }
     }
 
+    async fn concatenate_chunks(
+        &self,
+        meeting_id: &str,
+        chunk_count: usize,
+    ) -> Result<ConcatenatedAudio, StorageError> {
+        let meeting_directory = self.root.join(meeting_id);
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let list_name = format!(".concat-{operation_id}.txt");
+        let output_name = format!(".recording-{operation_id}.tmp.m4a");
+        let list_path = meeting_directory.join(&list_name);
+        let output_path = meeting_directory.join(&output_name);
+        let temporary_files = TemporaryFiles::new([list_path.clone(), output_path.clone()]);
+        let mut list = Vec::new();
+        for sequence in 0..chunk_count {
+            list.extend_from_slice(format!("file 'chunks/{sequence}.m4a'\n").as_bytes());
+        }
+        let mut list_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&list_path)
+            .await?;
+        list_file.write_all(&list).await?;
+        list_file.sync_all().await?;
+        drop(list_file);
+        let output = Command::new(&self.ffmpeg_bin)
+            .current_dir(&meeting_directory)
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "concat",
+                "-safe",
+                "1",
+                "-i",
+            ])
+            .arg(&list_name)
+            .args(["-c", "copy"])
+            .arg(&output_name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .output()
+            .await?;
+        remove_if_present(&list_path).await;
+        if !output.status.success() {
+            return Err(StorageError::Ffmpeg(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            ));
+        }
+        File::open(&output_path).await?.sync_all().await?;
+        Ok(ConcatenatedAudio {
+            output_path,
+            _temporary_files: temporary_files,
+        })
+    }
+
     fn resolve_relative(&self, relative_path: &str) -> Result<PathBuf, StorageError> {
         let path = Path::new(relative_path);
         if path.as_os_str().is_empty()
@@ -351,6 +416,11 @@ impl MeetingStorage {
         }
         Ok(self.root.join(path))
     }
+}
+
+struct ConcatenatedAudio {
+    output_path: PathBuf,
+    _temporary_files: TemporaryFiles<2>,
 }
 
 struct TemporaryFiles<const N: usize> {
@@ -379,6 +449,7 @@ impl<const N: usize> Drop for TemporaryFiles<N> {
     }
 }
 
+#[derive(PartialEq, Eq)]
 struct FileMetadata {
     size_bytes: u64,
     checksum: String,
@@ -441,6 +512,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{MeetingStorage, PutChunkOutcome, StorageError};
+    use crate::meeting::types::FinalAudioMetadata;
 
     fn checksum(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
@@ -696,6 +768,55 @@ mod tests {
                 .iter()
                 .all(|name| !name.starts_with(".concat-") && !name.starts_with(".recording-")),
             "temporary files remained after failure: {names:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_finalization_proof_matches_only_the_exact_chunk_prefix() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let fixture_directory = tempfile::tempdir()?;
+        let meeting_id = Uuid::new_v4().to_string();
+        let storage = storage(directory.path(), 1024 * 1024);
+        let first = generate_m4a(&fixture_directory.path().join("legacy-first.m4a"), 440).await?;
+        let second = generate_m4a(&fixture_directory.path().join("legacy-second.m4a"), 660).await?;
+        let first = storage
+            .put_chunk(&meeting_id, 0, &checksum(&first), byte_stream(first))
+            .await?;
+        let second = storage
+            .put_chunk(&meeting_id, 1, &checksum(&second), byte_stream(second))
+            .await?;
+        let final_audio = storage
+            .assemble_final_audio(&meeting_id, &[first.relative_path.clone()])
+            .await?;
+        let expected = FinalAudioMetadata {
+            relative_path: final_audio.relative_path,
+            size_bytes: i64::try_from(final_audio.size_bytes)?,
+            checksum: final_audio.checksum,
+        };
+
+        let exact = storage
+            .verify_legacy_finalization(
+                &meeting_id,
+                0,
+                std::slice::from_ref(&first.relative_path),
+                &expected,
+            )
+            .await?;
+        let includes_later_chunk = storage
+            .verify_legacy_finalization(
+                &meeting_id,
+                1,
+                &[first.relative_path, second.relative_path],
+                &expected,
+            )
+            .await?;
+
+        assert!(exact.is_some());
+        assert!(includes_later_chunk.is_none());
+        assert_eq!(
+            directory_names(&directory.path().join(&meeting_id)).await?,
+            vec!["chunks", "recording.m4a"]
         );
         Ok(())
     }

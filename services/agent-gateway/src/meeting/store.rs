@@ -8,6 +8,7 @@ use anyhow::{Context, bail};
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use uuid::Uuid;
 
+use super::storage::VerifiedLegacyFinalization;
 use super::types::{
     ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_CHUNK_SEQUENCE, Meeting,
     MeetingState, MeetingTodo, ProcessingStage, StoredChunkMetadata, TranscriptSegment,
@@ -506,7 +507,8 @@ impl MeetingStore {
         }
 
         let row = sqlx::query(
-            "SELECT state, started_at, final_sequence, final_audio_path
+            "SELECT state, started_at, final_sequence, final_audio_path,
+                    final_audio_size_bytes, final_audio_checksum
              FROM meetings WHERE id = ? AND user_id = ?",
         )
         .bind(meeting_id)
@@ -519,10 +521,36 @@ impl MeetingStore {
         if ended_at < row.get::<f64, _>("started_at") {
             bail!("ended_at must not precede started_at");
         }
-        if row.get::<Option<i64>, _>("final_sequence") != Some(last_sequence) {
+        let state = MeetingState::parse(&row.get::<String, _>("state"))?;
+        let final_sequence = row.get::<Option<i64>, _>("final_sequence");
+        if final_sequence.is_none()
+            && matches!(state, MeetingState::Processing | MeetingState::Completed)
+        {
+            let (Some(relative_path), Some(size_bytes), Some(checksum)) = (
+                row.get::<Option<String>, _>("final_audio_path"),
+                row.get::<Option<i64>, _>("final_audio_size_bytes"),
+                row.get::<Option<String>, _>("final_audio_checksum"),
+            ) else {
+                return Ok(FinalizeOutcome::Conflict);
+            };
+            if relative_path != format!("{meeting_id}/recording.m4a")
+                || !safe_relative_path(&relative_path)
+                || size_bytes < 0
+                || checksum.trim().is_empty()
+            {
+                return Ok(FinalizeOutcome::Conflict);
+            }
+            return Ok(FinalizeOutcome::LegacyVerificationRequired(
+                FinalAudioMetadata {
+                    relative_path,
+                    size_bytes,
+                    checksum,
+                },
+            ));
+        }
+        if final_sequence != Some(last_sequence) {
             return Ok(FinalizeOutcome::Conflict);
         }
-        let state = MeetingState::parse(&row.get::<String, _>("state"))?;
         Ok(match state {
             MeetingState::Uploading => FinalizeOutcome::Pending,
             MeetingState::Processing | MeetingState::Completed
@@ -531,6 +559,83 @@ impl MeetingStore {
                 FinalizeOutcome::Finalized(state)
             }
             _ => FinalizeOutcome::Conflict,
+        })
+    }
+
+    pub async fn recover_legacy_finalization(
+        &self,
+        user_id: &str,
+        proof: VerifiedLegacyFinalization,
+    ) -> anyhow::Result<FinalizeOutcome> {
+        let VerifiedLegacyFinalization {
+            meeting_id,
+            last_sequence,
+            audio,
+        } = proof;
+        if !(0..=MAX_MEETING_CHUNK_SEQUENCE).contains(&last_sequence)
+            || audio.relative_path != format!("{meeting_id}/recording.m4a")
+            || !safe_relative_path(&audio.relative_path)
+            || audio.size_bytes < 0
+            || audio.checksum.trim().is_empty()
+        {
+            bail!("invalid verified legacy finalization");
+        }
+        let now = unix_time();
+        let mut transaction = self.pool.begin().await?;
+        let recovered = sqlx::query(
+            "UPDATE meetings
+             SET final_sequence = ?, updated_at = ?
+             WHERE id = ? AND user_id = ? AND final_sequence IS NULL
+               AND state IN ('processing', 'completed')
+               AND final_audio_path = ? AND final_audio_size_bytes = ?
+               AND final_audio_checksum = ?",
+        )
+        .bind(last_sequence)
+        .bind(now)
+        .bind(&meeting_id)
+        .bind(user_id)
+        .bind(&audio.relative_path)
+        .bind(audio.size_bytes)
+        .bind(&audio.checksum)
+        .execute(&mut *transaction)
+        .await?;
+        if recovered.rows_affected() == 1 {
+            let state: String = sqlx::query_scalar("SELECT state FROM meetings WHERE id = ?")
+                .bind(&meeting_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            return Ok(FinalizeOutcome::Finalized(MeetingState::parse(&state)?));
+        }
+
+        let row = sqlx::query(
+            "SELECT state, final_sequence, final_audio_path,
+                    final_audio_size_bytes, final_audio_checksum
+             FROM meetings WHERE id = ? AND user_id = ?",
+        )
+        .bind(&meeting_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(FinalizeOutcome::NotFound);
+        };
+        let state = MeetingState::parse(&row.get::<String, _>("state"))?;
+        let identical = row.get::<Option<i64>, _>("final_sequence") == Some(last_sequence)
+            && row.get::<Option<String>, _>("final_audio_path").as_deref()
+                == Some(audio.relative_path.as_str())
+            && row.get::<Option<i64>, _>("final_audio_size_bytes") == Some(audio.size_bytes)
+            && row
+                .get::<Option<String>, _>("final_audio_checksum")
+                .as_deref()
+                == Some(audio.checksum.as_str())
+            && matches!(state, MeetingState::Processing | MeetingState::Completed);
+        transaction.rollback().await?;
+        Ok(if identical {
+            FinalizeOutcome::Finalized(state)
+        } else {
+            FinalizeOutcome::Conflict
         })
     }
 
@@ -992,7 +1097,8 @@ mod tests {
     use crate::{
         context::ContextStore,
         meeting::types::{
-            ChunkWrite, FinalAudioMetadata, MeetingState, MeetingTodo, TranscriptSegment,
+            ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MeetingState, MeetingTodo,
+            TranscriptSegment,
         },
     };
 
@@ -1009,8 +1115,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialize_adds_final_sequence_without_losing_existing_meetings() -> anyhow::Result<()>
-    {
+    async fn initialize_preserves_and_closes_real_legacy_meetings() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let database_url = format!(
             "sqlite://{}?mode=rwc",
@@ -1021,16 +1126,101 @@ mod tests {
             "CREATE TABLE meetings (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
-                updated_at REAL NOT NULL
+                idempotency_key TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN (
+                    'recording', 'paused', 'uploading', 'processing', 'completed', 'interrupted'
+                )),
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                duration_ms INTEGER,
+                title TEXT,
+                summary TEXT,
+                final_audio_path TEXT,
+                final_audio_size_bytes INTEGER CHECK(final_audio_size_bytes IS NULL OR final_audio_size_bytes >= 0),
+                final_audio_checksum TEXT,
+                error_stage TEXT CHECK(error_stage IS NULL OR error_stage IN (
+                    'upload', 'transcript', 'organization'
+                )),
+                error_message TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(user_id, idempotency_key)
              )",
         )
         .execute(&pool)
         .await?;
-        sqlx::query("INSERT INTO meetings(id, user_id, updated_at) VALUES ('legacy', 'user-a', 1)")
+        sqlx::query(
+            "CREATE TABLE meeting_chunks (
+                meeting_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK(sequence >= 0),
+                start_ms INTEGER NOT NULL CHECK(start_ms >= 0),
+                end_ms INTEGER NOT NULL CHECK(end_ms > start_ms),
+                checksum TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+                content_path TEXT,
+                verified INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(meeting_id, sequence),
+                FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        let recording_id = uuid::Uuid::new_v4().to_string();
+        let processing_id = uuid::Uuid::new_v4().to_string();
+        let completed_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO meetings(
+                id, user_id, idempotency_key, state, started_at, created_at, updated_at
+             ) VALUES (?, 'user-a', ?, 'recording', 100, 1, 1)",
+        )
+        .bind(&recording_id)
+        .bind("legacy-recording")
+        .execute(&pool)
+        .await?;
+        for (meeting_id, idempotency_key, state, checksum) in [
+            (
+                &processing_id,
+                "legacy-processing",
+                "processing",
+                "a".repeat(64),
+            ),
+            (
+                &completed_id,
+                "legacy-completed",
+                "completed",
+                "b".repeat(64),
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO meetings(
+                    id, user_id, idempotency_key, state, started_at, ended_at, duration_ms,
+                    final_audio_path, final_audio_size_bytes, final_audio_checksum,
+                    created_at, updated_at
+                 ) VALUES (?, 'user-a', ?, ?, 100, 110, 1000, ?, 123, ?, 1, 1)",
+            )
+            .bind(meeting_id)
+            .bind(idempotency_key)
+            .bind(state)
+            .bind(format!("{meeting_id}/recording.m4a"))
+            .bind(&checksum)
             .execute(&pool)
             .await?;
+            sqlx::query(
+                "INSERT INTO meeting_chunks(
+                    meeting_id, sequence, start_ms, end_ms, checksum, size_bytes,
+                    content_path, verified, created_at
+                 ) VALUES (?, 0, 0, 1000, ?, 100, ?, 1, 1)",
+            )
+            .bind(meeting_id)
+            .bind("c".repeat(64))
+            .bind(format!("{meeting_id}/chunks/0.m4a"))
+            .execute(&pool)
+            .await?;
+        }
 
-        MeetingStore::new(pool.clone()).initialize().await?;
+        let store = MeetingStore::new(pool.clone());
+        store.initialize().await?;
 
         let columns = sqlx::query("PRAGMA table_info(meetings)")
             .fetch_all(&pool)
@@ -1040,10 +1230,77 @@ mod tests {
                 .iter()
                 .any(|row| row.get::<String, _>("name") == "final_sequence")
         );
-        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE id = 'legacy'")
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings")
             .fetch_one(&pool)
             .await?;
-        assert_eq!(rows, 1);
+        assert_eq!(rows, 3);
+        assert_eq!(
+            store
+                .claim_finalization("user-a", &recording_id, 0, 101.0)
+                .await?,
+            FinalizeOutcome::Pending
+        );
+        let recording_boundary: Option<i64> =
+            sqlx::query_scalar("SELECT final_sequence FROM meetings WHERE id = ?")
+                .bind(&recording_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(recording_boundary, Some(0));
+
+        for meeting_id in [&processing_id, &completed_id] {
+            let expected_audio = store
+                .owned_final_audio("user-a", meeting_id)
+                .await?
+                .expect("legacy final audio");
+            assert_eq!(
+                store
+                    .claim_finalization("user-a", meeting_id, 0, 111.0)
+                    .await?,
+                FinalizeOutcome::LegacyVerificationRequired(expected_audio),
+                "closed legacy meeting should request content verification"
+            );
+            let boundary: Option<i64> =
+                sqlx::query_scalar("SELECT final_sequence FROM meetings WHERE id = ?")
+                    .bind(meeting_id)
+                    .fetch_one(&pool)
+                    .await?;
+            assert_eq!(boundary, None, "migration must not guess a boundary");
+            assert_eq!(
+                store
+                    .record_verified_chunk(
+                        meeting_id,
+                        0,
+                        0,
+                        1000,
+                        &"c".repeat(64),
+                        100,
+                        &format!("{meeting_id}/chunks/0.m4a"),
+                    )
+                    .await?,
+                ChunkWrite::Existing
+            );
+            assert_eq!(
+                store
+                    .record_verified_chunk(
+                        meeting_id,
+                        1,
+                        1000,
+                        2000,
+                        &"d".repeat(64),
+                        100,
+                        &format!("{meeting_id}/chunks/1.m4a"),
+                    )
+                    .await?,
+                ChunkWrite::Conflict,
+                "migration must not reopen the closed upload timeline"
+            );
+            let chunk_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM meeting_chunks WHERE meeting_id = ?")
+                    .bind(meeting_id)
+                    .fetch_one(&pool)
+                    .await?;
+            assert_eq!(chunk_count, 1, "closed timeline must not gain a row");
+        }
         Ok(())
     }
 
