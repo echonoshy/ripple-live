@@ -1,6 +1,8 @@
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
+pub const MAX_MEETING_CHUNK_SEQUENCE: i64 = 100_000;
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MeetingState {
@@ -112,6 +114,14 @@ pub enum ChunkWrite {
     Inserted,
     Existing,
     Conflict,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinalizeOutcome {
+    Pending,
+    Finalized(MeetingState),
+    Conflict,
+    NotFound,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

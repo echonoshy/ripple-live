@@ -5,7 +5,9 @@ pub mod types;
 use sqlx::SqlitePool;
 
 use store::MeetingStore;
-use types::{ChunkWrite, FinalAudioMetadata, Meeting, MeetingTodo, StoredChunkMetadata};
+use types::{
+    ChunkWrite, FinalAudioMetadata, FinalizeOutcome, Meeting, MeetingTodo, StoredChunkMetadata,
+};
 
 #[derive(Clone)]
 pub struct MeetingService {
@@ -104,15 +106,27 @@ impl MeetingService {
         self.store.verified_chunks(meeting_id, last_sequence).await
     }
 
-    pub async fn finalize_owned_upload(
+    pub async fn claim_finalization(
         &self,
         user_id: &str,
         meeting_id: &str,
+        last_sequence: i64,
         ended_at: f64,
-        audio: &FinalAudioMetadata,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<FinalizeOutcome> {
         self.store
-            .finalize_owned_upload(user_id, meeting_id, ended_at, audio)
+            .claim_finalization(user_id, meeting_id, last_sequence, ended_at)
+            .await
+    }
+
+    pub async fn complete_owned_finalization(
+        &self,
+        user_id: &str,
+        meeting_id: &str,
+        last_sequence: i64,
+        audio: &FinalAudioMetadata,
+    ) -> anyhow::Result<FinalizeOutcome> {
+        self.store
+            .complete_owned_finalization(user_id, meeting_id, last_sequence, audio)
             .await
     }
 

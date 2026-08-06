@@ -224,6 +224,7 @@ impl MeetingStorage {
         let output_name = format!(".recording-{operation_id}.tmp.m4a");
         let list_path = meeting_directory.join(&list_name);
         let output_path = meeting_directory.join(&output_name);
+        let _temporary_files = TemporaryFiles::new([list_path.clone(), output_path.clone()]);
         let mut list = Vec::new();
         for sequence in 0..chunks.len() {
             list.extend_from_slice(format!("file 'chunks/{sequence}.m4a'\n").as_bytes());
@@ -352,6 +353,32 @@ impl MeetingStorage {
     }
 }
 
+struct TemporaryFiles<const N: usize> {
+    paths: [PathBuf; N],
+}
+
+impl<const N: usize> TemporaryFiles<N> {
+    fn new(paths: [PathBuf; N]) -> Self {
+        Self { paths }
+    }
+}
+
+impl<const N: usize> Drop for TemporaryFiles<N> {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            if let Err(error) = std::fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "failed to clean meeting storage temporary file"
+                );
+            }
+        }
+    }
+}
+
 struct FileMetadata {
     size_bytes: u64,
     checksum: String,
@@ -405,7 +432,7 @@ async fn sync_directory(path: &Path) -> Result<(), StorageError> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{os::unix::fs::PermissionsExt, path::Path};
 
     use axum::body::Bytes;
     use futures_util::stream;
@@ -629,6 +656,47 @@ mod tests {
         );
         storage.delete_meeting(&meeting_id).await?;
         assert!(!directory.path().join(meeting_id).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn assemble_failure_removes_all_temporary_files() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let meeting_id = Uuid::new_v4().to_string();
+        let ffmpeg = directory.path().join("fake-ffmpeg");
+        tokio::fs::write(
+            &ffmpeg,
+            concat!(
+                "#!/bin/sh\n",
+                "output_name=\n",
+                "for argument in \"$@\"; do output_name=$argument; done\n",
+                "mkdir recording.m4a\n",
+                "printf fake > \"$output_name\"\n",
+            ),
+        )
+        .await?;
+        let mut permissions = std::fs::metadata(&ffmpeg)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&ffmpeg, permissions)?;
+        let storage = MeetingStorage::new(directory.path().into(), 1024, ffmpeg);
+        let bytes = b"chunk".to_vec();
+        let chunk = storage
+            .put_chunk(&meeting_id, 0, &checksum(&bytes), byte_stream(bytes))
+            .await?;
+
+        let error = storage
+            .assemble_final_audio(&meeting_id, &[chunk.relative_path])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StorageError::Io(_)));
+        let names = directory_names(&directory.path().join(&meeting_id)).await?;
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.starts_with(".concat-") && !name.starts_with(".recording-")),
+            "temporary files remained after failure: {names:?}"
+        );
         Ok(())
     }
 }

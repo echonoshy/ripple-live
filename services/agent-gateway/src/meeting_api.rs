@@ -10,7 +10,9 @@ use axum::{
 };
 use ripple_agent_gateway::meeting::{
     storage::{PutChunkOutcome, StorageError},
-    types::{ChunkWrite, FinalAudioMetadata},
+    types::{
+        ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_CHUNK_SEQUENCE, MeetingState,
+    },
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -101,7 +103,7 @@ pub(super) async fn upload_meeting_chunk(
         Ok(None) => return api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
         Err(error) => return meeting_internal_error(error),
     }
-    if sequence < 0
+    if !(0..=MAX_MEETING_CHUNK_SEQUENCE).contains(&sequence)
         || headers
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
@@ -206,17 +208,42 @@ pub(super) async fn finalize_meeting(
         Ok(user) => user,
         Err(response) => return response,
     };
-    match state.meetings.get_owned(&user.id, &meeting_id).await {
-        Ok(Some(_)) => {}
+    let meeting = match state.meetings.get_owned(&user.id, &meeting_id).await {
+        Ok(Some(meeting)) => meeting,
         Ok(None) => return api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
         Err(error) => return meeting_internal_error(error),
-    }
+    };
     let Json(request) = match request {
         Ok(request) => request,
         Err(error) => return api_error(StatusCode::BAD_REQUEST, &error.body_text()),
     };
-    if request.last_sequence < 0 || !request.ended_at.is_finite() {
+    if !(0..=MAX_MEETING_CHUNK_SEQUENCE).contains(&request.last_sequence)
+        || !request.ended_at.is_finite()
+        || request.ended_at < meeting.started_at
+    {
         return api_error(StatusCode::BAD_REQUEST, "会议结束参数无效");
+    }
+    match state
+        .meetings
+        .claim_finalization(
+            &user.id,
+            &meeting_id,
+            request.last_sequence,
+            request.ended_at,
+        )
+        .await
+    {
+        Ok(FinalizeOutcome::Pending) => {}
+        Ok(FinalizeOutcome::Finalized(state)) => {
+            return finalized_response(&meeting_id, state);
+        }
+        Ok(FinalizeOutcome::Conflict) => {
+            return api_error(StatusCode::CONFLICT, "会议结束边界冲突");
+        }
+        Ok(FinalizeOutcome::NotFound) => {
+            return api_error(StatusCode::NOT_FOUND, "会议记录不存在");
+        }
+        Err(error) => return meeting_internal_error(error),
     }
     let missing = match state
         .meetings
@@ -272,17 +299,25 @@ pub(super) async fn finalize_meeting(
     };
     match state
         .meetings
-        .finalize_owned_upload(&user.id, &meeting_id, request.ended_at, &metadata)
+        .complete_owned_finalization(&user.id, &meeting_id, request.last_sequence, &metadata)
         .await
     {
-        Ok(true) => (
-            StatusCode::ACCEPTED,
-            Json(json!({"data": {"id": meeting_id, "state": "processing"}})),
-        )
-            .into_response(),
-        Ok(false) => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
+        Ok(FinalizeOutcome::Finalized(state)) => finalized_response(&meeting_id, state),
+        Ok(FinalizeOutcome::Conflict) => api_error(StatusCode::CONFLICT, "会议结束边界冲突"),
+        Ok(FinalizeOutcome::NotFound) => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
+        Ok(FinalizeOutcome::Pending) => {
+            meeting_internal_error(anyhow::anyhow!("meeting finalization remained pending"))
+        }
         Err(error) => meeting_internal_error(error),
     }
+}
+
+fn finalized_response(meeting_id: &str, state: MeetingState) -> Response {
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"data": {"id": meeting_id, "state": state}})),
+    )
+        .into_response()
 }
 
 pub(super) async fn get_meeting_audio(

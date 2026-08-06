@@ -3304,6 +3304,24 @@ mod tests {
             .unwrap()
     }
 
+    async fn finalize_meeting_request(
+        state: &AppState,
+        token: &str,
+        meeting_id: &str,
+        last_sequence: i64,
+        ended_at: f64,
+    ) -> Response {
+        app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/finalize"),
+                token,
+                &json!({"last_sequence": last_sequence, "ended_at": ended_at}).to_string(),
+            ))
+            .await
+            .unwrap()
+    }
+
     async fn meeting_api_state_with_broken_store() -> (TempDir, AppState, String) {
         let (directory, mut state, token, _) = meeting_api_state().await;
         let failing_pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
@@ -3341,6 +3359,38 @@ mod tests {
         assert_eq!(created["data"]["state"], "recording");
         assert_eq!(repeated_status, StatusCode::OK);
         assert_eq!(repeated["data"]["id"], created["data"]["id"]);
+    }
+
+    #[tokio::test]
+    async fn meeting_chunk_api_rejects_excessive_sequence_before_storage() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "bounded-upload").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let bytes = b"bounded chunk".to_vec();
+
+        let response =
+            upload_meeting_chunk(&state, &token, meeting_id, 100_001, 0, 120, &bytes).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn meeting_chunk_api_rejects_excessive_final_boundary() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "bounded-finalize").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+
+        let response = app(state)
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/finalize"),
+                &token,
+                r#"{"last_sequence":100001,"ended_at":1700000001.0}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -3411,6 +3461,189 @@ mod tests {
 
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["missing_sequences"], json!([0]));
+    }
+
+    #[tokio::test]
+    async fn meeting_finalize_claims_boundary_before_reporting_missing_chunks() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "claimed-boundary").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let first = b"first bounded chunk".to_vec();
+        let second = b"second bounded chunk".to_vec();
+        let beyond = b"beyond bounded chunk".to_vec();
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &first)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+
+        let missing =
+            finalize_meeting_request(&state, &token, meeting_id, 1, 1_700_000_001.0).await;
+        assert_eq!(missing.status(), StatusCode::CONFLICT);
+
+        let rejected = upload_meeting_chunk(&state, &token, meeting_id, 2, 240, 360, &beyond).await;
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+        assert!(
+            !tokio::fs::try_exists(
+                state
+                    .settings
+                    .data_dir
+                    .join("meeting-recordings")
+                    .join(meeting_id)
+                    .join("chunks/2.m4a")
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 1, 120, 240, &second)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &first)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn meeting_finalize_same_boundary_does_not_mutate_processing_timeline() {
+        let (directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "idempotent-processing").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let chunk = generated_meeting_chunk(&directory.path().join("processing.m4a"), 440).await;
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &chunk)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_001.0,)
+                .await
+                .status(),
+            StatusCode::ACCEPTED
+        );
+
+        let repeated =
+            finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_099.0).await;
+        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
+        let detail = app(state)
+            .oneshot(authenticated_request(
+                "GET",
+                &format!("/v1/meetings/{meeting_id}"),
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        let detail = json_body(detail).await;
+        assert_eq!(detail["data"]["state"], "processing");
+        assert_eq!(detail["data"]["ended_at"], 1_700_000_001.0);
+        assert_eq!(detail["data"]["duration_ms"], 120);
+    }
+
+    #[tokio::test]
+    async fn meeting_finalize_same_boundary_succeeds_after_processing_completed() {
+        let (directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "idempotent-completed").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let chunk = generated_meeting_chunk(&directory.path().join("completed.m4a"), 550).await;
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &chunk)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_001.0,)
+                .await
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        sqlx::query("UPDATE meetings SET state = 'completed' WHERE id = ?")
+            .bind(meeting_id)
+            .execute(&state.context.pool_clone())
+            .await
+            .unwrap();
+
+        let repeated =
+            finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_099.0).await;
+        let status = repeated.status();
+        let body = json_body(repeated).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["data"]["state"], "completed");
+    }
+
+    #[tokio::test]
+    async fn meeting_finalize_rejects_different_boundary_without_reusing_old_audio() {
+        let (directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "conflicting-boundary").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let first =
+            generated_meeting_chunk(&directory.path().join("boundary-first.m4a"), 440).await;
+        let second =
+            generated_meeting_chunk(&directory.path().join("boundary-second.m4a"), 660).await;
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &first)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 1, 120, 240, &second)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            finalize_meeting_request(&state, &token, meeting_id, 1, 1_700_000_001.0,)
+                .await
+                .status(),
+            StatusCode::ACCEPTED
+        );
+
+        let conflicting =
+            finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_002.0).await;
+        assert_eq!(conflicting.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn finalized_meeting_accepts_only_identical_chunk_retries() {
+        let (directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "closed-chunks").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let first = generated_meeting_chunk(&directory.path().join("closed-first.m4a"), 440).await;
+        let later = generated_meeting_chunk(&directory.path().join("closed-later.m4a"), 660).await;
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &first)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_001.0,)
+                .await
+                .status(),
+            StatusCode::ACCEPTED
+        );
+
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 120, &first)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, meeting_id, 1, 120, 240, &later)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
     }
 
     #[tokio::test]

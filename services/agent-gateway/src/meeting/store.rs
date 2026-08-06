@@ -9,8 +9,8 @@ use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use super::types::{
-    ChunkWrite, FinalAudioMetadata, Meeting, MeetingState, MeetingTodo, ProcessingStage,
-    StoredChunkMetadata, TranscriptSegment,
+    ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_CHUNK_SEQUENCE, Meeting,
+    MeetingState, MeetingTodo, ProcessingStage, StoredChunkMetadata, TranscriptSegment,
 };
 
 #[derive(Clone)]
@@ -32,6 +32,7 @@ impl MeetingStore {
                 state TEXT NOT NULL CHECK(state IN (
                     'recording', 'paused', 'uploading', 'processing', 'completed', 'interrupted'
                 )),
+                final_sequence INTEGER CHECK(final_sequence IS NULL OR (final_sequence >= 0 AND final_sequence <= 100000)),
                 started_at REAL NOT NULL,
                 ended_at REAL,
                 duration_ms INTEGER,
@@ -108,6 +109,13 @@ impl MeetingStore {
         ] {
             sqlx::query(statement).execute(&self.pool).await?;
         }
+        ensure_column(
+            &self.pool,
+            "meetings",
+            "final_sequence",
+            "INTEGER CHECK(final_sequence IS NULL OR (final_sequence >= 0 AND final_sequence <= 100000))",
+        )
+        .await?;
         ensure_column(&self.pool, "meetings", "final_audio_path", "TEXT").await?;
         ensure_column(&self.pool, "meetings", "final_audio_size_bytes", "INTEGER").await?;
         ensure_column(&self.pool, "meetings", "final_audio_checksum", "TEXT").await?;
@@ -213,6 +221,9 @@ impl MeetingStore {
         checksum: &str,
         size_bytes: i64,
     ) -> anyhow::Result<ChunkWrite> {
+        if sequence > MAX_MEETING_CHUNK_SEQUENCE {
+            bail!("meeting chunk sequence exceeds safety limit");
+        }
         if sequence < 0 || start_ms < 0 || end_ms <= start_ms || size_bytes < 0 {
             bail!("invalid meeting chunk metadata");
         }
@@ -262,6 +273,9 @@ impl MeetingStore {
         meeting_id: &str,
         last_sequence: i64,
     ) -> anyhow::Result<Vec<i64>> {
+        if last_sequence > MAX_MEETING_CHUNK_SEQUENCE {
+            bail!("meeting final sequence exceeds safety limit");
+        }
         if last_sequence < 0 {
             bail!("last_sequence must not be negative");
         }
@@ -291,6 +305,9 @@ impl MeetingStore {
         size_bytes: i64,
         relative_path: &str,
     ) -> anyhow::Result<ChunkWrite> {
+        if sequence > MAX_MEETING_CHUNK_SEQUENCE {
+            bail!("meeting chunk sequence exceeds safety limit");
+        }
         if sequence < 0 || start_ms < 0 || end_ms <= start_ms || size_bytes < 0 {
             bail!("invalid meeting chunk metadata");
         }
@@ -300,25 +317,44 @@ impl MeetingStore {
         if relative_path != format!("{meeting_id}/chunks/{sequence}.m4a") {
             bail!("invalid verified meeting chunk path");
         }
-        let result = sqlx::query(
-            "INSERT INTO meeting_chunks(
-                meeting_id, sequence, start_ms, end_ms, checksum, size_bytes,
-                content_path, verified, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
-             ON CONFLICT(meeting_id, sequence) DO NOTHING",
-        )
-        .bind(meeting_id)
-        .bind(sequence)
-        .bind(start_ms)
-        .bind(end_ms)
-        .bind(checksum)
-        .bind(size_bytes)
-        .bind(relative_path)
-        .bind(unix_time())
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 1 {
-            return Ok(ChunkWrite::Inserted);
+        let mut transaction = self.pool.begin().await?;
+        let meeting = sqlx::query("SELECT state, final_sequence FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let Some(meeting) = meeting else {
+            transaction.rollback().await?;
+            bail!("meeting not found");
+        };
+        let state = MeetingState::parse(&meeting.get::<String, _>("state"))?;
+        let final_sequence = meeting.get::<Option<i64>, _>("final_sequence");
+        if final_sequence.is_some_and(|boundary| sequence > boundary) {
+            transaction.rollback().await?;
+            return Ok(ChunkWrite::Conflict);
+        }
+        let only_existing = matches!(state, MeetingState::Processing | MeetingState::Completed);
+        if !only_existing {
+            let result = sqlx::query(
+                "INSERT INTO meeting_chunks(
+                    meeting_id, sequence, start_ms, end_ms, checksum, size_bytes,
+                    content_path, verified, created_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                 ON CONFLICT(meeting_id, sequence) DO NOTHING",
+            )
+            .bind(meeting_id)
+            .bind(sequence)
+            .bind(start_ms)
+            .bind(end_ms)
+            .bind(checksum)
+            .bind(size_bytes)
+            .bind(relative_path)
+            .bind(unix_time())
+            .execute(&mut *transaction)
+            .await?;
+            if result.rows_affected() == 1 {
+                transaction.commit().await?;
+                return Ok(ChunkWrite::Inserted);
+            }
         }
 
         let row = sqlx::query(
@@ -327,13 +363,18 @@ impl MeetingStore {
         )
         .bind(meeting_id)
         .bind(sequence)
-        .fetch_one(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(ChunkWrite::Conflict);
+        };
         let identical = row.get::<i64, _>("start_ms") == start_ms
             && row.get::<i64, _>("end_ms") == end_ms
             && row.get::<String, _>("checksum") == checksum
             && row.get::<i64, _>("size_bytes") == size_bytes;
         if !identical {
+            transaction.rollback().await?;
             return Ok(ChunkWrite::Conflict);
         }
         let stored_path = row.get::<Option<String>, _>("content_path");
@@ -341,6 +382,7 @@ impl MeetingStore {
             .as_deref()
             .is_some_and(|stored_path| stored_path != relative_path)
         {
+            transaction.rollback().await?;
             return Ok(ChunkWrite::Conflict);
         }
         if stored_path.is_none() || !row.get::<bool, _>("verified") {
@@ -351,9 +393,10 @@ impl MeetingStore {
             .bind(relative_path)
             .bind(meeting_id)
             .bind(sequence)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?;
         }
+        transaction.commit().await?;
         Ok(ChunkWrite::Existing)
     }
 
@@ -362,6 +405,9 @@ impl MeetingStore {
         meeting_id: &str,
         last_sequence: i64,
     ) -> anyhow::Result<Vec<i64>> {
+        if last_sequence > MAX_MEETING_CHUNK_SEQUENCE {
+            bail!("meeting final sequence exceeds safety limit");
+        }
         if last_sequence < 0 {
             bail!("last_sequence must not be negative");
         }
@@ -421,14 +467,81 @@ impl MeetingStore {
         Ok(chunks)
     }
 
-    pub async fn finalize_owned_upload(
+    pub async fn claim_finalization(
         &self,
         user_id: &str,
         meeting_id: &str,
+        last_sequence: i64,
         ended_at: f64,
+    ) -> anyhow::Result<FinalizeOutcome> {
+        if !(0..=MAX_MEETING_CHUNK_SEQUENCE).contains(&last_sequence) {
+            bail!("meeting final sequence exceeds safety limit");
+        }
+        if !ended_at.is_finite() {
+            bail!("invalid meeting end timestamp");
+        }
+        let now = unix_time();
+        let claimed = sqlx::query(
+            "UPDATE meetings
+             SET final_sequence = ?, ended_at = ?, state = 'uploading', updated_at = ?
+             WHERE id = ? AND user_id = ? AND final_sequence IS NULL
+               AND state IN ('recording', 'paused', 'interrupted', 'uploading')
+               AND started_at <= ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM meeting_chunks
+                   WHERE meeting_chunks.meeting_id = meetings.id AND sequence > ?
+               )",
+        )
+        .bind(last_sequence)
+        .bind(ended_at)
+        .bind(now)
+        .bind(meeting_id)
+        .bind(user_id)
+        .bind(ended_at)
+        .bind(last_sequence)
+        .execute(&self.pool)
+        .await?;
+        if claimed.rows_affected() == 1 {
+            return Ok(FinalizeOutcome::Pending);
+        }
+
+        let row = sqlx::query(
+            "SELECT state, started_at, final_sequence, final_audio_path
+             FROM meetings WHERE id = ? AND user_id = ?",
+        )
+        .bind(meeting_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(FinalizeOutcome::NotFound);
+        };
+        if ended_at < row.get::<f64, _>("started_at") {
+            bail!("ended_at must not precede started_at");
+        }
+        if row.get::<Option<i64>, _>("final_sequence") != Some(last_sequence) {
+            return Ok(FinalizeOutcome::Conflict);
+        }
+        let state = MeetingState::parse(&row.get::<String, _>("state"))?;
+        Ok(match state {
+            MeetingState::Uploading => FinalizeOutcome::Pending,
+            MeetingState::Processing | MeetingState::Completed
+                if row.get::<Option<String>, _>("final_audio_path").is_some() =>
+            {
+                FinalizeOutcome::Finalized(state)
+            }
+            _ => FinalizeOutcome::Conflict,
+        })
+    }
+
+    pub async fn complete_owned_finalization(
+        &self,
+        user_id: &str,
+        meeting_id: &str,
+        last_sequence: i64,
         audio: &FinalAudioMetadata,
-    ) -> anyhow::Result<bool> {
-        if !ended_at.is_finite()
+    ) -> anyhow::Result<FinalizeOutcome> {
+        if !(0..=MAX_MEETING_CHUNK_SEQUENCE).contains(&last_sequence)
             || !safe_relative_path(&audio.relative_path)
             || audio.size_bytes < 0
             || audio.checksum.trim().is_empty()
@@ -438,73 +551,80 @@ impl MeetingStore {
         if audio.relative_path != format!("{meeting_id}/recording.m4a") {
             bail!("invalid final meeting audio path");
         }
-        let mut transaction = self.pool.begin().await?;
-        let Some(row) =
-            sqlx::query("SELECT state, started_at FROM meetings WHERE id = ? AND user_id = ?")
-                .bind(meeting_id)
-                .bind(user_id)
-                .fetch_optional(&mut *transaction)
-                .await?
-        else {
-            transaction.rollback().await?;
-            return Ok(false);
-        };
-        let state = MeetingState::parse(&row.get::<String, _>("state"))?;
-        let started_at = row.get::<f64, _>("started_at");
-        if ended_at < started_at {
-            bail!("ended_at must not precede started_at");
-        }
-        if !matches!(
-            state,
-            MeetingState::Recording
-                | MeetingState::Paused
-                | MeetingState::Interrupted
-                | MeetingState::Uploading
-                | MeetingState::Processing
-        ) {
-            bail!("meeting cannot be finalized from its current state");
-        }
-        let duration_ms: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(end_ms), 0) FROM meeting_chunks WHERE meeting_id = ?",
-        )
-        .bind(meeting_id)
-        .fetch_one(&mut *transaction)
-        .await?;
         let now = unix_time();
-        sqlx::query(
+        let mut transaction = self.pool.begin().await?;
+        let completed = sqlx::query(
             "UPDATE meetings
-             SET state = 'processing', ended_at = ?, duration_ms = ?,
+             SET state = 'processing',
+                 duration_ms = (
+                     SELECT COALESCE(MAX(end_ms), 0) FROM meeting_chunks
+                     WHERE meeting_chunks.meeting_id = meetings.id AND sequence <= ?
+                 ),
                  final_audio_path = ?, final_audio_size_bytes = ?,
                  final_audio_checksum = ?, error_stage = NULL, error_message = NULL,
                  updated_at = ?
-             WHERE id = ? AND user_id = ?",
+             WHERE id = ? AND user_id = ? AND final_sequence = ? AND state = 'uploading'",
         )
-        .bind(ended_at)
-        .bind(duration_ms)
+        .bind(last_sequence)
         .bind(&audio.relative_path)
         .bind(audio.size_bytes)
         .bind(&audio.checksum)
         .bind(now)
         .bind(meeting_id)
         .bind(user_id)
+        .bind(last_sequence)
         .execute(&mut *transaction)
         .await?;
-        sqlx::query(
-            "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
-             VALUES (?, 'transcript', 'pending', ?)
-             ON CONFLICT(meeting_id, stage) DO UPDATE
-             SET status = CASE
-                    WHEN meeting_processing_jobs.status = 'completed' THEN 'completed'
-                    ELSE 'pending'
-                 END,
-                 updated_at = excluded.updated_at",
+        if completed.rows_affected() == 1 {
+            sqlx::query(
+                "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
+                 VALUES (?, 'transcript', 'pending', ?)
+                 ON CONFLICT(meeting_id, stage) DO UPDATE
+                 SET status = CASE
+                        WHEN meeting_processing_jobs.status = 'completed' THEN 'completed'
+                        ELSE 'pending'
+                     END,
+                     updated_at = excluded.updated_at",
+            )
+            .bind(meeting_id)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Ok(FinalizeOutcome::Finalized(MeetingState::Processing));
+        }
+
+        let row = sqlx::query(
+            "SELECT state, final_sequence, final_audio_path,
+                    final_audio_size_bytes, final_audio_checksum
+             FROM meetings WHERE id = ? AND user_id = ?",
         )
         .bind(meeting_id)
-        .bind(now)
-        .execute(&mut *transaction)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
         .await?;
-        transaction.commit().await?;
-        Ok(true)
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(FinalizeOutcome::NotFound);
+        };
+        let state = MeetingState::parse(&row.get::<String, _>("state"))?;
+        let has_audio = row.get::<Option<String>, _>("final_audio_path").is_some()
+            && row
+                .get::<Option<i64>, _>("final_audio_size_bytes")
+                .is_some()
+            && row
+                .get::<Option<String>, _>("final_audio_checksum")
+                .is_some();
+        let outcome = if row.get::<Option<i64>, _>("final_sequence") == Some(last_sequence)
+            && matches!(state, MeetingState::Processing | MeetingState::Completed)
+            && has_audio
+        {
+            FinalizeOutcome::Finalized(state)
+        } else {
+            FinalizeOutcome::Conflict
+        };
+        transaction.rollback().await?;
+        Ok(outcome)
     }
 
     pub async fn owned_final_audio(
@@ -866,7 +986,7 @@ fn unix_time() -> f64 {
 mod tests {
     use std::sync::Arc;
 
-    use sqlx::Row;
+    use sqlx::{Row, SqlitePool};
     use tokio::sync::Barrier;
 
     use crate::{
@@ -886,6 +1006,45 @@ mod tests {
         let store = MeetingStore::new(context.pool_clone());
         store.initialize().await.unwrap();
         (directory, context, store)
+    }
+
+    #[tokio::test]
+    async fn initialize_adds_final_sequence_without_losing_existing_meetings() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let database_url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("migration.sqlite3").display()
+        );
+        let pool = SqlitePool::connect(&database_url).await?;
+        sqlx::query(
+            "CREATE TABLE meetings (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                updated_at REAL NOT NULL
+             )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("INSERT INTO meetings(id, user_id, updated_at) VALUES ('legacy', 'user-a', 1)")
+            .execute(&pool)
+            .await?;
+
+        MeetingStore::new(pool.clone()).initialize().await?;
+
+        let columns = sqlx::query("PRAGMA table_info(meetings)")
+            .fetch_all(&pool)
+            .await?;
+        assert!(
+            columns
+                .iter()
+                .any(|row| row.get::<String, _>("name") == "final_sequence")
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE id = 'legacy'")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(rows, 1);
+        Ok(())
     }
 
     #[tokio::test]
@@ -991,6 +1150,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_record_chunk_rejects_excessive_sequence() -> anyhow::Result<()> {
+        let (_directory, _context, store) = test_store().await;
+        let meeting = store
+            .create("user-a", "bounded-legacy-chunk", 100.0)
+            .await?;
+
+        let error = store
+            .record_chunk(&meeting.id, 100_001, 0, 1_000, &"f".repeat(64), 100)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "meeting chunk sequence exceeds safety limit"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_missing_sequence_query_rejects_excessive_boundary() -> anyhow::Result<()> {
+        let (_directory, _context, store) = test_store().await;
+        let meeting = store
+            .create("user-a", "bounded-legacy-finalization", 100.0)
+            .await?;
+
+        let error = store
+            .missing_sequences(&meeting.id, 100_001)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "meeting final sequence exceeds safety limit"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn record_verified_chunk_rejects_excessive_sequence() -> anyhow::Result<()> {
+        let (_directory, _context, store) = test_store().await;
+        let meeting = store.create("user-a", "bounded-chunk", 100.0).await?;
+
+        let error = store
+            .record_verified_chunk(
+                &meeting.id,
+                100_001,
+                0,
+                1_000,
+                &"e".repeat(64),
+                100,
+                &format!("{}/chunks/100001.m4a", meeting.id),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "meeting chunk sequence exceeds safety limit"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_sequence_query_rejects_excessive_boundary() -> anyhow::Result<()> {
+        let (_directory, _context, store) = test_store().await;
+        let meeting = store
+            .create("user-a", "bounded-finalization", 100.0)
+            .await?;
+
+        let error = store
+            .missing_verified_sequences(&meeting.id, 100_001)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "meeting final sequence exceeds safety limit"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn verified_chunk_path_is_bound_to_its_meeting_and_sequence() -> anyhow::Result<()> {
         let (_directory, _context, store) = test_store().await;
         let meeting = store.create("user-a", "bound-chunk", 100.0).await?;
@@ -1054,7 +1295,7 @@ mod tests {
         };
 
         let error = store
-            .finalize_owned_upload("user-a", &meeting.id, 110.0, &audio)
+            .complete_owned_finalization("user-a", &meeting.id, 0, &audio)
             .await
             .unwrap_err();
 
