@@ -194,31 +194,11 @@ impl MeetingStore {
         if checksum.trim().is_empty() {
             bail!("chunk checksum must not be empty");
         }
-        let mut transaction = self.pool.begin().await?;
-        if let Some(row) = sqlx::query(
-            "SELECT start_ms, end_ms, checksum, size_bytes
-             FROM meeting_chunks WHERE meeting_id = ? AND sequence = ?",
-        )
-        .bind(meeting_id)
-        .bind(sequence)
-        .fetch_optional(&mut *transaction)
-        .await?
-        {
-            let identical = row.get::<i64, _>("start_ms") == start_ms
-                && row.get::<i64, _>("end_ms") == end_ms
-                && row.get::<String, _>("checksum") == checksum
-                && row.get::<i64, _>("size_bytes") == size_bytes;
-            transaction.commit().await?;
-            return Ok(if identical {
-                ChunkWrite::Existing
-            } else {
-                ChunkWrite::Conflict
-            });
-        }
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO meeting_chunks(
                 meeting_id, sequence, start_ms, end_ms, checksum, size_bytes, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+             ) VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(meeting_id, sequence) DO NOTHING",
         )
         .bind(meeting_id)
         .bind(sequence)
@@ -227,10 +207,29 @@ impl MeetingStore {
         .bind(checksum)
         .bind(size_bytes)
         .bind(unix_time())
-        .execute(&mut *transaction)
+        .execute(&self.pool)
         .await?;
-        transaction.commit().await?;
-        Ok(ChunkWrite::Inserted)
+        if result.rows_affected() == 1 {
+            return Ok(ChunkWrite::Inserted);
+        }
+
+        let row = sqlx::query(
+            "SELECT start_ms, end_ms, checksum, size_bytes
+             FROM meeting_chunks WHERE meeting_id = ? AND sequence = ?",
+        )
+        .bind(meeting_id)
+        .bind(sequence)
+        .fetch_one(&self.pool)
+        .await?;
+        let identical = row.get::<i64, _>("start_ms") == start_ms
+            && row.get::<i64, _>("end_ms") == end_ms
+            && row.get::<String, _>("checksum") == checksum
+            && row.get::<i64, _>("size_bytes") == size_bytes;
+        Ok(if identical {
+            ChunkWrite::Existing
+        } else {
+            ChunkWrite::Conflict
+        })
     }
 
     pub async fn missing_sequences(
@@ -279,7 +278,14 @@ impl MeetingStore {
         let started_at = row.get::<f64, _>("started_at");
         let duration_ms = match ended_at {
             Some(value) if value.is_finite() && value >= started_at => {
-                Some(((value - started_at) * 1000.0).round() as i64)
+                let row = sqlx::query(
+                    "SELECT COALESCE(MAX(end_ms), 0) AS duration_ms
+                     FROM meeting_chunks WHERE meeting_id = ?",
+                )
+                .bind(meeting_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+                Some(row.get::<i64, _>("duration_ms"))
             }
             Some(_) => bail!("ended_at must not precede started_at"),
             None => None,
@@ -493,7 +499,10 @@ fn unix_time() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use sqlx::Row;
+    use tokio::sync::Barrier;
 
     use crate::{
         context::ContextStore,
@@ -528,9 +537,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transition_enforces_the_recording_lifecycle() -> anyhow::Result<()> {
+    async fn transition_excludes_paused_wall_clock_from_recorded_duration() -> anyhow::Result<()> {
         let (_directory, _context, store) = test_store().await;
         let meeting = store.create("user-a", "lifecycle", 100.0).await?;
+        store
+            .record_chunk(&meeting.id, 0, 0, 10_000, "first", 100)
+            .await?;
+        store
+            .record_chunk(&meeting.id, 1, 10_000, 20_000, "second", 100)
+            .await?;
         assert!(
             store
                 .transition(&meeting.id, MeetingState::Paused, None)
@@ -562,7 +577,9 @@ mod tests {
         );
         let completed = store.get_owned("user-a", &meeting.id).await?.unwrap();
         assert_eq!(completed.ended_at, Some(130.0));
-        assert_eq!(completed.duration_ms, Some(30_000));
+        // Thirty seconds elapsed on the wall clock, but the chunk timeline excludes
+        // the ten-second pause and is the authoritative recorded-audio duration.
+        assert_eq!(completed.duration_ms, Some(20_000));
         assert!(
             store
                 .transition(&meeting.id, MeetingState::Recording, None)
@@ -603,6 +620,39 @@ mod tests {
             .record_chunk(&meeting.id, 2, 30_000, 45_000, "ghi", 100)
             .await?;
         assert_eq!(store.missing_sequences(&meeting.id, 3).await?, vec![1, 3]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_identical_chunk_retries_are_idempotent() -> anyhow::Result<()> {
+        let (_directory, _context, store) = test_store().await;
+        let meeting = store.create("user-a", "concurrent-chunks", 100.0).await?;
+        let concurrency = 8;
+        let barrier = Arc::new(Barrier::new(concurrency));
+        let mut tasks = Vec::new();
+        for _ in 0..concurrency {
+            let store = store.clone();
+            let meeting_id = meeting.id.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store
+                    .record_chunk(&meeting_id, 0, 0, 15_000, "same", 100)
+                    .await
+            }));
+        }
+
+        let mut inserted = 0;
+        let mut existing = 0;
+        for task in tasks {
+            match task.await?? {
+                ChunkWrite::Inserted => inserted += 1,
+                ChunkWrite::Existing => existing += 1,
+                ChunkWrite::Conflict => anyhow::bail!("identical retry must not conflict"),
+            }
+        }
+        assert_eq!(inserted, 1);
+        assert_eq!(existing, concurrency - 1);
         Ok(())
     }
 
