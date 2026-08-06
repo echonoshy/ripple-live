@@ -8,6 +8,7 @@ pub mod config;
 pub mod context;
 pub mod context_compiler;
 pub mod endpointing;
+pub mod meeting;
 pub mod memory;
 pub mod orchestrator;
 pub mod protocol;
