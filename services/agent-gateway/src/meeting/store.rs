@@ -109,6 +109,18 @@ impl MeetingStore {
         idempotency_key: &str,
         started_at: f64,
     ) -> anyhow::Result<Meeting> {
+        Ok(self
+            .create_with_status(user_id, idempotency_key, started_at)
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn create_with_status(
+        &self,
+        user_id: &str,
+        idempotency_key: &str,
+        started_at: f64,
+    ) -> anyhow::Result<(Meeting, bool)> {
         if user_id.trim().is_empty() || idempotency_key.trim().is_empty() {
             bail!("user_id and idempotency_key must not be empty");
         }
@@ -117,7 +129,7 @@ impl MeetingStore {
         }
         let now = unix_time();
         let mut transaction = self.pool.begin().await?;
-        sqlx::query(
+        let insert = sqlx::query(
             "INSERT INTO meetings(
                 id, user_id, idempotency_key, state, started_at, created_at, updated_at
              ) VALUES (?, ?, ?, 'recording', ?, ?, ?)
@@ -139,9 +151,11 @@ impl MeetingStore {
                 .await?
                 .get("id");
         transaction.commit().await?;
-        self.get_owned(user_id, &id)
+        let meeting = self
+            .get_owned(user_id, &id)
             .await?
-            .context("created meeting was not found")
+            .context("created meeting was not found")?;
+        Ok((meeting, insert.rows_affected() == 1))
     }
 
     pub async fn list(&self, user_id: &str) -> anyhow::Result<Vec<Meeting>> {
@@ -410,6 +424,53 @@ impl MeetingStore {
             .await?;
         transaction.commit().await?;
         Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn update_todo_completed(
+        &self,
+        user_id: &str,
+        meeting_id: &str,
+        todo_id: &str,
+        completed: bool,
+    ) -> anyhow::Result<Option<MeetingTodo>> {
+        let now = unix_time();
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "UPDATE meeting_todos
+             SET completed = ?, updated_at = ?
+             WHERE meeting_id = ? AND id = ?
+               AND EXISTS (
+                   SELECT 1 FROM meetings
+                   WHERE meetings.id = meeting_todos.meeting_id
+                     AND meetings.user_id = ?
+               )
+             RETURNING id, text, completed, source_start_ms, source_end_ms",
+        )
+        .bind(completed)
+        .bind(now)
+        .bind(meeting_id)
+        .bind(todo_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ? AND user_id = ?")
+            .bind(now)
+            .bind(meeting_id)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(Some(MeetingTodo {
+            id: row.get("id"),
+            text: row.get("text"),
+            completed: row.get("completed"),
+            source_start_ms: row.get("source_start_ms"),
+            source_end_ms: row.get("source_end_ms"),
+        }))
     }
 
     async fn transcript(&self, meeting_id: &str) -> anyhow::Result<Vec<TranscriptSegment>> {

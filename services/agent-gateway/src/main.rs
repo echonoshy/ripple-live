@@ -24,6 +24,7 @@ use ripple_agent_gateway::{
     config::Settings,
     context::{ContextStore, LibraryAction, LibraryScope},
     endpointing::{EndpointEvaluation, is_stop_command},
+    meeting::MeetingService,
     memory::{MemoryService, TodoUpdate},
     orchestrator::AgentOrchestrator,
     protocol::{ClientEvent, VideoFrame},
@@ -39,6 +40,12 @@ use tower_http::{
 use tracing::{Level, error, info, warn};
 use uuid::Uuid;
 
+mod meeting_api;
+
+use meeting_api::{
+    create_meeting, delete_meeting, get_meeting, list_meetings, update_meeting_todo,
+};
+
 const REALTIME_PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Clone)]
@@ -47,6 +54,7 @@ struct AppState {
     context: ContextStore,
     memories: MemoryService,
     orchestrator: AgentOrchestrator,
+    meetings: MeetingService,
 }
 
 struct ActiveResponse {
@@ -564,11 +572,14 @@ async fn main() -> anyhow::Result<()> {
         adapters,
         memories.clone(),
     )?;
+    let meetings = MeetingService::new(context.pool_clone());
+    meetings.initialize().await?;
     let state = AppState {
         settings: Arc::clone(&settings),
         context,
         memories,
         orchestrator,
+        meetings,
     };
     let app = app(state);
 
@@ -610,6 +621,15 @@ fn app(state: AppState) -> Router {
         .route(
             "/v1/todos/{todo_id}",
             axum::routing::patch(update_todo).delete(delete_todo),
+        )
+        .route("/v1/meetings", get(list_meetings).post(create_meeting))
+        .route(
+            "/v1/meetings/{meeting_id}",
+            get(get_meeting).delete(delete_meeting),
+        )
+        .route(
+            "/v1/meetings/{meeting_id}/todos/{todo_id}",
+            axum::routing::patch(update_meeting_todo),
         )
         .route("/v1/assets/{asset_id}/content", get(asset_content))
         .route("/v1/responses", post(create_response))
@@ -2936,6 +2956,8 @@ mod tests {
             memories.clone(),
         )
         .unwrap();
+        let meetings = MeetingService::new(context.pool_clone());
+        meetings.initialize().await.unwrap();
         (
             directory,
             AppState {
@@ -2943,6 +2965,7 @@ mod tests {
                 context,
                 memories,
                 orchestrator,
+                meetings,
             },
             token,
             conversation,
@@ -3160,6 +3183,283 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    }
+
+    async fn meeting_api_state() -> (TempDir, AppState, String, String) {
+        let (directory, state, owner_token, _, _) = test_state().await;
+        state
+            .context
+            .seed_invitation_codes(&["meeting-other".to_owned()], 1, 24)
+            .await
+            .unwrap();
+        let (_, other_token) = state
+            .context
+            .register_user(
+                "meeting-other@example.com",
+                "password-route",
+                "meeting-other",
+                24,
+            )
+            .await
+            .unwrap();
+        (directory, state, owner_token, other_token)
+    }
+
+    async fn create_meeting(state: &AppState, token: &str, key: &str) -> (StatusCode, Value) {
+        let response = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                "/v1/meetings",
+                token,
+                &json!({
+                    "idempotency_key": key,
+                    "started_at": 1_700_000_000.0
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        (status, json_body(response).await)
+    }
+
+    #[tokio::test]
+    async fn meeting_api_create_is_idempotent_and_reports_existing_resource() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+
+        let (created_status, created) = create_meeting(&state, &token, "device-uuid").await;
+        let (repeated_status, repeated) = create_meeting(&state, &token, "device-uuid").await;
+
+        assert_eq!(created_status, StatusCode::CREATED);
+        assert_eq!(created["data"]["state"], "recording");
+        assert_eq!(repeated_status, StatusCode::OK);
+        assert_eq!(repeated["data"]["id"], created["data"]["id"]);
+    }
+
+    #[tokio::test]
+    async fn meeting_api_rejects_unauthenticated_requests() {
+        let (_directory, state, _, _) = meeting_api_state().await;
+
+        let response = app(state)
+            .oneshot(Request::get("/v1/meetings").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn meeting_api_rejects_client_supplied_lifecycle_state() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+
+        let response = app(state)
+            .oneshot(authenticated_request(
+                "POST",
+                "/v1/meetings",
+                &token,
+                r#"{"idempotency_key":"device-uuid","started_at":1700000000.0,"state":"completed"}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn meeting_api_create_hides_persistence_failures_behind_generic_server_error() {
+        let (_directory, mut state, token, _) = meeting_api_state().await;
+        let failing_pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        failing_pool.close().await;
+        state.meetings = MeetingService::new(failing_pool);
+
+        let response = app(state)
+            .oneshot(authenticated_request(
+                "POST",
+                "/v1/meetings",
+                &token,
+                r#"{"idempotency_key":"device-uuid","started_at":1700000000.0}"#,
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = json_body(response).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "会议记录暂时不可用");
+    }
+
+    #[tokio::test]
+    async fn meeting_api_list_is_scoped_to_the_authenticated_owner() {
+        let (_directory, state, owner_token, other_token) = meeting_api_state().await;
+        let (_, owner) = create_meeting(&state, &owner_token, "owner-meeting").await;
+        create_meeting(&state, &other_token, "other-meeting").await;
+
+        let response = app(state)
+            .oneshot(authenticated_request(
+                "GET",
+                "/v1/meetings",
+                &owner_token,
+                "",
+            ))
+            .await
+            .unwrap();
+        let body = json_body(response).await;
+
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+        assert_eq!(body["data"][0]["id"], owner["data"]["id"]);
+    }
+
+    #[tokio::test]
+    async fn meeting_api_detail_hides_foreign_ids() {
+        let (_directory, state, owner_token, other_token) = meeting_api_state().await;
+        let (_, foreign) = create_meeting(&state, &other_token, "foreign-detail").await;
+
+        let response = app(state)
+            .oneshot(authenticated_request(
+                "GET",
+                &format!("/v1/meetings/{}", foreign["data"]["id"].as_str().unwrap()),
+                &owner_token,
+                "",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn meeting_api_delete_cascades_to_meeting_children() {
+        use ripple_agent_gateway::meeting::{
+            store::MeetingStore,
+            types::{MeetingTodo, TranscriptSegment},
+        };
+
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let user = state.context.authenticate(&token).await.unwrap().unwrap();
+        let store = MeetingStore::new(state.context.pool_clone());
+        let meeting = store
+            .create(&user.id, "delete-cascade", 1_700_000_000.0)
+            .await
+            .unwrap();
+        store
+            .record_chunk(&meeting.id, 0, 0, 1_000, "checksum", 32)
+            .await
+            .unwrap();
+        store
+            .replace_transcript(
+                &meeting.id,
+                &[TranscriptSegment {
+                    id: 1,
+                    start_ms: 0,
+                    end_ms: 1_000,
+                    text: "发布计划".to_owned(),
+                    provisional: false,
+                }],
+            )
+            .await
+            .unwrap();
+        store
+            .replace_artifact(
+                &meeting.id,
+                "计划会",
+                "确认发布计划",
+                &[MeetingTodo {
+                    id: "meeting-todo".to_owned(),
+                    text: "准备发布".to_owned(),
+                    completed: false,
+                    source_start_ms: Some(0),
+                    source_end_ms: Some(1_000),
+                }],
+            )
+            .await
+            .unwrap();
+
+        let response = app(state.clone())
+            .oneshot(authenticated_request(
+                "DELETE",
+                &format!("/v1/meetings/{}", meeting.id),
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        for table in [
+            "meeting_chunks",
+            "meeting_transcript_segments",
+            "meeting_todos",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE meeting_id = ?"
+            ))
+            .bind(&meeting.id)
+            .fetch_one(&state.context.pool_clone())
+            .await
+            .unwrap();
+            assert_eq!(count, 0, "{table} should be deleted by cascade");
+        }
+    }
+
+    #[tokio::test]
+    async fn meeting_api_todo_patch_is_owned_and_never_writes_global_todos() {
+        use ripple_agent_gateway::meeting::{store::MeetingStore, types::MeetingTodo};
+
+        let (_directory, state, owner_token, other_token) = meeting_api_state().await;
+        let owner = state
+            .context
+            .authenticate(&owner_token)
+            .await
+            .unwrap()
+            .unwrap();
+        let store = MeetingStore::new(state.context.pool_clone());
+        let meeting = store
+            .create(&owner.id, "todo-scope", 1_700_000_000.0)
+            .await
+            .unwrap();
+        store
+            .replace_artifact(
+                &meeting.id,
+                "计划会",
+                "确认发布计划",
+                &[MeetingTodo {
+                    id: "meeting-todo".to_owned(),
+                    text: "准备发布".to_owned(),
+                    completed: false,
+                    source_start_ms: None,
+                    source_end_ms: None,
+                }],
+            )
+            .await
+            .unwrap();
+
+        let foreign = app(state.clone())
+            .oneshot(authenticated_request(
+                "PATCH",
+                &format!("/v1/meetings/{}/todos/meeting-todo", meeting.id),
+                &other_token,
+                r#"{"completed":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+
+        let updated = app(state.clone())
+            .oneshot(authenticated_request(
+                "PATCH",
+                &format!("/v1/meetings/{}/todos/meeting-todo", meeting.id),
+                &owner_token,
+                r#"{"completed":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(updated.status(), StatusCode::OK);
+        assert_eq!(json_body(updated).await["data"]["completed"], true);
+
+        let global_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM todos")
+            .fetch_one(&state.context.pool_clone())
+            .await
+            .unwrap();
+        assert_eq!(global_count, 0);
     }
 }
 
