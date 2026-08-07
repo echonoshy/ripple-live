@@ -270,27 +270,6 @@ pub(super) async fn finalize_meeting(
         Ok(FinalizeOutcome::Pending) => None,
         Ok(FinalizeOutcome::LegacyVerificationRequired(audio)) => Some(audio),
         Ok(FinalizeOutcome::Finalized(meeting_state)) => {
-            if matches!(
-                meeting_state,
-                MeetingState::Processing | MeetingState::Completed
-            ) {
-                let audio = match state
-                    .meetings
-                    .owned_final_audio(&user.id, &meeting_id)
-                    .await
-                {
-                    Ok(Some(audio)) => audio,
-                    Ok(None) => {
-                        return meeting_internal_error(anyhow::anyhow!(
-                            "processing meeting has no final audio"
-                        ));
-                    }
-                    Err(error) => return meeting_internal_error(error),
-                };
-                state
-                    .meeting_processor
-                    .spawn_finalize_transcript(meeting_id.clone(), audio.relative_path);
-            }
             return finalized_response(&meeting_id, meeting_state);
         }
         Ok(FinalizeOutcome::Conflict) => {
@@ -340,7 +319,6 @@ pub(super) async fn finalize_meeting(
         .map(|chunk| chunk.relative_path.clone())
         .collect::<Vec<_>>();
     if let Some(expected) = legacy_audio {
-        let final_audio_path = expected.relative_path.clone();
         let proof = match state
             .meeting_storage
             .verify_legacy_finalization(
@@ -361,9 +339,6 @@ pub(super) async fn finalize_meeting(
             .await
         {
             Ok(FinalizeOutcome::Finalized(meeting_state)) => {
-                state
-                    .meeting_processor
-                    .spawn_finalize_transcript(meeting_id.clone(), final_audio_path);
                 finalized_response(&meeting_id, meeting_state)
             }
             Ok(FinalizeOutcome::Conflict) => api_error(StatusCode::CONFLICT, "会议结束边界冲突"),
@@ -403,9 +378,6 @@ pub(super) async fn finalize_meeting(
         .await
     {
         Ok(FinalizeOutcome::Finalized(meeting_state)) => {
-            state
-                .meeting_processor
-                .spawn_finalize_transcript(meeting_id.clone(), metadata.relative_path.clone());
             finalized_response(&meeting_id, meeting_state)
         }
         Ok(FinalizeOutcome::Conflict) => api_error(StatusCode::CONFLICT, "会议结束边界冲突"),
@@ -470,35 +442,11 @@ pub(super) async fn retry_meeting(
             Json(json!({"data": {"id": meeting_id, "stage": stage, "status": "running"}})),
         )
             .into_response(),
-        RetryStageOutcome::Queued => {
-            match stage {
-                ProcessingStage::Transcript => {
-                    let audio = match state
-                        .meetings
-                        .owned_final_audio(&user.id, &meeting_id)
-                        .await
-                    {
-                        Ok(Some(audio)) => audio,
-                        Ok(None) => return api_error(StatusCode::CONFLICT, "会议阶段尚不可重试"),
-                        Err(error) => return meeting_internal_error(error),
-                    };
-                    state
-                        .meeting_processor
-                        .spawn_finalize_transcript(meeting_id.clone(), audio.relative_path);
-                }
-                ProcessingStage::Organization => {
-                    state
-                        .meeting_processor
-                        .spawn_organize_meeting(meeting_id.clone());
-                }
-                ProcessingStage::Upload => unreachable!(),
-            }
-            (
-                StatusCode::ACCEPTED,
-                Json(json!({"data": {"id": meeting_id, "stage": stage, "status": "pending"}})),
-            )
-                .into_response()
-        }
+        RetryStageOutcome::Queued => (
+            StatusCode::ACCEPTED,
+            Json(json!({"data": {"id": meeting_id, "stage": stage, "status": "pending"}})),
+        )
+            .into_response(),
     }
 }
 

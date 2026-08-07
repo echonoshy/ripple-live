@@ -26,6 +26,7 @@ use ripple_agent_gateway::{
     endpointing::{EndpointEvaluation, is_stop_command},
     meeting::{
         MeetingService, processor::MeetingProcessor, storage::MeetingStorage, store::MeetingStore,
+        worker::MeetingWorker,
     },
     memory::{MemoryService, TodoUpdate},
     orchestrator::AgentOrchestrator,
@@ -584,12 +585,11 @@ async fn main() -> anyhow::Result<()> {
         settings.meeting_max_chunk_bytes,
         settings.ffmpeg_bin.clone(),
     );
-    let meeting_processor = MeetingProcessor::new(
-        MeetingStore::new(context.pool_clone()),
-        meeting_storage.clone(),
-        adapters,
-        2,
-    )?;
+    let meeting_store = MeetingStore::new(context.pool_clone());
+    let meeting_processor =
+        MeetingProcessor::new(meeting_store.clone(), meeting_storage.clone(), adapters, 2)?;
+    let _meeting_worker = MeetingWorker::new(meeting_store, meeting_processor.clone(), 10)?
+        .spawn(Duration::from_secs(2));
     let state = AppState {
         settings: Arc::clone(&settings),
         context,
@@ -4280,6 +4280,13 @@ mod tests {
         let finalized =
             finalize_meeting_request(&state, &token, meeting_id, 0, 1_700_000_001.0).await;
         assert_eq!(finalized.status(), StatusCode::ACCEPTED);
+        let worker = ripple_agent_gateway::meeting::worker::MeetingWorker::new(
+            MeetingStore::new(state.context.pool_clone()),
+            state.meeting_processor.clone(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(worker.run_once().await.unwrap(), 1);
         let mut final_transcript = false;
         for _ in 0..100 {
             let meeting = state
@@ -4302,6 +4309,7 @@ mod tests {
             final_transcript,
             "finalization should replace provisional transcript"
         );
+        assert_eq!(worker.run_once().await.unwrap(), 1);
         let mut organized = false;
         for _ in 0..100 {
             let meeting = state
@@ -4321,6 +4329,94 @@ mod tests {
         assert!(
             organized,
             "final transcript should automatically schedule organization"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalized_job_survives_state_recreation_until_worker_runs() {
+        let (directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "restart-finalize").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap().to_owned();
+        let user_id = state
+            .context
+            .authenticate(&token)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let bytes = generated_meeting_chunk(&directory.path().join("restart.m4a"), 440).await;
+        assert_eq!(
+            upload_meeting_chunk(&state, &token, &meeting_id, 0, 0, 360, &bytes)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            finalize_meeting_request(&state, &token, &meeting_id, 0, 1_700_000_001.0)
+                .await
+                .status(),
+            StatusCode::ACCEPTED
+        );
+
+        let settings = Arc::clone(&state.settings);
+        drop(state);
+        tokio::task::yield_now().await;
+        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
+            .await
+            .unwrap();
+        let adapters = ModelAdapters::new((*settings).clone()).unwrap();
+        let orchestrator = AgentOrchestrator::new(
+            Arc::clone(&settings),
+            context.clone(),
+            adapters.clone(),
+            memories.clone(),
+        )
+        .unwrap();
+        let meetings = MeetingService::new(context.pool_clone());
+        meetings.initialize().await.unwrap();
+        let meeting_storage = MeetingStorage::new(
+            settings.data_dir.join("meeting-recordings"),
+            settings.meeting_max_chunk_bytes,
+            settings.ffmpeg_bin.clone(),
+        );
+        let meeting_processor = MeetingProcessor::new(
+            MeetingStore::new(context.pool_clone()),
+            meeting_storage.clone(),
+            adapters,
+            2,
+        )
+        .unwrap();
+        let restarted = AppState {
+            settings,
+            context,
+            memories,
+            orchestrator,
+            meetings,
+            meeting_storage,
+            meeting_processor,
+        };
+        let worker = ripple_agent_gateway::meeting::worker::MeetingWorker::new(
+            MeetingStore::new(restarted.context.pool_clone()),
+            restarted.meeting_processor.clone(),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(worker.run_once().await.unwrap(), 1);
+        let recovered = restarted
+            .meetings
+            .get_owned(&user_id, &meeting_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered.progress.transcript.status,
+            ripple_agent_gateway::meeting::types::ProcessingJobStatus::Completed
+        );
+        assert_eq!(
+            recovered.state,
+            ripple_agent_gateway::meeting::types::MeetingState::Completed
         );
     }
 
@@ -4372,6 +4468,13 @@ mod tests {
                 .status(),
             StatusCode::ACCEPTED
         );
+        let worker = ripple_agent_gateway::meeting::worker::MeetingWorker::new(
+            MeetingStore::new(state.context.pool_clone()),
+            state.meeting_processor.clone(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(worker.run_once().await.unwrap(), 1);
         let mut recovered = false;
         for _ in 0..100 {
             let status = sqlx::query_scalar::<_, String>(
@@ -4480,6 +4583,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let worker = ripple_agent_gateway::meeting::worker::MeetingWorker::new(
+            MeetingStore::new(state.context.pool_clone()),
+            state.meeting_processor.clone(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(worker.run_once().await.unwrap(), 1);
 
         let mut completed = false;
         for _ in 0..100 {

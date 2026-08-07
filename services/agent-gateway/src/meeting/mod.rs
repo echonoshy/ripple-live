@@ -2,6 +2,7 @@ pub mod processor;
 pub mod storage;
 pub mod store;
 pub mod types;
+pub mod worker;
 
 use sqlx::SqlitePool;
 

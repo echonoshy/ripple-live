@@ -15,6 +15,9 @@ use super::types::{
     ProcessingJobStatus, ProcessingJobView, ProcessingStage, RetryStageOutcome,
     StoredChunkMetadata, TranscriptJobClaim, TranscriptSegment,
 };
+use super::worker::PendingMeetingJob;
+
+pub const MAX_PROCESSING_ATTEMPTS: i64 = 3;
 
 #[derive(Clone)]
 pub struct MeetingStore {
@@ -579,6 +582,52 @@ impl MeetingStore {
         Ok(())
     }
 
+    pub async fn runnable_processing_jobs(
+        &self,
+        limit: i64,
+    ) -> anyhow::Result<Vec<PendingMeetingJob>> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let stale_before = unix_time() - 900.0;
+        let rows = sqlx::query(
+            "SELECT jobs.meeting_id, jobs.stage,
+                    COALESCE(meetings.final_audio_path, '') AS final_audio_path
+             FROM meeting_processing_jobs AS jobs
+             INNER JOIN meetings ON meetings.id = jobs.meeting_id
+             WHERE jobs.stage IN ('transcript', 'organization')
+               AND jobs.attempt < ?
+               AND (jobs.stage = 'organization' OR meetings.final_audio_path IS NOT NULL)
+               AND (jobs.status IN ('pending', 'failed')
+                    OR (jobs.status = 'running' AND jobs.updated_at < ?))
+             ORDER BY jobs.updated_at ASC, jobs.meeting_id ASC,
+                      CASE jobs.stage WHEN 'transcript' THEN 0 ELSE 1 END ASC
+             LIMIT ?",
+        )
+        .bind(MAX_PROCESSING_ATTEMPTS)
+        .bind(stale_before)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut jobs = Vec::with_capacity(rows.len());
+        for row in rows {
+            let meeting_id = row.get::<String, _>("meeting_id");
+            let audio_path = row.get::<String, _>("final_audio_path");
+            if !audio_path.is_empty()
+                && (!safe_relative_path(&audio_path)
+                    || audio_path != format!("{meeting_id}/recording.m4a"))
+            {
+                bail!("unsafe stored final meeting audio path");
+            }
+            jobs.push(PendingMeetingJob {
+                meeting_id,
+                stage: ProcessingStage::parse(row.get::<String, _>("stage").as_str())?,
+                audio_path,
+            });
+        }
+        Ok(jobs)
+    }
+
     pub async fn claim_transcript_job(
         &self,
         meeting_id: &str,
@@ -590,12 +639,14 @@ impl MeetingStore {
              SET status = 'running', attempt = attempt + 1,
                  diagnostic_error = NULL, updated_at = ?
              WHERE meeting_id = ? AND stage = 'transcript'
+               AND attempt < ?
                AND (status IN ('pending', 'failed')
                     OR (status = 'running' AND updated_at < ?))
              RETURNING attempt",
         )
         .bind(now)
         .bind(meeting_id)
+        .bind(MAX_PROCESSING_ATTEMPTS)
         .bind(stale_before)
         .fetch_optional(&self.pool)
         .await?;
@@ -988,7 +1039,8 @@ impl MeetingStore {
             "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
              VALUES (?, ?, 'pending', ?)
              ON CONFLICT(meeting_id, stage) DO UPDATE SET
-                status = 'pending', diagnostic_error = NULL, updated_at = excluded.updated_at",
+                attempt = 0, status = 'pending', diagnostic_error = NULL,
+                updated_at = excluded.updated_at",
         )
         .bind(meeting_id)
         .bind(stage_name)
@@ -1763,6 +1815,7 @@ async fn claim_processing_job(
          SET status = 'running', attempt = attempt + 1,
              diagnostic_error = NULL, updated_at = ?
          WHERE meeting_id = ? AND stage = ?
+           AND attempt < ?
            AND (status IN ('pending', 'failed')
                 OR (status = 'running' AND updated_at < ?))
          RETURNING attempt",
@@ -1770,6 +1823,7 @@ async fn claim_processing_job(
     .bind(now)
     .bind(meeting_id)
     .bind(stage)
+    .bind(MAX_PROCESSING_ATTEMPTS)
     .bind(stale_before)
     .fetch_optional(pool)
     .await?;
@@ -1969,6 +2023,72 @@ mod tests {
         let store = MeetingStore::new(context.pool_clone());
         store.initialize().await.unwrap();
         (directory, context, store)
+    }
+
+    #[tokio::test]
+    async fn automatic_claim_stops_after_three_failures() -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store.create("user-a", "attempt-ceiling", 1.0).await?;
+        sqlx::query(
+            "UPDATE meetings SET final_audio_path = ?, final_audio_size_bytes = 1,
+                 final_audio_checksum = 'sum', state = 'processing' WHERE id = ?",
+        )
+        .bind(format!("{}/recording.m4a", meeting.id))
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, attempt, status, updated_at)
+             VALUES (?, 'transcript', 3, 'failed', 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        assert!(store.runnable_processing_jobs(10).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_retry_resets_attempt_budget() -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store.create("user-a", "retry-budget", 1.0).await?;
+        sqlx::query(
+            "UPDATE meetings SET final_audio_path = ?, final_audio_size_bytes = 1,
+                 final_audio_checksum = 'sum', state = 'processing',
+                 error_stage = 'transcript', error_message = 'safe' WHERE id = ?",
+        )
+        .bind(format!("{}/recording.m4a", meeting.id))
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(
+                 meeting_id, stage, attempt, status, diagnostic_error, updated_at
+             ) VALUES (?, 'transcript', 3, 'failed', 'safe', 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        assert_eq!(
+            store
+                .retry_stage_owned("user-a", &meeting.id, ProcessingStage::Transcript)
+                .await?,
+            RetryStageOutcome::Queued
+        );
+        let (attempt, status, diagnostic): (i64, String, Option<String>) = sqlx::query_as(
+            "SELECT attempt, status, diagnostic_error FROM meeting_processing_jobs
+             WHERE meeting_id = ? AND stage = 'transcript'",
+        )
+        .bind(&meeting.id)
+        .fetch_one(&context.pool_clone())
+        .await?;
+        assert_eq!(attempt, 0);
+        assert_eq!(status, "pending");
+        assert_eq!(diagnostic, None);
+        assert_eq!(store.runnable_processing_jobs(10).await?.len(), 1);
+        Ok(())
     }
 
     #[tokio::test]
@@ -3415,7 +3535,7 @@ mod tests {
         );
         assert_eq!(
             store.claim_transcript_job(&meeting.id).await?,
-            TranscriptJobClaim::Claimed { attempt: 2 }
+            TranscriptJobClaim::Claimed { attempt: 1 }
         );
         assert_eq!(
             store
@@ -3423,7 +3543,7 @@ mod tests {
                 .await?,
             RetryStageOutcome::Busy
         );
-        store.complete_transcript_job(&meeting.id, 2, &[]).await?;
+        store.complete_transcript_job(&meeting.id, 1, &[]).await?;
         assert_eq!(
             store
                 .retry_stage_owned("user-a", &meeting.id, ProcessingStage::Transcript)

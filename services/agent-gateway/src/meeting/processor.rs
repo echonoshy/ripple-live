@@ -11,9 +11,10 @@ use tokio::{sync::Semaphore, task::JoinHandle};
 use crate::adapters::ModelAdapters;
 
 use super::types::{
-    MAX_MEETING_CHUNK_SEQUENCE, MeetingArtifact, MeetingTodoDraft, StoredChunkMetadata,
-    TranscriptJobClaim, TranscriptSegment,
+    MAX_MEETING_CHUNK_SEQUENCE, MeetingArtifact, MeetingTodoDraft, ProcessingStage,
+    StoredChunkMetadata, TranscriptJobClaim, TranscriptSegment,
 };
+use super::worker::PendingMeetingJob;
 use super::{storage::MeetingStorage, store::MeetingStore};
 
 const PCM_SAMPLE_RATE: usize = 16_000;
@@ -85,6 +86,27 @@ impl MeetingProcessor {
         })
     }
 
+    pub async fn process_job(&self, job: PendingMeetingJob) {
+        let result = match job.stage {
+            ProcessingStage::Transcript => self
+                .finalize_transcript(&job.meeting_id, &job.audio_path)
+                .await
+                .map(|_| ()),
+            ProcessingStage::Organization => {
+                self.organize_meeting(&job.meeting_id).await.map(|_| ())
+            }
+            ProcessingStage::Upload => return,
+        };
+        if let Err(error) = result {
+            tracing::warn!(
+                meeting_id = job.meeting_id,
+                stage = ?job.stage,
+                error = %format!("{error:#}"),
+                "meeting processing job failed"
+            );
+        }
+    }
+
     pub fn spawn_transcribe_chunk(
         &self,
         meeting_id: String,
@@ -122,43 +144,6 @@ impl MeetingProcessor {
                 );
             }
         }))
-    }
-
-    pub fn spawn_finalize_transcript(
-        &self,
-        meeting_id: String,
-        relative_path: String,
-    ) -> JoinHandle<()> {
-        let processor = self.clone();
-        tokio::spawn(async move {
-            match processor
-                .finalize_transcript(&meeting_id, &relative_path)
-                .await
-            {
-                Ok(Some(_)) => {
-                    if let Err(error) = processor.organize_meeting(&meeting_id).await {
-                        tracing::warn!(meeting_id, error = %format!("{error:#}"), "meeting organization failed");
-                    }
-                }
-                Ok(None) => {
-                    if let Err(error) = processor.organize_meeting(&meeting_id).await {
-                        tracing::warn!(meeting_id, error = %format!("{error:#}"), "meeting organization failed");
-                    }
-                }
-                Err(_) => {
-                    tracing::warn!(meeting_id, "meeting final transcription failed");
-                }
-            }
-        })
-    }
-
-    pub fn spawn_organize_meeting(&self, meeting_id: String) -> JoinHandle<()> {
-        let processor = self.clone();
-        tokio::spawn(async move {
-            if let Err(error) = processor.organize_meeting(&meeting_id).await {
-                tracing::warn!(meeting_id, error = %format!("{error:#}"), "meeting organization failed");
-            }
-        })
     }
 
     pub async fn organize_meeting(
@@ -1043,7 +1028,12 @@ mod tests {
         adapters::ModelAdapters,
         config::Settings,
         context::ContextStore,
-        meeting::{storage::MeetingStorage, store::MeetingStore, types::TranscriptSegment},
+        meeting::{
+            storage::MeetingStorage,
+            store::MeetingStore,
+            types::{ProcessingStage, TranscriptSegment},
+            worker::PendingMeetingJob,
+        },
     };
     use sha2::{Digest, Sha256};
     use tokio::process::Command;
@@ -1800,10 +1790,15 @@ mod tests {
         .await?;
         let processor = processor.with_window_for_test(250, 100);
 
-        let first = processor.spawn_finalize_transcript(meeting_id.clone(), relative_path.clone());
-        let second = processor.spawn_finalize_transcript(meeting_id, relative_path);
-        first.await?;
-        second.await?;
+        let job = PendingMeetingJob {
+            meeting_id,
+            stage: ProcessingStage::Transcript,
+            audio_path: relative_path,
+        };
+        tokio::join!(
+            processor.process_job(job.clone()),
+            processor.process_job(job)
+        );
 
         assert_eq!(probe.attempts(), 2);
         Ok(())
