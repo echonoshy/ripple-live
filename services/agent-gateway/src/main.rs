@@ -4055,6 +4055,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn meeting_api_list_and_detail_expose_same_processing_progress() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "progress-contract").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
+             VALUES (?, 'transcript', 'pending', 1)",
+        )
+        .bind(meeting_id)
+        .execute(&state.context.pool_clone())
+        .await
+        .unwrap();
+
+        let list = app(state.clone())
+            .oneshot(authenticated_request("GET", "/v1/meetings", &token, ""))
+            .await
+            .unwrap();
+        let detail = app(state)
+            .oneshot(authenticated_request(
+                "GET",
+                &format!("/v1/meetings/{meeting_id}"),
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        let list_progress = json_body(list).await["data"][0]["progress"].clone();
+        let detail_progress = json_body(detail).await["data"]["progress"].clone();
+
+        assert_eq!(list_progress, detail_progress);
+        assert_eq!(detail_progress["transcript"]["status"], "pending");
+        assert_eq!(detail_progress["organization"]["status"], "not_started");
+        assert_eq!(detail_progress["chunk_count"], 0);
+        assert_eq!(detail_progress["missing_sequences"], serde_json::json!([]));
+        assert_eq!(detail_progress["recording_verified"], false);
+    }
+
+    #[tokio::test]
     async fn meeting_api_detail_hides_foreign_ids() {
         let (_directory, state, owner_token, other_token) = meeting_api_state().await;
         let (_, foreign) = create_meeting(&state, &other_token, "foreign-detail").await;

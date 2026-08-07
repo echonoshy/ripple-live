@@ -11,8 +11,9 @@ use uuid::Uuid;
 use super::storage::VerifiedLegacyFinalization;
 use super::types::{
     ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_CHUNK_SEQUENCE,
-    MAX_MEETING_DURATION_MS, Meeting, MeetingArtifact, MeetingState, MeetingTodo, ProcessingStage,
-    RetryStageOutcome, StoredChunkMetadata, TranscriptJobClaim, TranscriptSegment,
+    MAX_MEETING_DURATION_MS, Meeting, MeetingArtifact, MeetingProgress, MeetingState, MeetingTodo,
+    ProcessingJobStatus, ProcessingJobView, ProcessingStage, RetryStageOutcome,
+    StoredChunkMetadata, TranscriptJobClaim, TranscriptSegment,
 };
 
 #[derive(Clone)]
@@ -188,7 +189,11 @@ impl MeetingStore {
         .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(meeting_from_row).collect()
+        let mut meetings = Vec::with_capacity(rows.len());
+        for row in rows {
+            meetings.push(self.hydrate_meeting(row, false).await?);
+        }
+        Ok(meetings)
     }
 
     pub async fn get_owned(
@@ -208,10 +213,73 @@ impl MeetingStore {
         else {
             return Ok(None);
         };
-        let mut meeting = meeting_from_row(row)?;
-        meeting.transcript = self.transcript(meeting_id).await?;
-        meeting.todos = self.todos(meeting_id).await?;
-        Ok(Some(meeting))
+        Ok(Some(self.hydrate_meeting(row, true).await?))
+    }
+
+    pub async fn processing_progress(&self, meeting_id: &str) -> anyhow::Result<MeetingProgress> {
+        let meeting = sqlx::query(
+            "SELECT final_sequence, final_audio_path,
+                    final_audio_size_bytes, final_audio_checksum
+             FROM meetings WHERE id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .context("meeting not found")?;
+        let final_sequence = meeting.get::<Option<i64>, _>("final_sequence");
+        let chunk_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM meeting_chunks
+             WHERE meeting_id = ? AND verified = 1 AND content_path IS NOT NULL",
+        )
+        .bind(meeting_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let missing_sequences = match final_sequence {
+            Some(sequence) => {
+                self.missing_verified_sequences(meeting_id, sequence)
+                    .await?
+            }
+            None => Vec::new(),
+        };
+        let recording_verified = meeting
+            .get::<Option<String>, _>("final_audio_path")
+            .is_some()
+            && meeting
+                .get::<Option<i64>, _>("final_audio_size_bytes")
+                .is_some()
+            && meeting
+                .get::<Option<String>, _>("final_audio_checksum")
+                .is_some();
+        let mut transcript = not_started_processing_job();
+        let mut organization = not_started_processing_job();
+        let jobs = sqlx::query(
+            "SELECT stage, status, attempt, diagnostic_error
+             FROM meeting_processing_jobs
+             WHERE meeting_id = ? AND stage IN ('transcript', 'organization')",
+        )
+        .bind(meeting_id)
+        .fetch_all(&self.pool)
+        .await?;
+        for row in jobs {
+            let job = ProcessingJobView {
+                status: ProcessingJobStatus::parse(&row.get::<String, _>("status"))?,
+                attempt: row.get("attempt"),
+                error_message: row.get("diagnostic_error"),
+            };
+            match row.get::<String, _>("stage").as_str() {
+                "transcript" => transcript = job,
+                "organization" => organization = job,
+                _ => unreachable!("query limits meeting processing stages"),
+            }
+        }
+        Ok(MeetingProgress {
+            chunk_count,
+            final_sequence,
+            missing_sequences,
+            recording_verified,
+            transcript,
+            organization,
+        })
     }
 
     pub async fn record_chunk(
@@ -658,7 +726,8 @@ impl MeetingStore {
         .await?;
         sqlx::query(
             "UPDATE meetings
-             SET error_stage = CASE WHEN error_stage = 'transcript' THEN NULL ELSE error_stage END,
+             SET state = 'completed',
+                 error_stage = CASE WHEN error_stage = 'transcript' THEN NULL ELSE error_stage END,
                  error_message = CASE WHEN error_stage = 'transcript' THEN NULL ELSE error_message END,
                  updated_at = ?
              WHERE id = ?",
@@ -758,7 +827,7 @@ impl MeetingStore {
         }
         sqlx::query(
             "UPDATE meetings
-             SET title = ?, summary = ?, state = 'completed',
+             SET title = ?, summary = ?,
                  error_stage = NULL, error_message = NULL, updated_at = ?
              WHERE id = ?",
         )
@@ -928,14 +997,27 @@ impl MeetingStore {
         .bind(now)
         .execute(&mut *transaction)
         .await?;
-        sqlx::query(
-            "UPDATE meetings SET error_stage = NULL, error_message = NULL, state = 'processing', updated_at = ?
-             WHERE id = ?",
-        )
-        .bind(now)
-        .bind(meeting_id)
-        .execute(&mut *transaction)
-        .await?;
+        if stage == ProcessingStage::Transcript {
+            sqlx::query(
+                "UPDATE meetings
+                 SET error_stage = NULL, error_message = NULL,
+                     state = 'processing', updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(now)
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE meetings SET error_stage = NULL, error_message = NULL, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(now)
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
         transaction.commit().await?;
         Ok(RetryStageOutcome::Queued)
     }
@@ -1527,6 +1609,21 @@ impl MeetingStore {
             .collect())
     }
 
+    async fn hydrate_meeting(
+        &self,
+        row: SqliteRow,
+        include_content: bool,
+    ) -> anyhow::Result<Meeting> {
+        let meeting_id = row.get::<String, _>("id");
+        let progress = self.processing_progress(&meeting_id).await?;
+        let mut meeting = meeting_from_row(row, progress)?;
+        if include_content {
+            meeting.transcript = self.transcript(&meeting_id).await?;
+            meeting.todos = self.todos(&meeting_id).await?;
+        }
+        Ok(meeting)
+    }
+
     async fn todos(&self, meeting_id: &str) -> anyhow::Result<Vec<MeetingTodo>> {
         let rows = sqlx::query(
             "SELECT id, text, completed, source_start_ms, source_end_ms
@@ -1693,7 +1790,7 @@ fn safe_relative_path(value: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn meeting_from_row(row: SqliteRow) -> anyhow::Result<Meeting> {
+fn meeting_from_row(row: SqliteRow, progress: MeetingProgress) -> anyhow::Result<Meeting> {
     let error_stage = row
         .get::<Option<String>, _>("error_stage")
         .map(|value| ProcessingStage::parse(&value))
@@ -1710,9 +1807,18 @@ fn meeting_from_row(row: SqliteRow) -> anyhow::Result<Meeting> {
         error_message: row.get("error_message"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+        progress,
         transcript: Vec::new(),
         todos: Vec::new(),
     })
+}
+
+fn not_started_processing_job() -> ProcessingJobView {
+    ProcessingJobView {
+        status: ProcessingJobStatus::NotStarted,
+        attempt: 0,
+        error_message: None,
+    }
 }
 
 fn unix_time() -> f64 {
@@ -1733,8 +1839,8 @@ mod tests {
         context::ContextStore,
         meeting::types::{
             ChunkWrite, FinalAudioMetadata, FinalizeOutcome, MAX_MEETING_DURATION_MS,
-            MeetingArtifact, MeetingState, MeetingTodo, MeetingTodoDraft, ProcessingStage,
-            RetryStageOutcome, TranscriptJobClaim, TranscriptSegment,
+            MeetingArtifact, MeetingState, MeetingTodo, MeetingTodoDraft, ProcessingJobStatus,
+            ProcessingStage, RetryStageOutcome, TranscriptJobClaim, TranscriptSegment,
         },
     };
 
@@ -1952,6 +2058,67 @@ mod tests {
         assert!(store.get_owned("user-b", &meeting.id).await?.is_none());
         assert_eq!(store.list("user-b").await?, Vec::new());
         assert_eq!(store.list("user-a").await?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn processing_progress_reports_verified_recording_gaps_and_jobs() -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store.create("user-a", "progress", 100.0).await?;
+        for sequence in [0, 2] {
+            store
+                .record_verified_chunk(
+                    &meeting.id,
+                    sequence,
+                    sequence * 1_000,
+                    sequence * 1_000 + 1_000,
+                    &format!("checksum-{sequence}"),
+                    100,
+                    &format!("{}/chunks/{sequence}.m4a", meeting.id),
+                )
+                .await?;
+        }
+        store
+            .record_chunk(&meeting.id, 1, 1_000, 2_000, "unverified", 100)
+            .await?;
+        sqlx::query(
+            "UPDATE meetings
+             SET final_sequence = 2, final_audio_path = ?, final_audio_size_bytes = 300
+             WHERE id = ?",
+        )
+        .bind(format!("{}/recording.m4a", meeting.id))
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(
+                meeting_id, stage, attempt, status, diagnostic_error, updated_at
+             ) VALUES (?, 'transcript', 3, 'failed', 'safe failure', 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        let partial = store.processing_progress(&meeting.id).await?;
+        assert_eq!(partial.chunk_count, 2);
+        assert_eq!(partial.final_sequence, Some(2));
+        assert_eq!(partial.missing_sequences, vec![1]);
+        assert!(!partial.recording_verified);
+        assert_eq!(partial.transcript.status, ProcessingJobStatus::Failed);
+        assert_eq!(partial.transcript.attempt, 3);
+        assert_eq!(
+            partial.transcript.error_message.as_deref(),
+            Some("safe failure")
+        );
+        assert_eq!(partial.organization.status, ProcessingJobStatus::NotStarted);
+
+        sqlx::query("UPDATE meetings SET final_audio_checksum = 'final-sum' WHERE id = ?")
+            .bind(&meeting.id)
+            .execute(&context.pool_clone())
+            .await?;
+        let progress = store.processing_progress(&meeting.id).await?;
+        assert!(progress.recording_verified);
+        assert_eq!(store.list("user-a").await?[0].progress, progress);
         Ok(())
     }
 
@@ -2636,6 +2803,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn final_transcript_completes_meeting_before_organization() -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store
+            .create("user-a", "transcript-completion", 100.0)
+            .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, attempt, status, updated_at)
+             VALUES (?, 'transcript', 1, 'running', 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        store
+            .complete_transcript_job(
+                &meeting.id,
+                1,
+                &[TranscriptSegment {
+                    id: 0,
+                    start_ms: 0,
+                    end_ms: 1_000,
+                    text: "会议内容".to_owned(),
+                    provisional: false,
+                }],
+            )
+            .await?;
+
+        let detail = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(detail.state, MeetingState::Completed);
+        assert_eq!(
+            detail.progress.transcript.status,
+            ProcessingJobStatus::Completed
+        );
+        assert_eq!(
+            detail.progress.organization.status,
+            ProcessingJobStatus::Pending
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn organization_failure_keeps_completed_meeting_usable() -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store
+            .create("user-a", "organization-failure", 100.0)
+            .await?;
+        sqlx::query("UPDATE meetings SET state = 'completed' WHERE id = ?")
+            .bind(&meeting.id)
+            .execute(&context.pool_clone())
+            .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, attempt, status, updated_at)
+             VALUES (?, 'organization', 1, 'running', 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        store.fail_organization_job(&meeting.id, 1).await?;
+
+        let detail = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(detail.state, MeetingState::Completed);
+        assert_eq!(
+            detail.progress.organization.status,
+            ProcessingJobStatus::Failed
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stale_transcript_attempt_cannot_finish_a_reclaimed_job() -> anyhow::Result<()> {
         let (_directory, context, store) = test_store().await;
         let meeting = store.create("user-a", "job-fence", 100.0).await?;
@@ -2732,6 +2969,74 @@ mod tests {
                 .complete_organization_job(&meeting.id, 1, &artifact)
                 .await
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn organization_completion_does_not_change_meeting_state() -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store.create("user-a", "organization-state", 100.0).await?;
+        sqlx::query("UPDATE meetings SET state = 'processing' WHERE id = ?")
+            .bind(&meeting.id)
+            .execute(&context.pool_clone())
+            .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, attempt, status, updated_at)
+             VALUES (?, 'organization', 1, 'running', 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+        let artifact = MeetingArtifact {
+            title: "会议标题".to_owned(),
+            summary: "会议摘要".to_owned(),
+            todos: Vec::new(),
+        };
+
+        store
+            .complete_organization_job(&meeting.id, 1, &artifact)
+            .await?;
+
+        let detail = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(detail.state, MeetingState::Processing);
+        assert_eq!(
+            detail.progress.organization.status,
+            ProcessingJobStatus::Completed
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn organization_retry_preserves_completed_meeting_state() -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store.create("user-a", "organization-retry", 100.0).await?;
+        sqlx::query("UPDATE meetings SET state = 'completed' WHERE id = ?")
+            .bind(&meeting.id)
+            .execute(&context.pool_clone())
+            .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
+             VALUES (?, 'transcript', 'completed', 1),
+                    (?, 'organization', 'failed', 1)",
+        )
+        .bind(&meeting.id)
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        assert_eq!(
+            store
+                .retry_stage_owned("user-a", &meeting.id, ProcessingStage::Organization)
+                .await?,
+            RetryStageOutcome::Queued
+        );
+
+        let detail = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(detail.state, MeetingState::Completed);
+        assert_eq!(
+            detail.progress.organization.status,
+            ProcessingJobStatus::Pending
         );
         Ok(())
     }

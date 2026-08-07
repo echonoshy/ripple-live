@@ -109,6 +109,45 @@ pub struct MeetingArtifact {
     pub todos: Vec<MeetingTodoDraft>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessingJobStatus {
+    NotStarted,
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl ProcessingJobStatus {
+    pub(crate) fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            _ => bail!("unknown meeting processing job status: {value}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ProcessingJobView {
+    pub status: ProcessingJobStatus,
+    pub attempt: i64,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct MeetingProgress {
+    pub chunk_count: i64,
+    pub final_sequence: Option<i64>,
+    pub missing_sequences: Vec<i64>,
+    pub recording_verified: bool,
+    pub transcript: ProcessingJobView,
+    pub organization: ProcessingJobView,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Meeting {
     pub id: String,
@@ -122,6 +161,7 @@ pub struct Meeting {
     pub error_message: Option<String>,
     pub created_at: f64,
     pub updated_at: f64,
+    pub progress: MeetingProgress,
     pub transcript: Vec<TranscriptSegment>,
     pub todos: Vec<MeetingTodo>,
 }

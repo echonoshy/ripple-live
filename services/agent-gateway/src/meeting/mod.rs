@@ -8,8 +8,8 @@ use sqlx::SqlitePool;
 use storage::VerifiedLegacyFinalization;
 use store::MeetingStore;
 use types::{
-    ChunkWrite, FinalAudioMetadata, FinalizeOutcome, Meeting, MeetingTodo, ProcessingStage,
-    RetryStageOutcome, StoredChunkMetadata,
+    ChunkWrite, FinalAudioMetadata, FinalizeOutcome, Meeting, MeetingProgress, MeetingTodo,
+    ProcessingStage, RetryStageOutcome, StoredChunkMetadata,
 };
 
 #[derive(Clone)]
@@ -49,6 +49,10 @@ impl MeetingService {
         meeting_id: &str,
     ) -> anyhow::Result<Option<Meeting>> {
         self.store.get_owned(user_id, meeting_id).await
+    }
+
+    pub async fn processing_progress(&self, meeting_id: &str) -> anyhow::Result<MeetingProgress> {
+        self.store.processing_progress(meeting_id).await
     }
 
     pub async fn delete_owned(&self, user_id: &str, meeting_id: &str) -> anyhow::Result<bool> {
