@@ -572,10 +572,17 @@ pub(super) async fn get_meeting_audio(
         Ok(size_bytes) => size_bytes,
         Err(_) => return meeting_internal_error(anyhow::anyhow!("final audio size is invalid")),
     };
-    let requested_range = requested_range(
-        headers.get(RANGE).and_then(|value| value.to_str().ok()),
-        size_bytes,
-    );
+    let range_headers = headers.get_all(RANGE);
+    let mut range_values = range_headers.iter();
+    let requested_range = match (range_values.next(), range_values.next()) {
+        (None, None) => RequestedRange::Full,
+        (Some(value), None) => value
+            .to_str()
+            .map_or(RequestedRange::Unsatisfiable, |value| {
+                requested_range(Some(value), size_bytes)
+            }),
+        _ => RequestedRange::Unsatisfiable,
+    };
     let (start, end_inclusive, status) = match requested_range {
         RequestedRange::Full if size_bytes > 0 => (0, size_bytes - 1, StatusCode::OK),
         RequestedRange::Full => (0, 0, StatusCode::OK),

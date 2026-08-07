@@ -11,7 +11,7 @@ use axum::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -36,10 +36,7 @@ use ripple_agent_gateway::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, task::JoinHandle};
-use tower_http::{
-    cors::CorsLayer,
-    trace::{DefaultMakeSpan, TraceLayer},
-};
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{Level, error, info, warn};
 use uuid::Uuid;
 
@@ -670,14 +667,21 @@ fn app(state: AppState) -> Router {
         .route("/v1/responses", post(create_response))
         .route("/v1/agent/realtime", get(realtime))
         .layer(cors)
-        .layer(
-            TraceLayer::new_for_http().make_span_with(
-                DefaultMakeSpan::new()
-                    .include_headers(false)
-                    .level(Level::INFO),
-            ),
-        )
+        .layer(TraceLayer::new_for_http().make_span_with(request_trace_span))
         .with_state(state)
+}
+
+fn request_trace_path(uri: &Uri) -> &str {
+    uri.path()
+}
+
+fn request_trace_span<B>(request: &Request<B>) -> tracing::Span {
+    tracing::span!(
+        Level::INFO,
+        "http_request",
+        method = %request.method(),
+        path = %request_trace_path(request.uri()),
+    )
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
@@ -2491,6 +2495,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn request_trace_path_omits_query_parameters() {
+        let uri = "/v1/meetings/example/audio?ticket=replayable-secret"
+            .parse()
+            .unwrap();
+
+        assert_eq!(request_trace_path(&uri), "/v1/meetings/example/audio");
+    }
+
+    #[test]
     fn late_evaluation_result_cannot_finalize_a_resumed_turn() {
         let mut state = EndpointState::speaking("turn-1");
         state.pause("turn-1");
@@ -3693,9 +3706,9 @@ mod tests {
             audio.headers()[axum::http::header::CONTENT_RANGE],
             "bytes */10"
         );
-        let multiple = app(state)
+        let multiple = app(state.clone())
             .oneshot(
-                Request::get(path)
+                Request::get(&path)
                     .header("Range", "bytes=0-1,3-4")
                     .body(Body::empty())
                     .unwrap(),
@@ -3705,6 +3718,21 @@ mod tests {
         assert_eq!(multiple.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(
             multiple.headers()[axum::http::header::CONTENT_RANGE],
+            "bytes */10"
+        );
+        let duplicate_header = app(state)
+            .oneshot(
+                Request::get(path)
+                    .header("Range", "bytes=0-1")
+                    .header("Range", "bytes=3-4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate_header.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            duplicate_header.headers()[axum::http::header::CONTENT_RANGE],
             "bytes */10"
         );
     }
