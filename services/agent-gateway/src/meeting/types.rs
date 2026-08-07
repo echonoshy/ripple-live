@@ -217,3 +217,9 @@ pub struct FinalAudioMetadata {
     pub size_bytes: i64,
     pub checksum: String,
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct IssuedAudioTicket {
+    pub token: String,
+    pub expires_at: f64,
+}

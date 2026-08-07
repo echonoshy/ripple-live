@@ -46,8 +46,8 @@ use uuid::Uuid;
 mod meeting_api;
 
 use meeting_api::{
-    create_meeting, delete_meeting, finalize_meeting, get_meeting, get_meeting_audio,
-    list_meetings, retry_meeting, update_meeting_todo, upload_meeting_chunk,
+    create_meeting, create_meeting_audio_ticket, delete_meeting, finalize_meeting, get_meeting,
+    get_meeting_audio, list_meetings, retry_meeting, update_meeting_todo, upload_meeting_chunk,
 };
 
 const REALTIME_PROTOCOL_VERSION: u32 = 4;
@@ -661,6 +661,10 @@ fn app(state: AppState) -> Router {
         )
         .route("/v1/meetings/{meeting_id}/finalize", post(finalize_meeting))
         .route("/v1/meetings/{meeting_id}/retry", post(retry_meeting))
+        .route(
+            "/v1/meetings/{meeting_id}/audio-ticket",
+            post(create_meeting_audio_ticket),
+        )
         .route("/v1/meetings/{meeting_id}/audio", get(get_meeting_audio))
         .route("/v1/assets/{asset_id}/content", get(asset_content))
         .route("/v1/responses", post(create_response))
@@ -3498,6 +3502,213 @@ mod tests {
         (status, json_body(response).await)
     }
 
+    async fn completed_meeting_with_audio(state: &AppState, token: &str, key: &str) -> String {
+        let (_, meeting) = create_meeting(state, token, key).await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap().to_owned();
+        let audio_path = state
+            .settings
+            .data_dir
+            .join("meeting-recordings")
+            .join(&meeting_id)
+            .join("recording.m4a");
+        tokio::fs::create_dir_all(audio_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&audio_path, b"0123456789").await.unwrap();
+        sqlx::query(
+            "UPDATE meetings
+             SET state = 'completed', final_audio_path = ?, final_audio_size_bytes = 10,
+                 final_audio_checksum = 'test-audio'
+             WHERE id = ?",
+        )
+        .bind(format!("{meeting_id}/recording.m4a"))
+        .bind(&meeting_id)
+        .execute(&state.context.pool_clone())
+        .await
+        .unwrap();
+        meeting_id
+    }
+
+    async fn meeting_audio_ticket(state: &AppState, token: &str, meeting_id: &str) -> Response {
+        app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/audio-ticket"),
+                token,
+                "",
+            ))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn meeting_audio_ticket_allows_a_valid_single_range() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let meeting_id = completed_meeting_with_audio(&state, &token, "ticket-range").await;
+
+        let issued_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let ticket = meeting_audio_ticket(&state, &token, &meeting_id).await;
+        assert_eq!(ticket.status(), StatusCode::OK);
+        let ticket = json_body(ticket).await;
+        let expires_at = ticket["data"]["expires_at"].as_f64().unwrap();
+        assert!(expires_at >= issued_at + 299.0);
+        assert!(expires_at <= issued_at + 301.0);
+        let path = ticket["data"]["path"].as_str().unwrap().to_owned();
+        let ticket_value = path.split("?ticket=").nth(1).unwrap();
+        let stored_hash: String =
+            sqlx::query_scalar("SELECT token_hash FROM meeting_audio_tickets WHERE meeting_id = ?")
+                .bind(&meeting_id)
+                .fetch_one(&state.context.pool_clone())
+                .await
+                .unwrap();
+        assert_eq!(
+            stored_hash,
+            ripple_agent_gateway::auth::secret_hash(ticket_value)
+        );
+        assert_ne!(stored_hash, ticket_value);
+        let audio = app(state.clone())
+            .oneshot(
+                Request::get(path)
+                    .header("Range", "bytes=2-5")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(audio.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            audio.headers()[axum::http::header::CONTENT_RANGE],
+            "bytes 2-5/10"
+        );
+        assert_eq!(
+            to_bytes(audio.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"2345"
+        );
+    }
+
+    #[tokio::test]
+    async fn meeting_audio_ticket_supports_open_ended_and_suffix_ranges() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let meeting_id = completed_meeting_with_audio(&state, &token, "ticket-forms").await;
+        let ticket = meeting_audio_ticket(&state, &token, &meeting_id).await;
+        assert_eq!(ticket.status(), StatusCode::OK);
+        let path = json_body(ticket).await["data"]["path"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        for (range, expected_content_range, expected_bytes) in [
+            ("bytes=7-", "bytes 7-9/10", b"789".as_slice()),
+            ("bytes=-3", "bytes 7-9/10", b"789".as_slice()),
+            ("bytes=4-100", "bytes 4-9/10", b"456789".as_slice()),
+        ] {
+            let response = app(state.clone())
+                .oneshot(
+                    Request::get(&path)
+                        .header("Range", range)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(
+                response.headers()[axum::http::header::CONTENT_RANGE],
+                expected_content_range
+            );
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                expected_bytes
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn meeting_audio_ticket_rejects_expired_or_wrong_meeting_access() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let meeting_id = completed_meeting_with_audio(&state, &token, "ticket-expired").await;
+        let other_id = completed_meeting_with_audio(&state, &token, "ticket-other").await;
+
+        let ticket = meeting_audio_ticket(&state, &token, &meeting_id).await;
+        assert_eq!(ticket.status(), StatusCode::OK);
+        let path = json_body(ticket).await["data"]["path"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let wrong_path = path.replacen(&meeting_id, &other_id, 1);
+        assert_eq!(
+            app(state.clone())
+                .oneshot(Request::get(wrong_path).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        sqlx::query("UPDATE meeting_audio_tickets SET expires_at = 0")
+            .execute(&state.context.pool_clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            app(state)
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn meeting_audio_ticket_returns_416_for_an_unsatisfiable_range() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let meeting_id = completed_meeting_with_audio(&state, &token, "ticket-unsatisfiable").await;
+        let ticket = meeting_audio_ticket(&state, &token, &meeting_id).await;
+        assert_eq!(ticket.status(), StatusCode::OK);
+        let path = json_body(ticket).await["data"]["path"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let audio = app(state.clone())
+            .oneshot(
+                Request::get(path.clone())
+                    .header("Range", "bytes=99-100")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(audio.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            audio.headers()[axum::http::header::CONTENT_RANGE],
+            "bytes */10"
+        );
+        let multiple = app(state)
+            .oneshot(
+                Request::get(path)
+                    .header("Range", "bytes=0-1,3-4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(multiple.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            multiple.headers()[axum::http::header::CONTENT_RANGE],
+            "bytes */10"
+        );
+    }
+
     #[tokio::test]
     async fn meeting_api_create_is_idempotent_and_reports_existing_resource() {
         let (_directory, state, token, _) = meeting_api_state().await;
@@ -3896,19 +4107,20 @@ mod tests {
             ))
             .await
             .unwrap();
+        let ticket = meeting_audio_ticket(&state, &other_token, meeting_id).await;
         let audio = app(state)
-            .oneshot(authenticated_request(
-                "GET",
-                &format!("/v1/meetings/{meeting_id}/audio"),
-                &other_token,
-                "",
-            ))
+            .oneshot(
+                Request::get(format!("/v1/meetings/{meeting_id}/audio"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
         assert_eq!(upload.status(), StatusCode::NOT_FOUND);
         assert_eq!(finalize.status(), StatusCode::NOT_FOUND);
-        assert_eq!(audio.status(), StatusCode::NOT_FOUND);
+        assert_eq!(ticket.status(), StatusCode::NOT_FOUND);
+        assert_eq!(audio.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -3942,13 +4154,14 @@ mod tests {
             .unwrap();
         assert_eq!(finalized.status(), StatusCode::ACCEPTED);
 
+        let ticket = meeting_audio_ticket(&state, &token, meeting_id).await;
+        assert_eq!(ticket.status(), StatusCode::OK);
+        let path = json_body(ticket).await["data"]["path"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let audio = app(state)
-            .oneshot(authenticated_request(
-                "GET",
-                &format!("/v1/meetings/{meeting_id}/audio"),
-                &token,
-                "",
-            ))
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(audio.status(), StatusCode::OK);

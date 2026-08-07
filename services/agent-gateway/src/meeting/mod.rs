@@ -4,13 +4,16 @@ pub mod store;
 pub mod types;
 pub mod worker;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use sqlx::SqlitePool;
 
+use crate::auth::{new_access_token, secret_hash};
 use storage::VerifiedLegacyFinalization;
 use store::MeetingStore;
 use types::{
-    ChunkWrite, FinalAudioMetadata, FinalizeOutcome, Meeting, MeetingProgress, MeetingTodo,
-    ProcessingStage, RetryStageOutcome, StoredChunkMetadata,
+    ChunkWrite, FinalAudioMetadata, FinalizeOutcome, IssuedAudioTicket, Meeting, MeetingProgress,
+    MeetingTodo, ProcessingStage, RetryStageOutcome, StoredChunkMetadata,
 };
 
 #[derive(Clone)]
@@ -152,6 +155,37 @@ impl MeetingService {
         meeting_id: &str,
     ) -> anyhow::Result<Option<FinalAudioMetadata>> {
         self.store.owned_final_audio(user_id, meeting_id).await
+    }
+
+    pub async fn issue_audio_ticket(
+        &self,
+        user_id: &str,
+        meeting_id: &str,
+    ) -> anyhow::Result<Option<IssuedAudioTicket>> {
+        let token = new_access_token();
+        let expires_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+            + 300.0;
+        if !self
+            .store
+            .issue_audio_ticket(user_id, meeting_id, &secret_hash(&token), expires_at)
+            .await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(IssuedAudioTicket { token, expires_at }))
+    }
+
+    pub async fn ticket_final_audio(
+        &self,
+        meeting_id: &str,
+        token: &str,
+    ) -> anyhow::Result<Option<FinalAudioMetadata>> {
+        self.store
+            .ticket_final_audio(meeting_id, &secret_hash(token))
+            .await
     }
 
     pub async fn retry_stage(

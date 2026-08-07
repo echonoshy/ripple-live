@@ -1,10 +1,13 @@
 use axum::{
     Json,
     body::{Body, Bytes},
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{Path, Query, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE},
+        header::{
+            ACCEPT_RANGES, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
+            CONTENT_TYPE, RANGE,
+        },
     },
     response::{IntoResponse, Response},
 };
@@ -52,6 +55,74 @@ pub(super) struct RetryMeetingRequest {
 enum RetryMeetingStage {
     Transcript,
     Organization,
+}
+
+#[derive(Deserialize)]
+pub(super) struct MeetingAudioQuery {
+    ticket: Option<String>,
+}
+
+enum RequestedRange {
+    Full,
+    Partial { start: u64, end_inclusive: u64 },
+    Unsatisfiable,
+}
+
+fn requested_range(value: Option<&str>, size: u64) -> RequestedRange {
+    let Some(value) = value else {
+        return RequestedRange::Full;
+    };
+    let Some(specification) = value.strip_prefix("bytes=") else {
+        return RequestedRange::Unsatisfiable;
+    };
+    if specification.contains(',') {
+        return RequestedRange::Unsatisfiable;
+    }
+    let Some((start, end)) = specification.split_once('-') else {
+        return RequestedRange::Unsatisfiable;
+    };
+    if end.contains('-') || size == 0 {
+        return RequestedRange::Unsatisfiable;
+    }
+    match (start.is_empty(), end.is_empty()) {
+        (false, false) => {
+            let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
+                return RequestedRange::Unsatisfiable;
+            };
+            if start > end || start >= size {
+                return RequestedRange::Unsatisfiable;
+            }
+            RequestedRange::Partial {
+                start,
+                end_inclusive: end.min(size - 1),
+            }
+        }
+        (false, true) => {
+            let Ok(start) = start.parse::<u64>() else {
+                return RequestedRange::Unsatisfiable;
+            };
+            if start >= size {
+                return RequestedRange::Unsatisfiable;
+            }
+            RequestedRange::Partial {
+                start,
+                end_inclusive: size - 1,
+            }
+        }
+        (true, false) => {
+            let Ok(suffix) = end.parse::<u64>() else {
+                return RequestedRange::Unsatisfiable;
+            };
+            if suffix == 0 {
+                return RequestedRange::Unsatisfiable;
+            }
+            RequestedRange::Partial {
+                start: size.saturating_sub(suffix),
+                end_inclusive: size - 1,
+            }
+        }
+        (true, true) => RequestedRange::Unsatisfiable,
+    }
 }
 
 pub(super) async fn create_meeting(
@@ -450,7 +521,7 @@ pub(super) async fn retry_meeting(
     }
 }
 
-pub(super) async fn get_meeting_audio(
+pub(super) async fn create_meeting_audio_ticket(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(meeting_id): Path<String>,
@@ -459,28 +530,94 @@ pub(super) async fn get_meeting_audio(
         Ok(user) => user,
         Err(response) => return response,
     };
-    let audio = match state
+    let ticket = match state
         .meetings
-        .owned_final_audio(&user.id, &meeting_id)
+        .issue_audio_ticket(&user.id, &meeting_id)
         .await
     {
-        Ok(Some(audio)) => audio,
+        Ok(Some(ticket)) => ticket,
         Ok(None) => return api_error(StatusCode::NOT_FOUND, "会议音频不存在"),
+        Err(error) => return meeting_internal_error(error),
+    };
+    (
+        StatusCode::OK,
+        Json(json!({"data": {
+            "path": format!("/v1/meetings/{meeting_id}/audio?ticket={}", ticket.token),
+            "expires_at": ticket.expires_at,
+        }})),
+    )
+        .into_response()
+}
+
+pub(super) async fn get_meeting_audio(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(meeting_id): Path<String>,
+    Query(query): Query<MeetingAudioQuery>,
+) -> Response {
+    let ticket = match query.ticket.as_deref() {
+        Some(ticket) if !ticket.trim().is_empty() => ticket,
+        _ => return api_error(StatusCode::UNAUTHORIZED, "会议音频访问凭据无效"),
+    };
+    let audio = match state.meetings.ticket_final_audio(&meeting_id, ticket).await {
+        Ok(Some(audio)) => audio,
+        Ok(None) => return api_error(StatusCode::UNAUTHORIZED, "会议音频访问凭据无效"),
         Err(error) => return meeting_internal_error(error),
     };
     let file = match state.meeting_storage.open_audio(&audio.relative_path).await {
         Ok(file) => file,
         Err(error) => return meeting_storage_error(error),
     };
+    let size_bytes = match u64::try_from(audio.size_bytes) {
+        Ok(size_bytes) => size_bytes,
+        Err(_) => return meeting_internal_error(anyhow::anyhow!("final audio size is invalid")),
+    };
+    let requested_range = requested_range(
+        headers.get(RANGE).and_then(|value| value.to_str().ok()),
+        size_bytes,
+    );
+    let (start, end_inclusive, status) = match requested_range {
+        RequestedRange::Full if size_bytes > 0 => (0, size_bytes - 1, StatusCode::OK),
+        RequestedRange::Full => (0, 0, StatusCode::OK),
+        RequestedRange::Partial {
+            start,
+            end_inclusive,
+        } => (start, end_inclusive, StatusCode::PARTIAL_CONTENT),
+        RequestedRange::Unsatisfiable => {
+            let mut response = api_error(StatusCode::RANGE_NOT_SATISFIABLE, "会议音频范围无效");
+            response
+                .headers_mut()
+                .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            if let Ok(value) = HeaderValue::from_str(&format!("bytes */{size_bytes}")) {
+                response.headers_mut().insert(CONTENT_RANGE, value);
+            }
+            return response;
+        }
+    };
+    let length = if size_bytes == 0 {
+        0
+    } else {
+        end_inclusive - start + 1
+    };
     let stream = async_stream::stream! {
         let mut file = file;
+        if let Err(error) = tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(start)).await {
+            yield Err::<Bytes, std::io::Error>(error);
+            return;
+        }
         let mut buffer = vec![0_u8; 64 * 1024];
+        let mut remaining = length;
         loop {
-            match tokio::io::AsyncReadExt::read(&mut file, &mut buffer).await {
+            if remaining == 0 {
+                break;
+            }
+            let next = remaining.min(buffer.len() as u64) as usize;
+            match tokio::io::AsyncReadExt::read(&mut file, &mut buffer[..next]).await {
                 Ok(0) => break,
-                Ok(count) => yield Ok::<Bytes, std::io::Error>(
-                    Bytes::copy_from_slice(&buffer[..count]),
-                ),
+                Ok(count) => {
+                    remaining -= count as u64;
+                    yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buffer[..count]));
+                }
                 Err(error) => {
                     yield Err::<Bytes, std::io::Error>(error);
                     break;
@@ -489,16 +626,24 @@ pub(super) async fn get_meeting_audio(
         }
     };
     let mut response = Response::new(Body::from_stream(stream));
-    *response.status_mut() = StatusCode::OK;
+    *response.status_mut() = status;
     let headers = response.headers_mut();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("audio/mp4"));
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     headers.insert(
         CONTENT_DISPOSITION,
         HeaderValue::from_static("inline; filename=\"recording.m4a\""),
     );
-    if let Ok(value) = HeaderValue::from_str(&audio.size_bytes.to_string()) {
+    if let Ok(value) = HeaderValue::from_str(&length.to_string()) {
         headers.insert(CONTENT_LENGTH, value);
+    }
+    if status == StatusCode::PARTIAL_CONTENT {
+        if let Ok(value) =
+            HeaderValue::from_str(&format!("bytes {start}-{end_inclusive}/{size_bytes}"))
+        {
+            headers.insert(CONTENT_RANGE, value);
+        }
     }
     response
 }

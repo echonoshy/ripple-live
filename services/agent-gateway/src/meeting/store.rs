@@ -130,6 +130,15 @@ impl MeetingStore {
                 PRIMARY KEY(meeting_id, stage),
                 FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
             )",
+            "CREATE TABLE IF NOT EXISTS meeting_audio_tickets (
+                token_hash TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                meeting_id TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                created_at REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+            )",
             "CREATE INDEX IF NOT EXISTS idx_meetings_user_updated
              ON meetings(user_id, updated_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_meeting_chunks_timeline
@@ -140,6 +149,8 @@ impl MeetingStore {
              ON meeting_todos(meeting_id, completed)",
             "CREATE INDEX IF NOT EXISTS idx_meeting_jobs_status
              ON meeting_processing_jobs(status, updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_meeting_audio_tickets_expiry
+             ON meeting_audio_tickets(expires_at)",
         ] {
             sqlx::query(statement).execute(&self.pool).await?;
         }
@@ -1369,6 +1380,100 @@ impl MeetingStore {
         .bind(user_id)
         .fetch_optional(&self.pool)
         .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let (Some(relative_path), Some(size_bytes), Some(checksum)) = (
+            row.get::<Option<String>, _>("final_audio_path"),
+            row.get::<Option<i64>, _>("final_audio_size_bytes"),
+            row.get::<Option<String>, _>("final_audio_checksum"),
+        ) else {
+            return Ok(None);
+        };
+        if !safe_relative_path(&relative_path)
+            || relative_path != format!("{meeting_id}/recording.m4a")
+        {
+            bail!("unsafe stored final audio path");
+        }
+        Ok(Some(FinalAudioMetadata {
+            relative_path,
+            size_bytes,
+            checksum,
+        }))
+    }
+
+    pub async fn issue_audio_ticket(
+        &self,
+        user_id: &str,
+        meeting_id: &str,
+        token_hash: &str,
+        expires_at: f64,
+    ) -> anyhow::Result<bool> {
+        if user_id.trim().is_empty()
+            || meeting_id.trim().is_empty()
+            || token_hash.trim().is_empty()
+            || !expires_at.is_finite()
+        {
+            bail!("invalid meeting audio ticket");
+        }
+        let now = unix_time();
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM meeting_audio_tickets WHERE expires_at <= ?")
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        let result = sqlx::query(
+            "INSERT INTO meeting_audio_tickets(
+                 token_hash, user_id, meeting_id, expires_at, created_at
+             )
+             SELECT ?, ?, meetings.id, ?, ?
+             FROM meetings
+             WHERE meetings.id = ? AND meetings.user_id = ?
+               AND meetings.final_audio_path IS NOT NULL
+               AND meetings.final_audio_size_bytes IS NOT NULL
+               AND meetings.final_audio_checksum IS NOT NULL",
+        )
+        .bind(token_hash)
+        .bind(user_id)
+        .bind(expires_at)
+        .bind(now)
+        .bind(meeting_id)
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn ticket_final_audio(
+        &self,
+        meeting_id: &str,
+        token_hash: &str,
+    ) -> anyhow::Result<Option<FinalAudioMetadata>> {
+        if meeting_id.trim().is_empty() || token_hash.trim().is_empty() {
+            return Ok(None);
+        }
+        let now = unix_time();
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM meeting_audio_tickets WHERE expires_at <= ?")
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        let row = sqlx::query(
+            "SELECT meetings.final_audio_path, meetings.final_audio_size_bytes,
+                    meetings.final_audio_checksum
+             FROM meeting_audio_tickets
+             JOIN meetings ON meetings.id = meeting_audio_tickets.meeting_id
+             WHERE meeting_audio_tickets.token_hash = ?
+               AND meeting_audio_tickets.meeting_id = ?
+               AND meeting_audio_tickets.expires_at > ?",
+        )
+        .bind(token_hash)
+        .bind(meeting_id)
+        .bind(now)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
         let Some(row) = row else {
             return Ok(None);
         };
