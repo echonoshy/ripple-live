@@ -4466,6 +4466,46 @@ mod tests {
             .unwrap();
         assert_eq!(global_count, 0);
     }
+
+    #[tokio::test]
+    async fn meeting_retry_route_requeues_completed_empty_transcript() {
+        let (_directory, state, token, _) = meeting_api_state().await;
+        let (_, meeting) = create_meeting(&state, &token, "retry-empty-transcript").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        sqlx::query(
+            "UPDATE meetings SET final_audio_path = ?, final_audio_size_bytes = 1,
+                 final_audio_checksum = 'sum', state = 'completed',
+                 title = '未检测到语音内容', summary = '录音中未检测到可转写的语音内容。'
+             WHERE id = ?",
+        )
+        .bind(format!("{meeting_id}/recording.m4a"))
+        .bind(meeting_id)
+        .execute(&state.context.pool_clone())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
+             VALUES (?, 'transcript', 'completed', 1), (?, 'organization', 'completed', 1)",
+        )
+        .bind(meeting_id)
+        .bind(meeting_id)
+        .execute(&state.context.pool_clone())
+        .await
+        .unwrap();
+
+        let response = app(state.clone())
+            .oneshot(authenticated_request(
+                "POST",
+                &format!("/v1/meetings/{meeting_id}/retry"),
+                &token,
+                r#"{"stage":"transcript"}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(response).await["data"]["status"], "pending");
+    }
 }
 
 fn append_audio(

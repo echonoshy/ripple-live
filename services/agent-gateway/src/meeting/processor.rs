@@ -20,12 +20,15 @@ const PCM_SAMPLE_RATE: usize = 16_000;
 const DEFAULT_WINDOW_MS: usize = 58_000;
 const DEFAULT_OVERLAP_MS: usize = 1_000;
 const MAX_ASR_ATTEMPTS: usize = 3;
+const MAX_ORGANIZATION_ATTEMPTS: usize = 3;
 const VAD_FRAME_MS: i64 = 20;
 const VAD_ENERGY_THRESHOLD: i64 = 500;
 const VAD_MIN_SPEECH_MS: i64 = 200;
 const VAD_MAX_SILENCE_MS: i64 = 500;
 const VAD_MAX_SPAN_MS: i64 = 20_000;
 const VAD_SPAN_OVERLAP_MS: i64 = 1_000;
+const FALLBACK_NON_SILENCE_ENERGY: i64 = 16;
+const FALLBACK_SPAN_MS: i64 = 10_000;
 const MAX_DECODE_PADDING_MS: usize = 100;
 const ORGANIZATION_SECTION_CHARS: usize = 12_000;
 const MAX_ORGANIZATION_SUMMARY_LAYERS: usize = 8;
@@ -133,13 +136,13 @@ impl MeetingProcessor {
                 .await
             {
                 Ok(Some(_)) => {
-                    if processor.organize_meeting(&meeting_id).await.is_err() {
-                        tracing::warn!(meeting_id, "meeting organization failed");
+                    if let Err(error) = processor.organize_meeting(&meeting_id).await {
+                        tracing::warn!(meeting_id, error = %format!("{error:#}"), "meeting organization failed");
                     }
                 }
                 Ok(None) => {
-                    if processor.organize_meeting(&meeting_id).await.is_err() {
-                        tracing::warn!(meeting_id, "meeting organization failed");
+                    if let Err(error) = processor.organize_meeting(&meeting_id).await {
+                        tracing::warn!(meeting_id, error = %format!("{error:#}"), "meeting organization failed");
                     }
                 }
                 Err(_) => {
@@ -152,8 +155,8 @@ impl MeetingProcessor {
     pub fn spawn_organize_meeting(&self, meeting_id: String) -> JoinHandle<()> {
         let processor = self.clone();
         tokio::spawn(async move {
-            if processor.organize_meeting(&meeting_id).await.is_err() {
-                tracing::warn!(meeting_id, "meeting organization failed");
+            if let Err(error) = processor.organize_meeting(&meeting_id).await {
+                tracing::warn!(meeting_id, error = %format!("{error:#}"), "meeting organization failed");
             }
         })
     }
@@ -239,18 +242,6 @@ impl MeetingProcessor {
         {
             bail!("organization job lease was lost");
         }
-        let output = self
-            .adapters
-            .organize_meeting_artifact(&organized_input)
-            .await?;
-        if !output.text.trim().is_empty() || output.function_calls.len() != 1 {
-            bail!("meeting organization expected exactly one function call and no text");
-        }
-        let call = &output.function_calls[0];
-        if call.name != "save_meeting_artifact" {
-            bail!("meeting organization returned unexpected function");
-        }
-        let artifact = parse_meeting_artifact(&call.arguments)?;
         let timeline_start = transcript
             .iter()
             .map(|segment| segment.start_ms)
@@ -261,15 +252,32 @@ impl MeetingProcessor {
             .map(|segment| segment.end_ms)
             .max()
             .context("final meeting transcript was empty")?;
-        if artifact.todos.iter().any(|todo| {
-            matches!(
-                (todo.source_start_ms, todo.source_end_ms),
-                (Some(start), Some(end)) if start < timeline_start || end > timeline_end
-            )
-        }) {
-            bail!("meeting todo source range is outside the transcript timeline");
+        let mut last_error = None;
+        for provider_attempt in 0..MAX_ORGANIZATION_ATTEMPTS {
+            if !self
+                .store
+                .heartbeat_organization_job(meeting_id, attempt)
+                .await?
+            {
+                bail!("organization job lease was lost");
+            }
+            match self
+                .adapters
+                .organize_meeting_artifact(&organized_input)
+                .await
+                .and_then(|output| validated_meeting_artifact(output, timeline_start, timeline_end))
+            {
+                Ok(artifact) => return Ok(artifact),
+                Err(error) => {
+                    last_error = Some(error);
+                    if let Some(delay) = self.retry_delays.get(provider_attempt) {
+                        tokio::time::sleep(*delay).await;
+                    }
+                }
+            }
         }
-        Ok(artifact)
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("meeting organization failed")))
+            .context("meeting organization retries exhausted")
     }
 
     async fn compact_organization_summaries(
@@ -460,7 +468,7 @@ impl MeetingProcessor {
                 .await
                 .context("decode bounded meeting audio window")?;
             pcm.truncate(requested_samples);
-            for span in detect_speech_spans(&pcm) {
+            for span in transcription_spans(&pcm) {
                 if !self
                     .store
                     .heartbeat_transcript_job(meeting_id, attempt)
@@ -530,6 +538,54 @@ impl MeetingProcessor {
         self.organization_input_chars = maximum_chars;
         self
     }
+}
+
+fn validated_meeting_artifact(
+    output: crate::adapters::ResponsesOutput,
+    timeline_start: i64,
+    timeline_end: i64,
+) -> anyhow::Result<MeetingArtifact> {
+    if output.function_calls.is_empty() {
+        bail!("meeting organization did not return the required function call");
+    }
+    let mut accepted = None;
+    let mut last_invalid = None;
+    for call in output.function_calls {
+        if call.name != "save_meeting_artifact" {
+            bail!("meeting organization returned unexpected function");
+        }
+        let artifact = match parse_meeting_artifact(&call.arguments) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                last_invalid = Some(error);
+                continue;
+            }
+        };
+        if artifact.todos.iter().any(|todo| {
+            matches!(
+                (todo.source_start_ms, todo.source_end_ms),
+                (Some(start), Some(end)) if start < timeline_start || end > timeline_end
+            )
+        }) {
+            last_invalid = Some(anyhow::anyhow!(
+                "meeting todo source range is outside the transcript timeline"
+            ));
+            continue;
+        }
+        if accepted
+            .as_ref()
+            .is_some_and(|accepted| accepted != &artifact)
+        {
+            bail!("meeting organization returned conflicting repeated function calls");
+        }
+        accepted = Some(artifact);
+    }
+    if let Some(artifact) = accepted {
+        return Ok(artifact);
+    }
+    Err(last_invalid.unwrap_or_else(|| {
+        anyhow::anyhow!("meeting organization did not return a usable artifact")
+    }))
 }
 
 pub fn meeting_organization_sections(
@@ -858,6 +914,29 @@ fn detect_speech_spans(pcm: &[i16]) -> Vec<SpeechSpan> {
     spans
 }
 
+fn transcription_spans(pcm: &[i16]) -> Vec<SpeechSpan> {
+    let detected = detect_speech_spans(pcm);
+    if !detected.is_empty() || pcm.is_empty() {
+        return detected;
+    }
+    let energy = pcm
+        .iter()
+        .map(|sample| i64::from(sample.unsigned_abs()))
+        .sum::<i64>()
+        / pcm.len() as i64;
+    if energy < FALLBACK_NON_SILENCE_ENERGY {
+        return Vec::new();
+    }
+    let duration_ms = samples_to_ms(pcm.len());
+    (0..duration_ms)
+        .step_by(FALLBACK_SPAN_MS as usize)
+        .map(|start_ms| SpeechSpan {
+            start_ms,
+            end_ms: (start_ms + FALLBACK_SPAN_MS).min(duration_ms),
+        })
+        .collect()
+}
+
 pub fn reconcile_overlap(segments: &[(i64, i64, &str)]) -> Vec<TranscriptSegment> {
     let mut merged: Vec<TranscriptSegment> = Vec::new();
     for &(start_ms, end_ms, text) in segments {
@@ -958,7 +1037,7 @@ mod tests {
     use super::{
         ContinuityGroup, MeetingProcessor, ORGANIZATION_SECTION_CHARS, continuity_windows,
         detect_speech_spans, meeting_organization_sections, parse_meeting_artifact,
-        reconcile_overlap, window_ranges,
+        reconcile_overlap, validated_meeting_artifact, window_ranges,
     };
     use crate::{
         adapters::ModelAdapters,
@@ -1144,6 +1223,22 @@ mod tests {
         tokio::fs::write(
             path,
             "#!/usr/bin/python3\nimport sys\nargs=sys.argv\nduration=float(args[args.index('-t')+1])\nsys.stdout.buffer.write(b'\\x00\\x00' * int(duration * 16000))\n",
+        )
+        .await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = tokio::fs::metadata(path).await?.permissions();
+            permissions.set_mode(0o755);
+            tokio::fs::set_permissions(path, permissions).await?;
+        }
+        Ok(())
+    }
+
+    async fn low_volume_decoder(path: &Path) -> anyhow::Result<()> {
+        tokio::fs::write(
+            path,
+            "#!/usr/bin/python3\nimport sys\nargs=sys.argv\nduration=float(args[args.index('-t')+1])\nsys.stdout.buffer.write(b'\\x64\\x00' * int(duration * 16000))\n",
         )
         .await?;
         #[cfg(unix)]
@@ -1409,6 +1504,34 @@ mod tests {
 
         assert_eq!(probe.attempts(), 0);
         assert!(segments.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn finalization_falls_back_for_low_volume_non_silent_audio() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let decoder = directory.path().join("low-volume-decoder.py");
+        low_volume_decoder(&decoder).await?;
+        let (_files, _store, _storage, processor, probe, meeting_id, final_path) =
+            generated_meeting_with_chunks(
+                &[12_000],
+                &[0],
+                vec![Ok("first low voice"), Ok("second low voice")],
+                &decoder,
+            )
+            .await?;
+
+        let segments = processor
+            .finalize_transcript(&meeting_id, &final_path)
+            .await?
+            .unwrap();
+
+        assert_eq!(probe.attempts(), 2);
+        assert_eq!(segments.len(), 2);
+        assert_eq!((segments[0].start_ms, segments[0].end_ms), (0, 10_000));
+        assert_eq!((segments[1].start_ms, segments[1].end_ms), (10_000, 12_000));
+        assert_eq!(segments[0].text, "first low voice");
+        assert_eq!(segments[1].text, "second low voice");
         Ok(())
     }
 
@@ -1735,6 +1858,28 @@ mod tests {
         assert!(parse_meeting_artifact(&too_many.to_string()).is_err());
     }
 
+    #[test]
+    fn meeting_organization_rejects_conflicting_repeated_function_calls() {
+        let output = crate::adapters::ResponsesOutput {
+            text: String::new(),
+            function_calls: vec![
+                crate::adapters::FunctionCall {
+                    call_id: "first".to_owned(),
+                    name: "save_meeting_artifact".to_owned(),
+                    arguments: r#"{"title":"标题一","summary":"摘要一","todos":[]}"#.to_owned(),
+                },
+                crate::adapters::FunctionCall {
+                    call_id: "second".to_owned(),
+                    name: "save_meeting_artifact".to_owned(),
+                    arguments: r#"{"title":"标题二","summary":"摘要二","todos":[]}"#.to_owned(),
+                },
+            ],
+            output_items: Vec::new(),
+        };
+
+        assert!(validated_meeting_artifact(output, 0, 1_000).is_err());
+    }
+
     #[tokio::test]
     async fn meeting_organization_uses_forced_function_and_never_global_todos() -> anyhow::Result<()>
     {
@@ -1766,15 +1911,34 @@ mod tests {
             .await?;
         let (adapters, probe) = ModelAdapters::with_meeting_organization_test_results(
             Settings::from_env()?,
-            vec![Ok(crate::adapters::ResponsesOutput {
-                text: String::new(),
-                function_calls: vec![crate::adapters::FunctionCall {
-                    call_id: "call-1".to_owned(),
-                    name: "save_meeting_artifact".to_owned(),
-                    arguments: r#"{"title":"发布准备会","summary":"确认下周发布。","todos":[{"text":"张三准备验收清单","source_start_ms":0,"source_end_ms":2000}]}"#.to_owned(),
-                }],
-                output_items: Vec::new(),
-            })],
+            vec![
+                Ok(crate::adapters::ResponsesOutput {
+                    text: "先输出了一次非结构化结果。".to_owned(),
+                    function_calls: Vec::new(),
+                    output_items: Vec::new(),
+                }),
+                Ok(crate::adapters::ResponsesOutput {
+                    text: "会议内容已整理，正在保存结构化结果。".to_owned(),
+                    function_calls: vec![
+                        crate::adapters::FunctionCall {
+                            call_id: "call-incomplete".to_owned(),
+                            name: "save_meeting_artifact".to_owned(),
+                            arguments: r#"{"summary":"中间结果","todos":[]}"#.to_owned(),
+                        },
+                        crate::adapters::FunctionCall {
+                            call_id: "call-1".to_owned(),
+                            name: "save_meeting_artifact".to_owned(),
+                            arguments: r#"{"title":"发布准备会","summary":"确认下周发布。","todos":[{"text":"张三准备验收清单","source_start_ms":0,"source_end_ms":2000}]}"#.to_owned(),
+                        },
+                        crate::adapters::FunctionCall {
+                            call_id: "call-1-duplicate".to_owned(),
+                            name: "save_meeting_artifact".to_owned(),
+                            arguments: r#"{"title":"发布准备会","summary":"确认下周发布。","todos":[{"text":"张三准备验收清单","source_start_ms":0,"source_end_ms":2000}]}"#.to_owned(),
+                        },
+                    ],
+                    output_items: Vec::new(),
+                }),
+            ],
         )?;
         let storage = MeetingStorage::new(
             directory.path().join("audio"),
@@ -1786,7 +1950,9 @@ mod tests {
         let artifact = processor.organize_meeting(&meeting.id).await?.unwrap();
 
         assert_eq!(artifact.title, "发布准备会");
-        let request = probe.requests().pop().unwrap();
+        let mut requests = probe.requests();
+        assert_eq!(requests.len(), 2);
+        let request = requests.pop().unwrap();
         assert_eq!(request["reasoning"]["effort"], "none");
         assert_eq!(request["tools"][0]["name"], "save_meeting_artifact");
         assert_eq!(
@@ -2096,6 +2262,16 @@ mod tests {
             vec![
                 Ok(crate::adapters::ResponsesOutput {
                     text: "plain text is forbidden".to_owned(),
+                    function_calls: Vec::new(),
+                    output_items: Vec::new(),
+                }),
+                Ok(crate::adapters::ResponsesOutput {
+                    text: "plain text is still forbidden".to_owned(),
+                    function_calls: Vec::new(),
+                    output_items: Vec::new(),
+                }),
+                Ok(crate::adapters::ResponsesOutput {
+                    text: "plain text remains forbidden".to_owned(),
                     function_calls: Vec::new(),
                     output_items: Vec::new(),
                 }),

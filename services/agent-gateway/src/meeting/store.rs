@@ -828,8 +828,58 @@ impl MeetingStore {
         .fetch_optional(&mut *transaction)
         .await?;
         if status.as_deref() == Some("completed") {
-            transaction.rollback().await?;
-            return Ok(RetryStageOutcome::Completed);
+            if stage != ProcessingStage::Transcript
+                || meeting
+                    .get::<Option<String>, _>("final_audio_path")
+                    .is_none()
+            {
+                transaction.rollback().await?;
+                return Ok(RetryStageOutcome::Completed);
+            }
+            let final_segment_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM meeting_transcript_segments
+                 WHERE meeting_id = ? AND provisional = 0",
+            )
+            .bind(meeting_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if final_segment_count > 0 {
+                transaction.rollback().await?;
+                return Ok(RetryStageOutcome::Completed);
+            }
+            let organization_busy = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM meeting_processing_jobs
+                 WHERE meeting_id = ? AND stage = 'organization'
+                   AND status = 'running' AND updated_at >= ?",
+            )
+            .bind(meeting_id)
+            .bind(stale_before)
+            .fetch_one(&mut *transaction)
+            .await?
+                == 1;
+            if organization_busy {
+                transaction.rollback().await?;
+                return Ok(RetryStageOutcome::Busy);
+            }
+            sqlx::query("DELETE FROM meeting_transcript_segments WHERE meeting_id = ?")
+                .bind(meeting_id)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("DELETE FROM meeting_todos WHERE meeting_id = ?")
+                .bind(meeting_id)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query(
+                "DELETE FROM meeting_processing_jobs
+                 WHERE meeting_id = ? AND stage = 'organization'",
+            )
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query("UPDATE meetings SET title = NULL, summary = NULL WHERE id = ?")
+                .bind(meeting_id)
+                .execute(&mut *transaction)
+                .await?;
         }
         if stage == ProcessingStage::Transcript
             && meeting
@@ -2784,7 +2834,7 @@ mod tests {
             store
                 .retry_stage_owned("user-a", &meeting.id, ProcessingStage::Transcript)
                 .await?,
-            RetryStageOutcome::Completed
+            RetryStageOutcome::Queued
         );
         Ok(())
     }
@@ -2823,6 +2873,124 @@ mod tests {
         assert_eq!(
             store
                 .retry_stage_owned("user-a", &organization.id, ProcessingStage::Organization)
+                .await?,
+            RetryStageOutcome::Completed
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_empty_transcript_retry_resets_derived_content_and_preserves_audio()
+    -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store.create("user-a", "empty-reprocess", 100.0).await?;
+        let final_path = format!("{}/recording.m4a", meeting.id);
+        sqlx::query(
+            "UPDATE meetings
+             SET final_audio_path = ?, final_audio_size_bytes = 123,
+                 final_audio_checksum = 'audio-sum', state = 'completed',
+                 title = '未检测到语音内容', summary = '录音中未检测到可转写的语音内容。'
+             WHERE id = ?",
+        )
+        .bind(&final_path)
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+        for stage in ["transcript", "organization"] {
+            sqlx::query(
+                "INSERT INTO meeting_processing_jobs(meeting_id, stage, attempt, status, updated_at)
+                 VALUES (?, ?, 1, 'completed', 1)",
+            )
+            .bind(&meeting.id)
+            .bind(stage)
+            .execute(&context.pool_clone())
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO meeting_todos(
+                meeting_id, id, text, completed, source_start_ms, source_end_ms,
+                created_at, updated_at
+             ) VALUES (?, 'placeholder-todo', '旧待办', 0, NULL, NULL, 1, 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        assert_eq!(
+            store
+                .retry_stage_owned("user-b", &meeting.id, ProcessingStage::Transcript)
+                .await?,
+            RetryStageOutcome::NotFound
+        );
+        assert_eq!(
+            store
+                .retry_stage_owned("user-a", &meeting.id, ProcessingStage::Transcript)
+                .await?,
+            RetryStageOutcome::Queued
+        );
+
+        let audio = store
+            .owned_final_audio("user-a", &meeting.id)
+            .await?
+            .expect("final audio must remain available");
+        assert_eq!(audio.relative_path, final_path);
+        assert_eq!(audio.size_bytes, 123);
+        assert_eq!(audio.checksum, "audio-sum");
+        let detail = store.get_owned("user-a", &meeting.id).await?.unwrap();
+        assert_eq!(detail.state, MeetingState::Processing);
+        assert_eq!(detail.title, None);
+        assert_eq!(detail.summary, None);
+        assert!(detail.todos.is_empty());
+        let transcript_status: String = sqlx::query_scalar(
+            "SELECT status FROM meeting_processing_jobs
+             WHERE meeting_id = ? AND stage = 'transcript'",
+        )
+        .bind(&meeting.id)
+        .fetch_one(&context.pool_clone())
+        .await?;
+        assert_eq!(transcript_status, "pending");
+        let organization_jobs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM meeting_processing_jobs
+             WHERE meeting_id = ? AND stage = 'organization'",
+        )
+        .bind(&meeting.id)
+        .fetch_one(&context.pool_clone())
+        .await?;
+        assert_eq!(organization_jobs, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_nonempty_transcript_retry_remains_idempotent() -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store.create("user-a", "nonempty-reprocess", 100.0).await?;
+        sqlx::query(
+            "UPDATE meetings SET final_audio_path = ?, final_audio_size_bytes = 1,
+                 final_audio_checksum = 'sum', state = 'completed' WHERE id = ?",
+        )
+        .bind(format!("{}/recording.m4a", meeting.id))
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
+             VALUES (?, 'transcript', 'completed', 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+        sqlx::query(
+            "INSERT INTO meeting_transcript_segments(
+                meeting_id, id, start_ms, end_ms, text, provisional
+             ) VALUES (?, 0, 0, 1000, '已有转写', 0)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        assert_eq!(
+            store
+                .retry_stage_owned("user-a", &meeting.id, ProcessingStage::Transcript)
                 .await?,
             RetryStageOutcome::Completed
         );
