@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Component, Path},
     time::SystemTime,
 };
@@ -20,6 +20,34 @@ use super::types::{
 pub struct MeetingStore {
     pool: SqlitePool,
 }
+
+const MEETING_WITH_PROGRESS_SELECT: &str =
+    "SELECT meetings.id, meetings.state, meetings.started_at, meetings.ended_at,
+            meetings.duration_ms, meetings.title, meetings.summary,
+            meetings.error_stage, meetings.error_message,
+            meetings.created_at, meetings.updated_at,
+            meetings.final_sequence AS progress_final_sequence,
+            CASE WHEN meetings.final_audio_path IS NOT NULL
+                       AND meetings.final_audio_size_bytes IS NOT NULL
+                       AND meetings.final_audio_checksum IS NOT NULL
+                 THEN 1 ELSE 0 END AS progress_recording_verified,
+            (SELECT COUNT(*) FROM meeting_chunks
+             WHERE meeting_chunks.meeting_id = meetings.id
+               AND meeting_chunks.verified = 1
+               AND meeting_chunks.content_path IS NOT NULL) AS progress_chunk_count,
+            transcript_job.status AS transcript_status,
+            transcript_job.attempt AS transcript_attempt,
+            transcript_job.diagnostic_error AS transcript_error,
+            organization_job.status AS organization_status,
+            organization_job.attempt AS organization_attempt,
+            organization_job.diagnostic_error AS organization_error
+     FROM meetings
+     LEFT JOIN meeting_processing_jobs AS transcript_job
+       ON transcript_job.meeting_id = meetings.id
+      AND transcript_job.stage = 'transcript'
+     LEFT JOIN meeting_processing_jobs AS organization_job
+       ON organization_job.meeting_id = meetings.id
+      AND organization_job.stage = 'organization'";
 
 impl MeetingStore {
     pub fn new(pool: SqlitePool) -> Self {
@@ -122,6 +150,18 @@ impl MeetingStore {
         ensure_column(&self.pool, "meetings", "final_audio_path", "TEXT").await?;
         ensure_column(&self.pool, "meetings", "final_audio_size_bytes", "INTEGER").await?;
         ensure_column(&self.pool, "meetings", "final_audio_checksum", "TEXT").await?;
+        sqlx::query(
+            "UPDATE meetings SET state = 'completed'
+             WHERE state = 'processing'
+               AND EXISTS (
+                   SELECT 1 FROM meeting_processing_jobs
+                   WHERE meeting_processing_jobs.meeting_id = meetings.id
+                     AND meeting_processing_jobs.stage = 'transcript'
+                     AND meeting_processing_jobs.status = 'completed'
+               )",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -181,18 +221,23 @@ impl MeetingStore {
     }
 
     pub async fn list(&self, user_id: &str) -> anyhow::Result<Vec<Meeting>> {
-        let rows = sqlx::query(
-            "SELECT id, state, started_at, ended_at, duration_ms, title, summary,
-                    error_stage, error_message, created_at, updated_at
-             FROM meetings WHERE user_id = ? ORDER BY started_at DESC, id DESC",
-        )
+        let mut transaction = self.pool.begin().await?;
+        let rows = sqlx::query(&format!(
+            "{MEETING_WITH_PROGRESS_SELECT}
+             WHERE meetings.user_id = ?
+             ORDER BY meetings.started_at DESC, meetings.id DESC"
+        ))
         .bind(user_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
+        let verified_sequences = verified_sequences_for_user(&mut transaction, user_id).await?;
         let mut meetings = Vec::with_capacity(rows.len());
         for row in rows {
-            meetings.push(self.hydrate_meeting(row, false).await?);
+            let meeting_id = row.get::<String, _>("id");
+            let progress = meeting_progress_from_row(&row, verified_sequences.get(&meeting_id))?;
+            meetings.push(meeting_from_row(row, progress)?);
         }
+        transaction.commit().await?;
         Ok(meetings)
     }
 
@@ -201,85 +246,38 @@ impl MeetingStore {
         user_id: &str,
         meeting_id: &str,
     ) -> anyhow::Result<Option<Meeting>> {
-        let Some(row) = sqlx::query(
-            "SELECT id, state, started_at, ended_at, duration_ms, title, summary,
-                    error_stage, error_message, created_at, updated_at
-             FROM meetings WHERE user_id = ? AND id = ?",
-        )
+        let mut transaction = self.pool.begin().await?;
+        let Some(row) = sqlx::query(&format!(
+            "{MEETING_WITH_PROGRESS_SELECT}
+             WHERE meetings.user_id = ? AND meetings.id = ?"
+        ))
         .bind(user_id)
         .bind(meeting_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?
         else {
+            transaction.rollback().await?;
             return Ok(None);
         };
-        Ok(Some(self.hydrate_meeting(row, true).await?))
+        let meeting = self.hydrate_meeting(&mut transaction, row, true).await?;
+        transaction.commit().await?;
+        Ok(Some(meeting))
     }
 
     pub async fn processing_progress(&self, meeting_id: &str) -> anyhow::Result<MeetingProgress> {
-        let meeting = sqlx::query(
-            "SELECT final_sequence, final_audio_path,
-                    final_audio_size_bytes, final_audio_checksum
-             FROM meetings WHERE id = ?",
-        )
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(&format!(
+            "{MEETING_WITH_PROGRESS_SELECT} WHERE meetings.id = ?"
+        ))
         .bind(meeting_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?
         .context("meeting not found")?;
-        let final_sequence = meeting.get::<Option<i64>, _>("final_sequence");
-        let chunk_count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM meeting_chunks
-             WHERE meeting_id = ? AND verified = 1 AND content_path IS NOT NULL",
-        )
-        .bind(meeting_id)
-        .fetch_one(&self.pool)
-        .await?;
-        let missing_sequences = match final_sequence {
-            Some(sequence) => {
-                self.missing_verified_sequences(meeting_id, sequence)
-                    .await?
-            }
-            None => Vec::new(),
-        };
-        let recording_verified = meeting
-            .get::<Option<String>, _>("final_audio_path")
-            .is_some()
-            && meeting
-                .get::<Option<i64>, _>("final_audio_size_bytes")
-                .is_some()
-            && meeting
-                .get::<Option<String>, _>("final_audio_checksum")
-                .is_some();
-        let mut transcript = not_started_processing_job();
-        let mut organization = not_started_processing_job();
-        let jobs = sqlx::query(
-            "SELECT stage, status, attempt, diagnostic_error
-             FROM meeting_processing_jobs
-             WHERE meeting_id = ? AND stage IN ('transcript', 'organization')",
-        )
-        .bind(meeting_id)
-        .fetch_all(&self.pool)
-        .await?;
-        for row in jobs {
-            let job = ProcessingJobView {
-                status: ProcessingJobStatus::parse(&row.get::<String, _>("status"))?,
-                attempt: row.get("attempt"),
-                error_message: row.get("diagnostic_error"),
-            };
-            match row.get::<String, _>("stage").as_str() {
-                "transcript" => transcript = job,
-                "organization" => organization = job,
-                _ => unreachable!("query limits meeting processing stages"),
-            }
-        }
-        Ok(MeetingProgress {
-            chunk_count,
-            final_sequence,
-            missing_sequences,
-            recording_verified,
-            transcript,
-            organization,
-        })
+        let verified_sequences =
+            verified_sequences_for_meeting(&mut transaction, meeting_id).await?;
+        let progress = meeting_progress_from_row(&row, Some(&verified_sequences))?;
+        transaction.commit().await?;
+        Ok(progress)
     }
 
     pub async fn record_chunk(
@@ -1611,38 +1609,108 @@ impl MeetingStore {
 
     async fn hydrate_meeting(
         &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         row: SqliteRow,
         include_content: bool,
     ) -> anyhow::Result<Meeting> {
         let meeting_id = row.get::<String, _>("id");
-        let progress = self.processing_progress(&meeting_id).await?;
+        let verified_sequences = verified_sequences_for_meeting(transaction, &meeting_id).await?;
+        let progress = meeting_progress_from_row(&row, Some(&verified_sequences))?;
         let mut meeting = meeting_from_row(row, progress)?;
         if include_content {
-            meeting.transcript = self.transcript(&meeting_id).await?;
-            meeting.todos = self.todos(&meeting_id).await?;
+            meeting.transcript = transcript_in(transaction, &meeting_id).await?;
+            meeting.todos = todos_in(transaction, &meeting_id).await?;
         }
         Ok(meeting)
     }
+}
 
-    async fn todos(&self, meeting_id: &str) -> anyhow::Result<Vec<MeetingTodo>> {
-        let rows = sqlx::query(
-            "SELECT id, text, completed, source_start_ms, source_end_ms
-             FROM meeting_todos WHERE meeting_id = ? ORDER BY created_at, id",
-        )
-        .bind(meeting_id)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| MeetingTodo {
-                id: row.get("id"),
-                text: row.get("text"),
-                completed: row.get("completed"),
-                source_start_ms: row.get("source_start_ms"),
-                source_end_ms: row.get("source_end_ms"),
-            })
-            .collect())
+async fn verified_sequences_for_meeting(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    meeting_id: &str,
+) -> anyhow::Result<HashSet<i64>> {
+    let rows = sqlx::query(
+        "SELECT sequence FROM meeting_chunks
+         WHERE meeting_id = ? AND verified = 1 AND content_path IS NOT NULL",
+    )
+    .bind(meeting_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<i64, _>("sequence"))
+        .collect())
+}
+
+async fn verified_sequences_for_user(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+) -> anyhow::Result<HashMap<String, HashSet<i64>>> {
+    let rows = sqlx::query(
+        "SELECT meeting_chunks.meeting_id, meeting_chunks.sequence
+         FROM meeting_chunks
+         JOIN meetings ON meetings.id = meeting_chunks.meeting_id
+         WHERE meetings.user_id = ?
+           AND meeting_chunks.verified = 1
+           AND meeting_chunks.content_path IS NOT NULL",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut sequences = HashMap::<String, HashSet<i64>>::new();
+    for row in rows {
+        sequences
+            .entry(row.get("meeting_id"))
+            .or_default()
+            .insert(row.get("sequence"));
     }
+    Ok(sequences)
+}
+
+async fn transcript_in(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    meeting_id: &str,
+) -> anyhow::Result<Vec<TranscriptSegment>> {
+    let rows = sqlx::query(
+        "SELECT id, start_ms, end_ms, text, provisional
+         FROM meeting_transcript_segments WHERE meeting_id = ? ORDER BY start_ms, id",
+    )
+    .bind(meeting_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| TranscriptSegment {
+            id: row.get("id"),
+            start_ms: row.get("start_ms"),
+            end_ms: row.get("end_ms"),
+            text: row.get("text"),
+            provisional: row.get("provisional"),
+        })
+        .collect())
+}
+
+async fn todos_in(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    meeting_id: &str,
+) -> anyhow::Result<Vec<MeetingTodo>> {
+    let rows = sqlx::query(
+        "SELECT id, text, completed, source_start_ms, source_end_ms
+         FROM meeting_todos WHERE meeting_id = ? ORDER BY created_at, id",
+    )
+    .bind(meeting_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| MeetingTodo {
+            id: row.get("id"),
+            text: row.get("text"),
+            completed: row.get("completed"),
+            source_start_ms: row.get("source_start_ms"),
+            source_end_ms: row.get("source_end_ms"),
+        })
+        .collect())
 }
 
 fn validate_transcript_segments(
@@ -1813,6 +1881,53 @@ fn meeting_from_row(row: SqliteRow, progress: MeetingProgress) -> anyhow::Result
     })
 }
 
+fn meeting_progress_from_row(
+    row: &SqliteRow,
+    verified_sequences: Option<&HashSet<i64>>,
+) -> anyhow::Result<MeetingProgress> {
+    let final_sequence = row.get::<Option<i64>, _>("progress_final_sequence");
+    let missing_sequences = final_sequence
+        .map(|last_sequence| {
+            (0..=last_sequence)
+                .filter(|sequence| {
+                    !verified_sequences.is_some_and(|present| present.contains(sequence))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(MeetingProgress {
+        chunk_count: row.get("progress_chunk_count"),
+        final_sequence,
+        missing_sequences,
+        recording_verified: row.get::<i64, _>("progress_recording_verified") != 0,
+        transcript: processing_job_from_values(
+            row.get("transcript_status"),
+            row.get("transcript_attempt"),
+            row.get("transcript_error"),
+        )?,
+        organization: processing_job_from_values(
+            row.get("organization_status"),
+            row.get("organization_attempt"),
+            row.get("organization_error"),
+        )?,
+    })
+}
+
+fn processing_job_from_values(
+    status: Option<String>,
+    attempt: Option<i64>,
+    error_message: Option<String>,
+) -> anyhow::Result<ProcessingJobView> {
+    let Some(status) = status else {
+        return Ok(not_started_processing_job());
+    };
+    Ok(ProcessingJobView {
+        status: ProcessingJobStatus::parse(&status)?,
+        attempt: attempt.unwrap_or_default(),
+        error_message,
+    })
+}
+
 fn not_started_processing_job() -> ProcessingJobView {
     ProcessingJobView {
         status: ProcessingJobStatus::NotStarted,
@@ -1844,7 +1959,7 @@ mod tests {
         },
     };
 
-    use super::MeetingStore;
+    use super::{MEETING_WITH_PROGRESS_SELECT, MeetingStore};
 
     async fn test_store() -> (tempfile::TempDir, ContextStore, MeetingStore) {
         let directory = tempfile::tempdir().unwrap();
@@ -2062,6 +2177,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initialize_backfills_completed_transcript_meetings_from_previous_version()
+    -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let completed_transcript = store.create("user-a", "legacy-completed", 100.0).await?;
+        let running_transcript = store.create("user-a", "legacy-running", 101.0).await?;
+        for meeting in [&completed_transcript, &running_transcript] {
+            sqlx::query("UPDATE meetings SET state = 'processing' WHERE id = ?")
+                .bind(&meeting.id)
+                .execute(&context.pool_clone())
+                .await?;
+        }
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, status, updated_at)
+             VALUES (?, 'transcript', 'completed', 1),
+                    (?, 'transcript', 'running', 1)",
+        )
+        .bind(&completed_transcript.id)
+        .bind(&running_transcript.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        store.initialize().await?;
+
+        assert_eq!(
+            store
+                .get_owned("user-a", &completed_transcript.id)
+                .await?
+                .unwrap()
+                .state,
+            MeetingState::Completed
+        );
+        assert_eq!(
+            store
+                .get_owned("user-a", &running_transcript.id)
+                .await?
+                .unwrap()
+                .state,
+            MeetingState::Processing
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn processing_progress_reports_verified_recording_gaps_and_jobs() -> anyhow::Result<()> {
         let (_directory, context, store) = test_store().await;
         let meeting = store.create("user-a", "progress", 100.0).await?;
@@ -2119,6 +2277,81 @@ mod tests {
         let progress = store.processing_progress(&meeting.id).await?;
         assert!(progress.recording_verified);
         assert_eq!(store.list("user-a").await?[0].progress, progress);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_bulk_loads_distinct_progress_for_multiple_meetings() -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let first = store.create("user-a", "bulk-first", 100.0).await?;
+        let second = store.create("user-a", "bulk-second", 101.0).await?;
+        store
+            .record_verified_chunk(
+                &first.id,
+                0,
+                0,
+                1_000,
+                "verified",
+                100,
+                &format!("{}/chunks/0.m4a", first.id),
+            )
+            .await?;
+        store
+            .record_chunk(&first.id, 1, 1_000, 2_000, "unverified", 100)
+            .await?;
+        sqlx::query(
+            "UPDATE meetings
+             SET final_sequence = 1, final_audio_path = ?,
+                 final_audio_size_bytes = 200, final_audio_checksum = 'sum'
+             WHERE id = ?",
+        )
+        .bind(format!("{}/recording.m4a", first.id))
+        .bind(&first.id)
+        .execute(&context.pool_clone())
+        .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(
+                meeting_id, stage, attempt, status, diagnostic_error, updated_at
+             ) VALUES (?, 'transcript', 1, 'completed', NULL, 1),
+                      (?, 'organization', 2, 'failed', 'safe failure', 1),
+                      (?, 'transcript', 3, 'running', NULL, 1)",
+        )
+        .bind(&first.id)
+        .bind(&first.id)
+        .bind(&second.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        let meetings = store.list("user-a").await?;
+        let first_view = meetings
+            .iter()
+            .find(|meeting| meeting.id == first.id)
+            .unwrap();
+        let second_view = meetings
+            .iter()
+            .find(|meeting| meeting.id == second.id)
+            .unwrap();
+        assert_eq!(first_view.progress.chunk_count, 1);
+        assert_eq!(first_view.progress.missing_sequences, vec![1]);
+        assert!(first_view.progress.recording_verified);
+        assert_eq!(
+            first_view.progress.transcript.status,
+            ProcessingJobStatus::Completed
+        );
+        assert_eq!(
+            first_view.progress.organization.status,
+            ProcessingJobStatus::Failed
+        );
+        assert_eq!(first_view.progress.organization.attempt, 2);
+        assert_eq!(
+            second_view.progress.transcript.status,
+            ProcessingJobStatus::Running
+        );
+        assert_eq!(second_view.progress.transcript.attempt, 3);
+        assert_eq!(
+            second_view.progress.organization.status,
+            ProcessingJobStatus::NotStarted
+        );
         Ok(())
     }
 
@@ -2839,6 +3072,62 @@ mod tests {
         assert_eq!(
             detail.progress.organization.status,
             ProcessingJobStatus::Pending
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn meeting_hydration_uses_one_read_snapshot_during_transcript_completion()
+    -> anyhow::Result<()> {
+        let (_directory, context, store) = test_store().await;
+        let meeting = store.create("user-a", "snapshot", 100.0).await?;
+        sqlx::query("UPDATE meetings SET state = 'processing' WHERE id = ?")
+            .bind(&meeting.id)
+            .execute(&context.pool_clone())
+            .await?;
+        sqlx::query(
+            "INSERT INTO meeting_processing_jobs(meeting_id, stage, attempt, status, updated_at)
+             VALUES (?, 'transcript', 1, 'running', 1)",
+        )
+        .bind(&meeting.id)
+        .execute(&context.pool_clone())
+        .await?;
+
+        let mut read_transaction = store.pool.begin().await?;
+        let row = sqlx::query(&format!(
+            "{MEETING_WITH_PROGRESS_SELECT}
+             WHERE meetings.user_id = 'user-a' AND meetings.id = ?"
+        ))
+        .bind(&meeting.id)
+        .fetch_one(&mut *read_transaction)
+        .await?;
+
+        store
+            .complete_transcript_job(
+                &meeting.id,
+                1,
+                &[TranscriptSegment {
+                    id: 0,
+                    start_ms: 0,
+                    end_ms: 1_000,
+                    text: "最终文本".to_owned(),
+                    provisional: false,
+                }],
+            )
+            .await?;
+
+        let snapshot = store
+            .hydrate_meeting(&mut read_transaction, row, false)
+            .await?;
+        read_transaction.rollback().await?;
+        assert_eq!(snapshot.state, MeetingState::Processing);
+        assert_eq!(
+            snapshot.progress.transcript.status,
+            ProcessingJobStatus::Running
+        );
+        assert_eq!(
+            snapshot.progress.organization.status,
+            ProcessingJobStatus::NotStarted
         );
         Ok(())
     }
