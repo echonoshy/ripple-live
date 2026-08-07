@@ -132,12 +132,18 @@ impl MeetingProcessor {
         let processor = self.clone();
         Some(tokio::spawn(async move {
             let _guard = guard;
-            if processor
-                .transcribe_chunk(&meeting_id, sequence, start_ms, end_ms, &relative_path)
+            if let Err(error) = processor
+                .transcribe_provisional_once(
+                    &meeting_id,
+                    sequence,
+                    start_ms,
+                    end_ms,
+                    &relative_path,
+                )
                 .await
-                .is_err()
             {
                 tracing::warn!(
+                    error = %format!("{error:#}"),
                     meeting_id,
                     sequence,
                     "meeting provisional transcription failed"
@@ -318,7 +324,7 @@ impl MeetingProcessor {
         }
     }
 
-    pub async fn transcribe_chunk(
+    pub async fn transcribe_provisional_once(
         &self,
         meeting_id: &str,
         sequence: i64,
@@ -349,7 +355,7 @@ impl MeetingProcessor {
             )
             .await
             .context("decode provisional meeting audio")?;
-        let text = self.transcribe_with_retry(&pcm).await?;
+        let text = self.transcribe_provisional_pcm(&pcm).await?;
         let segment = (!text.trim().is_empty()).then(|| TranscriptSegment {
             id: sequence,
             start_ms,
@@ -481,6 +487,17 @@ impl MeetingProcessor {
             .map(|(start_ms, end_ms, text)| (*start_ms, *end_ms, text.as_str()))
             .collect::<Vec<_>>();
         Ok(reconcile_overlap(&borrowed))
+    }
+
+    async fn transcribe_provisional_pcm(&self, pcm: &[i16]) -> anyhow::Result<String> {
+        let samples = pcm
+            .iter()
+            .map(|sample| *sample as f32 / i16::MAX as f32)
+            .collect::<Vec<_>>();
+        self.adapters
+            .transcribe(&samples)
+            .await
+            .context("transcribe provisional meeting audio")
     }
 
     async fn transcribe_with_retry(&self, pcm: &[i16]) -> anyhow::Result<String> {
@@ -1031,7 +1048,7 @@ mod tests {
         meeting::{
             storage::MeetingStorage,
             store::MeetingStore,
-            types::{ProcessingStage, TranscriptSegment},
+            types::{MeetingState, ProcessingStage, TranscriptSegment},
             worker::PendingMeetingJob,
         },
     };
@@ -1578,28 +1595,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retries_asr_and_replaces_stale_provisional_segment() -> anyhow::Result<()> {
-        let (_directory, store, _storage, processor, probe, meeting_id, relative_path) = fixture(
-            vec![
-                Err("temporary-1"),
-                Err("temporary-2"),
-                Ok("旧文本"),
-                Ok("新文本"),
-            ],
+    async fn provisional_chunk_uses_one_provider_attempt() -> anyhow::Result<()> {
+        let (_directory, _store, _storage, processor, probe, meeting_id, relative_path) = fixture(
+            vec![Err("temporary-1"), Err("temporary-2"), Err("temporary-3")],
             Duration::ZERO,
             1,
         )
         .await?;
 
+        assert!(
+            processor
+                .transcribe_provisional_once(&meeting_id, 0, 0, 360, &relative_path)
+                .await
+                .is_err()
+        );
+        assert_eq!(probe.attempts(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provisional_failure_does_not_fail_meeting() -> anyhow::Result<()> {
+        let (_directory, store, _storage, processor, _probe, meeting_id, relative_path) =
+            fixture(vec![Err("transient failure")], Duration::ZERO, 1).await?;
+
         processor
-            .transcribe_chunk(&meeting_id, 0, 0, 360, &relative_path)
-            .await?;
-        processor
-            .transcribe_chunk(&meeting_id, 0, 0, 360, &relative_path)
+            .spawn_transcribe_chunk(meeting_id.clone(), 0, 0, 360, relative_path)
+            .expect("new chunk must schedule a provisional transcript")
             .await?;
 
         let meeting = store.get_owned("user-a", &meeting_id).await?.unwrap();
-        assert_eq!(probe.attempts(), 4);
+        assert_eq!(meeting.error_stage, None);
+        assert_eq!(meeting.state, MeetingState::Recording);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provisional_transcription_replaces_stale_provisional_segment() -> anyhow::Result<()> {
+        let (_directory, store, _storage, processor, probe, meeting_id, relative_path) =
+            fixture(vec![Ok("旧文本"), Ok("新文本")], Duration::ZERO, 1).await?;
+
+        processor
+            .transcribe_provisional_once(&meeting_id, 0, 0, 360, &relative_path)
+            .await?;
+        processor
+            .transcribe_provisional_once(&meeting_id, 0, 0, 360, &relative_path)
+            .await?;
+
+        let meeting = store.get_owned("user-a", &meeting_id).await?.unwrap();
+        assert_eq!(probe.attempts(), 2);
         assert_eq!(
             meeting.transcript,
             vec![TranscriptSegment {
@@ -1616,8 +1659,12 @@ mod tests {
     #[tokio::test]
     async fn finalization_replaces_provisional_rows_with_monotonic_final_rows() -> anyhow::Result<()>
     {
-        let (_directory, store, _storage, processor, _probe, meeting_id, relative_path) = fixture(
-            vec![Ok("今天讨论发布计划"), Ok("发布计划下周开始")],
+        let (_directory, store, _storage, processor, probe, meeting_id, relative_path) = fixture(
+            vec![
+                Err("temporary"),
+                Ok("今天讨论发布计划"),
+                Ok("发布计划下周开始"),
+            ],
             Duration::ZERO,
             1,
         )
@@ -1653,6 +1700,7 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].end_ms <= pair[1].start_ms)
         );
+        assert_eq!(probe.attempts(), 3);
         let persisted = store.get_owned("user-a", &meeting_id).await?.unwrap();
         assert_eq!(persisted.transcript, segments);
         Ok(())
@@ -1673,7 +1721,7 @@ mod tests {
             let relative_path = relative_path.clone();
             tasks.push(tokio::spawn(async move {
                 processor
-                    .transcribe_chunk(
+                    .transcribe_provisional_once(
                         &meeting_id,
                         sequence,
                         sequence * 400,
@@ -1694,23 +1742,19 @@ mod tests {
 
     #[tokio::test]
     async fn failed_asr_releases_the_only_permit() -> anyhow::Result<()> {
-        let (_directory, _store, _storage, processor, probe, meeting_id, relative_path) = fixture(
-            vec![Err("one"), Err("two"), Err("three"), Ok("恢复")],
-            Duration::from_millis(5),
-            1,
-        )
-        .await?;
+        let (_directory, _store, _storage, processor, probe, meeting_id, relative_path) =
+            fixture(vec![Err("one"), Ok("恢复")], Duration::from_millis(5), 1).await?;
         assert!(
             processor
-                .transcribe_chunk(&meeting_id, 0, 0, 360, &relative_path)
+                .transcribe_provisional_once(&meeting_id, 0, 0, 360, &relative_path)
                 .await
                 .is_err()
         );
         processor
-            .transcribe_chunk(&meeting_id, 1, 360, 720, &relative_path)
+            .transcribe_provisional_once(&meeting_id, 1, 360, 720, &relative_path)
             .await?;
 
-        assert_eq!(probe.attempts(), 4);
+        assert_eq!(probe.attempts(), 2);
         assert_eq!(probe.maximum_active(), 1);
         assert_eq!(probe.active(), 0);
         Ok(())

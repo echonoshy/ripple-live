@@ -2895,13 +2895,22 @@ mod tests {
         store
             .replace_transcript(
                 &meeting.id,
-                &[TranscriptSegment {
-                    id: 1,
-                    start_ms: 0,
-                    end_ms: 15_000,
-                    text: "临时文本".to_owned(),
-                    provisional: true,
-                }],
+                &[
+                    TranscriptSegment {
+                        id: 1,
+                        start_ms: 0,
+                        end_ms: 15_000,
+                        text: "临时文本".to_owned(),
+                        provisional: true,
+                    },
+                    TranscriptSegment {
+                        id: 2,
+                        start_ms: 8_000,
+                        end_ms: 15_000,
+                        text: "第二段临时文本".to_owned(),
+                        provisional: true,
+                    },
+                ],
             )
             .await?;
         store
