@@ -3606,6 +3606,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn meeting_chunk_retry_schedules_one_provisional_asr_attempt() {
+        let (directory, mut state, token, _) = meeting_api_state().await;
+        let asr_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let asr_handler_attempts = std::sync::Arc::clone(&asr_attempts);
+        let asr_app = axum::Router::new().route(
+            "/v1/audio/transcriptions",
+            axum::routing::post(move || {
+                let asr_handler_attempts = std::sync::Arc::clone(&asr_handler_attempts);
+                async move {
+                    asr_handler_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Json(json!({"text": "草稿"}))
+                }
+            }),
+        );
+        let asr_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let asr_url = format!(
+            "http://{}/v1/audio/transcriptions",
+            asr_listener.local_addr().unwrap()
+        );
+        let asr_server = tokio::spawn(async move { axum::serve(asr_listener, asr_app).await });
+        let mut asr_settings = (*state.settings).clone();
+        asr_settings.asr_backend = "http".to_owned();
+        asr_settings.asr_url = asr_url;
+        state.meeting_processor = MeetingProcessor::new(
+            MeetingStore::new(state.context.pool_clone()),
+            state.meeting_storage.clone(),
+            ModelAdapters::new(asr_settings).unwrap(),
+            2,
+        )
+        .unwrap();
+        let (_, meeting) = create_meeting(&state, &token, "chunk-retry-transcript").await;
+        let meeting_id = meeting["data"]["id"].as_str().unwrap();
+        let bytes = generated_meeting_chunk(&directory.path().join("chunk-retry.m4a"), 440).await;
+        let inserted = upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 360, &bytes).await;
+        assert_eq!(inserted.status(), StatusCode::CREATED);
+        let retry = upload_meeting_chunk(&state, &token, meeting_id, 0, 0, 360, &bytes).await;
+        let retry_status = retry.status();
+        let retry_body = json_body(retry).await;
+        assert_eq!(retry_status, StatusCode::OK);
+        assert_eq!(retry_body["data"]["existing"], true);
+        for _ in 0..100 {
+            if asr_attempts.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(asr_attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        asr_server.abort();
+    }
+
+    #[tokio::test]
     async fn meeting_chunk_api_reports_missing_sequences_before_finalization() {
         let (_directory, state, token, _) = meeting_api_state().await;
         let (_, meeting) = create_meeting(&state, &token, "missing-sequence").await;
