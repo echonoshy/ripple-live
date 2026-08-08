@@ -8,6 +8,8 @@ import {
   ImagesSquare,
   LockKey,
   ListChecks,
+  MagnifyingGlass,
+  Microphone,
   PushPin,
   SignOut,
   NotePencil,
@@ -1645,8 +1647,8 @@ export default function App() {
       )}
 
       {screen === 'history' && (
-        <section className="history-screen">
-          <header className="screen-header">
+        <section className="history-screen history-library-screen">
+          <header className="screen-header history-page-header">
             <button
               className="icon-button"
               type="button"
@@ -1656,7 +1658,14 @@ export default function App() {
               <ArrowLeft />
             </button>
             <h1>聊天历史</h1>
-            <span className="header-spacer" />
+            <button
+              className="icon-button history-search-button"
+              type="button"
+              aria-label="搜索聊天历史"
+              onClick={() => document.getElementById('history-search')?.focus()}
+            >
+              <MagnifyingGlass aria-hidden="true" />
+            </button>
           </header>
 
           <div className="library-region" aria-label="搜索聊天历史">
@@ -1787,6 +1796,16 @@ export default function App() {
                 </LibrarySection>
               ))}
             </div>
+          )}
+          {!historySelectionMode && (
+            <button
+              className="history-voice-fab"
+              type="button"
+              aria-label="开始新的语音对话"
+              onClick={() => openCall('audio')}
+            >
+              <Microphone aria-hidden="true" />
+            </button>
           )}
         </section>
       )}
@@ -2122,12 +2141,6 @@ export default function App() {
               </button>
             </div>
             <time>{formatHistoryTime(selectedConversation.updated_at)}</time>
-            <button
-              type="button"
-              onClick={() => openCall('audio', selectedConversation.id)}
-            >
-              继续语音
-            </button>
           </div>
 
           {historyBusy && (
@@ -2171,6 +2184,20 @@ export default function App() {
               ))}
             </div>
           )}
+          <aside className="conversation-continuation-bar" aria-label="继续这段对话">
+            <span>
+              <strong>继续这段对话</strong>
+              <small>沿用当前聊天记录</small>
+            </span>
+            <button
+              type="button"
+              aria-label="继续语音"
+              onClick={() => openCall('audio', selectedConversation.id)}
+            >
+              <Microphone aria-hidden="true" />
+              <span>继续语音</span>
+            </button>
+          </aside>
         </section>
       )}
 

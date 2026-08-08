@@ -794,6 +794,84 @@ test('mobile libraries expose accessible shared management controls', () => {
   )
   assert.match(cssSource, /@media \(prefers-reduced-motion: reduce\)/)
   assert.match(cssSource, /\.library-region\s*{[^}]*margin-top:\s*24px/s)
-  assert.match(cssSource, /\.history-list \.history-row\s*{[^}]*min-height:\s*74px/s)
+  assert.match(cssSource, /\.history-list \.history-row\s*{[^}]*min-height:\s*64px/s)
   assert.match(cssSource, /\.memory-library-grid\s*{[^}]*gap:\s*8px/s)
+})
+
+test('history and conversation detail use a compact voice-first hierarchy', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
+  const navigationSource = readFileSync(
+    path.join(appRoot, 'src/components/AppNavigation.css'),
+    'utf8',
+  )
+  const toolbarSource = readFileSync(
+    path.join(appRoot, 'src/components/LibraryToolbar.tsx'),
+    'utf8',
+  )
+
+  assert.match(appSource, /className="screen-header history-page-header"/)
+  assert.match(appSource, /className="history-screen history-library-screen"/)
+  assert.match(
+    appSource,
+    /className="icon-button history-search-button"[\s\S]*?document\.getElementById\('history-search'\)\?\.focus\(\)/,
+  )
+  assert.match(toolbarSource, /className="library-search-affordance"/)
+  assert.match(
+    cssSource,
+    /\.history-page-header h1\s*{[^}]*font-size:\s*23px;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.library-search input\s*{[^}]*min-height:\s*44px;[^}]*border-radius:\s*15px;[^}]*font-size:\s*14px;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.history-library-screen \.library-region\s*{[^}]*margin-top:\s*16px;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.library-toolbar\.is-history \.library-search input\s*{[^}]*border-radius:\s*12px;[^}]*font-size:\s*13px;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.history-list \.history-row\s*{[^}]*min-height:\s*64px;[^}]*padding:\s*10px 12px;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.library-row-preview\s*{[^}]*color:\s*var\(--text-secondary\);[^}]*-webkit-line-clamp:\s*1;/s,
+  )
+  assert.match(appSource, /className="history-voice-fab"/)
+  assert.match(
+    appSource,
+    /className="history-voice-fab"[\s\S]*?onClick=\{\(\) => openCall\('audio'\)\}/,
+  )
+  assert.match(
+    navigationSource,
+    /\.history-voice-fab\s*{[^}]*width:\s*48px;[^}]*height:\s*48px;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.message-history article\.is-assistant\s*{[^}]*border:\s*0;[^}]*background:\s*transparent;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.message-history article\.is-user\s*{[^}]*border:\s*0;[^}]*border-radius:\s*18px;[^}]*background:\s*var\(--surface\);/s,
+  )
+  assert.match(appSource, /className="conversation-continuation-bar"/)
+  assert.match(
+    appSource,
+    /className="conversation-continuation-bar"[\s\S]*?onClick=\{\(\) => openCall\('audio', selectedConversation\.id\)\}/,
+  )
+  assert.match(
+    cssSource,
+    /\.conversation-actions button\s*{[^}]*border-radius:\s*10px;[^}]*font-size:\s*11px;/s,
+  )
+  const continuationStart = appSource.indexOf(
+    'className="conversation-continuation-bar"',
+  )
+  const continuationEnd = appSource.indexOf('</aside>', continuationStart)
+  const continuationSource = appSource.slice(continuationStart, continuationEnd)
+  assert.ok(continuationStart >= 0 && continuationEnd > continuationStart)
+  assert.doesNotMatch(continuationSource, /<input|<textarea|Paperclip|attachment/i)
 })

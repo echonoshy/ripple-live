@@ -81,6 +81,27 @@
   transform: scale(0.97);
 }
 
+.history-voice-fab {
+  position: fixed;
+  right: max(20px, calc((100vw - 680px) / 2));
+  bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom) + 16px);
+  z-index: 14;
+  width: 48px;
+  height: 48px;
+}
+
+.conversation-continuation-bar {
+  position: fixed;
+  right: max(20px, calc((100vw - 580px) / 2));
+  bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom) + 12px);
+  left: max(20px, calc((100vw - 580px) / 2));
+  display: flex;
+  z-index: 14;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .conversation-home {
   position: relative;
   display: flex;

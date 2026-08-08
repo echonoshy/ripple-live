@@ -100,6 +100,29 @@ test('matches every normalized query token', () => {
   assert.equal(matchesLibraryQuery(items[0], '   '), true)
 })
 
+test('keeps title-first row content intact through search and grouping', () => {
+  const visible = groupLibraryItems(
+    items.filter((item) => matchesLibraryQuery(item, '红茶')),
+    new Date('2026-08-03T12:00:00+08:00'),
+    'all',
+  ).flatMap((group) => group.items)
+
+  assert.deepEqual(
+    visible.map((item) => ({
+      id: item.id,
+      title: item.title,
+      searchableText: item.searchableText,
+    })),
+    [
+      {
+        id: 'pinned',
+        title: '红茶配料表',
+        searchableText: '红茶配料表 水 糖浆 食品添加剂',
+      },
+    ],
+  )
+})
+
 test('maps views to server query options', () => {
   assert.deepEqual(libraryOptionsForView('all', '红茶', 50), {
     scope: 'active',

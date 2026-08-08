@@ -70,19 +70,37 @@ export function LibraryToolbar({
   }
 
   const searchId = kind === '聊天历史' ? 'history-search' : 'memory-search'
+  const compactHistory = kind === '聊天历史'
+  const manageButton = (
+    <button
+      className="library-manage-button"
+      type="button"
+      aria-label={`管理${kind}`}
+      onClick={onStartSelection}
+    >
+      <CheckSquare aria-hidden="true" />
+      <span>管理</span>
+    </button>
+  )
+
   return (
-    <div className="library-toolbar">
-      <label className="visually-hidden" htmlFor={searchId}>搜索{kind}</label>
-      <div className="library-search">
-        <MagnifyingGlass aria-hidden="true" />
-        <input
-          id={searchId}
-          type="search"
-          value={query}
-          aria-label={`搜索${kind}`}
-          placeholder={kind === '聊天历史' ? '搜索标题或对话内容' : '搜索备注或画面内容'}
-          onChange={(event) => onQueryChange(event.target.value)}
-        />
+    <div className={`library-toolbar ${compactHistory ? 'is-history' : ''}`}>
+      <div className="library-query-row">
+        <label className="visually-hidden" htmlFor={searchId}>搜索{kind}</label>
+        <div className="library-search">
+          <span className="library-search-affordance" aria-hidden="true">
+            <MagnifyingGlass />
+          </span>
+          <input
+            id={searchId}
+            type="search"
+            value={query}
+            aria-label={`搜索${kind}`}
+            placeholder={compactHistory ? '搜索对话' : '搜索备注或画面内容'}
+            onChange={(event) => onQueryChange(event.target.value)}
+          />
+        </div>
+        {compactHistory && manageButton}
       </div>
       <div className="library-scope-tabs" aria-label={`${kind}视图`}>
         {scopes.map((item) => (
@@ -97,14 +115,14 @@ export function LibraryToolbar({
           </button>
         ))}
       </div>
-      <div className="library-toolbar-meta">
-        <p>
-          <strong>置顶</strong>会留在最近记录并排在最前；<strong>归档</strong>会从最近记录移出{kind === '聊天历史' ? '，且不再用于回答时的上下文参考。' : '，且不再作为 Agent 的联想素材。'}
-        </p>
-        <button className="library-manage-button" type="button" onClick={onStartSelection}>
-          <CheckSquare aria-hidden="true" /> 管理
-        </button>
-      </div>
+      {!compactHistory && (
+        <div className="library-toolbar-meta">
+          <p>
+            <strong>置顶</strong>会留在最近记录并排在最前；<strong>归档</strong>会从最近记录移出，且不再作为 Agent 的联想素材。
+          </p>
+          {manageButton}
+        </div>
+      )}
     </div>
   )
 }
