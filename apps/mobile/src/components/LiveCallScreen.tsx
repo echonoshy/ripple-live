@@ -3,11 +3,14 @@ import {
   Microphone,
   MicrophoneSlash,
   PhoneDisconnect,
+  VideoCamera,
+  VideoCameraSlash,
   X,
 } from '@phosphor-icons/react'
 import { useEffect, useState, type RefObject } from 'react'
 import { assetBlob } from '../api'
 import { mapSessionState } from '../live/motion'
+import type { CameraPhase } from '../live/cameraOrchestration'
 import type {
   RealtimeMode,
   ResponseArtifact,
@@ -75,6 +78,9 @@ function AuthenticatedArtifact({
 
 export type LiveCallScreenProps = {
   mode: RealtimeMode
+  cameraPhase: CameraPhase
+  cameraPreviewVisible: boolean
+  frameRequestActive: boolean
   state: SessionState
   elapsed: number
   muted: boolean
@@ -91,6 +97,7 @@ export type LiveCallScreenProps = {
   videoRef: RefObject<HTMLVideoElement | null>
   captureCanvasRef: RefObject<HTMLCanvasElement | null>
   onToggleMute(): void
+  onToggleCamera(): Promise<void>
   onFlipCamera(): Promise<void>
   onDismissResult(callId: string): void
   onLeave(): Promise<void>
@@ -98,6 +105,9 @@ export type LiveCallScreenProps = {
 
 export function LiveCallScreen({
   mode,
+  cameraPhase,
+  cameraPreviewVisible,
+  frameRequestActive,
   state,
   elapsed,
   muted,
@@ -114,11 +124,27 @@ export function LiveCallScreen({
   videoRef,
   captureCanvasRef,
   onToggleMute,
+  onToggleCamera,
   onFlipCamera,
   onDismissResult,
   onLeave,
 }: LiveCallScreenProps) {
-  const videoMode = mode === 'video'
+  const videoMode = cameraPreviewVisible
+  const cameraBusy = cameraPhase === 'opening' || cameraPhase === 'closing'
+  const stateDetail = state === 'using_tool' && toolStatus
+    ? toolStatus
+    : stateLabels[state]
+  const cameraStatus = frameRequestActive && cameraPhase === 'on'
+    ? '正在识别'
+    : cameraPhase === 'opening'
+      ? '正在开启镜头'
+      : cameraPhase === 'on'
+        ? '镜头已开启'
+        : cameraPhase === 'closing'
+          ? '正在关闭镜头'
+          : cameraPhase === 'error' && cameraPreviewVisible
+            ? '镜头状态待同步'
+            : stateDetail
   const statusClass = state === 'error'
     ? 'is-error'
     : state === 'speaking'
@@ -126,32 +152,45 @@ export function LiveCallScreen({
       : state === 'idle' || state === 'ended'
         ? ''
         : 'is-live'
-  const stateDetail = state === 'using_tool' && toolStatus
-    ? toolStatus
-    : stateLabels[state]
-
   return (
     <section
-      className={`call-screen live-call-screen ${videoMode ? 'has-video' : 'has-audio'} ${results.length > 0 ? 'has-results' : ''}`}
+      className={`call-screen live-call-screen ${videoMode ? 'has-video' : 'has-audio'} server-${mode} camera-phase-${cameraPhase} ${results.length > 0 ? 'has-results' : ''}`}
     >
-      <video
-        ref={videoRef}
-        className="camera-preview"
-        autoPlay
-        muted
-        playsInline
-      />
+      <div className="camera-layer" aria-hidden={!videoMode}>
+        <video
+          ref={videoRef}
+          className="camera-preview"
+          autoPlay
+          muted
+          playsInline
+        />
+        <div className="camera-scrim" aria-hidden="true" />
+      </div>
       <canvas ref={captureCanvasRef} hidden />
-      {videoMode && <div className="camera-scrim" aria-hidden="true" />}
+      {frameRequestActive && cameraPhase === 'on' && videoMode && (
+        <div className="camera-focus-frame" aria-hidden="true">
+          <span />
+        </div>
+      )}
 
       <header className="call-header">
-        <span className="call-mode">{videoMode ? '视频' : '语音'} · 智能响应</span>
+        <span className="call-mode">
+          {cameraPhase === 'opening'
+            ? '正在开启镜头'
+            : cameraPhase === 'on'
+              ? '镜头已开启'
+              : cameraPhase === 'closing'
+                ? '正在关闭镜头'
+                : cameraPhase === 'error' && videoMode
+                  ? '镜头待同步'
+                  : '语音'} · 智能响应
+        </span>
         <div className={`call-status ${statusClass}`} role="status">
           <span aria-hidden="true" />
           <strong>{stateDetail}</strong>
           <small aria-hidden="true">{formatDuration(elapsed)}</small>
         </div>
-        {videoMode ? (
+        {cameraPhase === 'on' ? (
           <button
             className="icon-button call-icon"
             type="button"
@@ -164,18 +203,16 @@ export function LiveCallScreen({
       </header>
 
       <div className="live-stage">
-        {!videoMode && (
-          <div className="live-orb-wrap">
-            <LiveOrb
-              state={mapSessionState(state)}
-              inputLevel={inputLevel}
-              outputLevel={outputLevel}
-            />
-          </div>
-        )}
+        <div className="live-orb-wrap">
+          <LiveOrb
+            state={mapSessionState(state)}
+            inputLevel={inputLevel}
+            outputLevel={outputLevel}
+          />
+        </div>
 
         <div className="live-feedback">
-          <span className="live-state-label">{stateDetail}</span>
+          <span className="live-state-label">{cameraStatus}</span>
           <LiveCaption
             userText={userText}
             assistantText={assistantText}
@@ -221,6 +258,36 @@ export function LiveCallScreen({
             {muted ? <MicrophoneSlash /> : <Microphone />}
           </button>
           <span>{muted ? '取消静音' : '静音'}</span>
+        </div>
+        <div className="control-item">
+          <button
+            className={`control-button camera-control ${videoMode ? 'is-active' : ''}`}
+            type="button"
+            aria-label={
+              cameraBusy
+                ? cameraStatus
+                : videoMode
+                  ? '关闭镜头'
+                  : cameraPhase === 'error'
+                    ? '重试镜头'
+                    : '开启镜头'
+            }
+            disabled={cameraBusy}
+            onClick={() => { void onToggleCamera().catch(() => {}) }}
+          >
+            {videoMode ? <VideoCameraSlash /> : <VideoCamera />}
+          </button>
+          <span>
+            {cameraPhase === 'opening'
+              ? '开启中'
+              : cameraPhase === 'closing'
+                ? '关闭中'
+                : cameraPhase === 'error'
+                  ? '重试'
+                  : videoMode
+                    ? '关闭镜头'
+                    : '开启镜头'}
+          </span>
         </div>
         <div className="control-item">
           <button

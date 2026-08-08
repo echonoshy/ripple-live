@@ -10,8 +10,6 @@ type LiveMediaOptions = {
   video: HTMLVideoElement
   canvas: HTMLCanvasElement
   initialVideo?: boolean
-  /** @deprecated Kept until the in-call orchestration migrates to initialVideo. */
-  withVideo?: boolean
   facingMode: CameraFacingMode
   onPlaybackStarted: (bufferedMs: number) => void
   onPlaybackEnded: () => void
@@ -201,7 +199,7 @@ export class LiveMedia {
       this.silentGain = silentGain
       this.running = true
 
-      if (this.options.initialVideo ?? this.options.withVideo ?? false) {
+      if (this.options.initialVideo ?? false) {
         const cameraResult = await this.enableCamera(this.facingMode)
         if (cameraResult === 'stale' || !this.isCurrent(generation)) return
       }

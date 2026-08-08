@@ -5,7 +5,7 @@
   max-width: 100%;
   aspect-ratio: 1;
   border-radius: 50%;
-  background: #020406;
+  background: #07080c;
   opacity: 1;
   transform: scale(0.94);
   transform-origin: center;
@@ -18,9 +18,9 @@
 
 .live-orb-fallback {
   background:
-    radial-gradient(circle at 38% 32%, #ffffff 0 4%, #9edcff 12%, transparent 31%),
-    radial-gradient(circle at 50% 45%, #9edcff 0 23%, #4ca8e2 48%, #103b61 67%, transparent 69%),
-    #020406;
+    radial-gradient(circle at 38% 32%, #fff6e9 0 4%, #9bc3ff 12%, transparent 31%),
+    radial-gradient(circle at 50% 45%, #9bc3ff 0 23%, #2f77e6 48%, #0a2e75 67%, transparent 69%),
+    #07080c;
   box-shadow:
     0 0 36px rgb(76 168 226 / 36%),
     inset -18px -22px 36px rgb(16 59 97 / 56%);
@@ -98,10 +98,11 @@
     max(14px, env(safe-area-inset-bottom));
   background:
     radial-gradient(circle at 50% 42%, rgb(35 68 90 / 32%), transparent 42%),
-    #020406;
-  color: #f5f2f7;
+    #07080c;
+  color: #f5f4f0;
 }
 
+.live-call-screen .camera-layer,
 .live-call-screen .camera-preview,
 .live-call-screen .camera-scrim {
   position: absolute;
@@ -110,8 +111,17 @@
   height: 100%;
 }
 
-.live-call-screen .camera-preview {
+.live-call-screen .camera-layer {
   z-index: 0;
+  opacity: 0;
+  transform: scale(1.035);
+  transition:
+    opacity 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+
+.live-call-screen .camera-preview {
   object-fit: cover;
 }
 
@@ -119,12 +129,37 @@
   z-index: 1;
   pointer-events: none;
   background:
-    linear-gradient(to bottom, rgb(2 4 6 / 72%), transparent 28%),
-    linear-gradient(to top, rgb(2 4 6 / 90%), transparent 48%);
+    linear-gradient(to bottom, rgb(7 8 12 / 72%), transparent 28%),
+    linear-gradient(to top, rgb(7 8 12 / 90%), transparent 48%);
 }
 
-.live-call-screen.has-audio .camera-preview {
-  display: none;
+.live-call-screen.has-video .camera-layer {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.camera-focus-frame {
+  position: absolute;
+  z-index: 2;
+  inset: 17% 10% 25%;
+  border: 1px solid rgb(255 246 233 / 78%);
+  border-radius: 28px;
+  box-shadow:
+    0 0 0 999px rgb(7 8 12 / 10%),
+    0 0 28px rgb(158 220 255 / 14%);
+  pointer-events: none;
+  animation: camera-focus-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.camera-focus-frame > span {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  width: 18px;
+  height: 18px;
+  border-top: 2px solid #fff6e9;
+  border-left: 2px solid #fff6e9;
+  border-radius: 5px 0 0;
 }
 
 .live-call-screen .call-header {
@@ -138,7 +173,7 @@
 
 .live-call-screen .call-mode {
   padding-top: 12px;
-  color: rgb(245 242 247 / 62%);
+  color: rgb(238 237 232 / 62%);
   font-size: 12px;
   font-weight: 650;
 }
@@ -153,7 +188,7 @@
   padding: 8px 14px;
   border: 1px solid rgb(255 255 255 / 12%);
   border-radius: 18px;
-  background: rgb(15 18 22 / 76%);
+  background: rgb(16 16 20 / 76%);
   text-align: left;
   backdrop-filter: blur(18px);
 }
@@ -162,16 +197,16 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: rgb(245 242 247 / 42%);
+  background: rgb(238 237 232 / 42%);
 }
 
 .live-call-screen .call-status.is-live > span,
 .live-call-screen .call-status.is-speaking > span {
-  background: #9edcff;
+  background: #9bc3ff;
 }
 
 .live-call-screen .call-status.is-error > span {
-  background: #ff637e;
+  background: #ed687a;
 }
 
 .live-call-screen .call-status strong {
@@ -185,7 +220,7 @@
 .live-call-screen .call-status small {
   grid-column: 1 / -1;
   margin-top: 3px;
-  color: rgb(245 242 247 / 62%);
+  color: rgb(238 237 232 / 62%);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   text-align: center;
@@ -198,8 +233,8 @@
   height: 44px;
   min-height: 44px;
   border-color: rgb(255 255 255 / 12%);
-  background: rgb(15 18 22 / 76%);
-  color: #f5f2f7;
+  background: rgb(16 16 20 / 76%);
+  color: #f5f4f0;
   backdrop-filter: blur(18px);
 }
 
@@ -231,6 +266,18 @@
   place-items: center;
   width: 100%;
   min-height: 0;
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+
+.live-call-screen.has-video .live-orb-wrap {
+  opacity: 0;
+  transform: scale(0.88);
+  pointer-events: none;
 }
 
 .live-feedback {
@@ -241,7 +288,7 @@
 
 .live-state-label {
   display: block;
-  color: rgb(245 242 247 / 64%);
+  color: rgb(238 237 232 / 64%);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -251,7 +298,7 @@
   min-height: 32px;
   margin-top: 8px;
   overflow: hidden;
-  color: #f5f2f7;
+  color: #f5f4f0;
   font-size: clamp(16px, 4.6vw, 21px);
   font-weight: 650;
   line-height: 1.5;
@@ -352,13 +399,13 @@
   border: 0;
   border-radius: 14px;
   background: transparent;
-  color: rgb(245 242 247 / 62%);
+  color: rgb(238 237 232 / 62%);
   font-size: 17px;
   place-items: center;
 }
 
 .live-result-dismiss:focus-visible {
-  outline: 3px solid #9fdaff;
+  outline: 3px solid #9bc3ff;
   outline-offset: -3px;
 }
 
@@ -377,7 +424,7 @@
 .live-result-weather > svg {
   display: grid;
   flex: 0 0 auto;
-  color: #9edcff;
+  color: #9bc3ff;
   font-size: 22px;
   place-items: center;
 }
@@ -392,7 +439,7 @@
 .live-result-receipt strong,
 .live-result-detail > strong,
 .live-result-weather strong {
-  color: #f5f2f7;
+  color: #f5f4f0;
   font-size: 12px;
   font-weight: 750;
 }
@@ -403,7 +450,7 @@
 .live-result-empty,
 .live-result-generic span {
   overflow: hidden;
-  color: rgb(245 242 247 / 72%);
+  color: rgb(238 237 232 / 72%);
   font-size: 12px;
   line-height: 1.4;
   text-overflow: ellipsis;
@@ -412,7 +459,7 @@
 
 .live-result-weather b {
   margin-left: auto;
-  color: #f5f2f7;
+  color: #f5f4f0;
   font-size: 25px;
   font-variant-numeric: tabular-nums;
 }
@@ -431,7 +478,7 @@
 }
 
 .live-result-heading svg {
-  color: #9edcff;
+  color: #9bc3ff;
   font-size: 16px;
 }
 
@@ -446,7 +493,7 @@
 
 .live-result-todos li {
   overflow: hidden;
-  color: rgb(245 242 247 / 76%);
+  color: rgb(238 237 232 / 76%);
   font-size: 12px;
   line-height: 1.4;
   text-overflow: ellipsis;
@@ -455,7 +502,7 @@
 
 .live-result-todos li::before {
   margin-right: 8px;
-  color: #9edcff;
+  color: #9bc3ff;
   content: '•';
 }
 
@@ -473,7 +520,7 @@
 }
 
 .live-result-sources button:focus-visible {
-  outline: 3px solid #9fdaff;
+  outline: 3px solid #9bc3ff;
   outline-offset: 1px;
 }
 
@@ -491,7 +538,7 @@
 }
 
 .live-result-sources small {
-  color: rgb(245 242 247 / 58%);
+  color: rgb(238 237 232 / 58%);
   font-size: 10px;
 }
 
@@ -502,7 +549,7 @@
   padding: 10px;
   border: 1px solid rgb(255 255 255 / 12%);
   border-radius: 20px;
-  background: rgb(15 18 22 / 82%);
+  background: rgb(16 16 20 / 82%);
   box-shadow: 0 14px 42px rgb(0 0 0 / 36%);
   pointer-events: auto;
   backdrop-filter: blur(18px);
@@ -528,7 +575,7 @@
   width: 100%;
   aspect-ratio: 4 / 3;
   border-radius: 12px;
-  background: rgb(36 32 42 / 88%);
+  background: rgb(21 24 33 / 88%);
   object-fit: cover;
 }
 
@@ -544,6 +591,18 @@
   }
 }
 
+@keyframes camera-focus-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 .live-call-screen .call-controls {
   position: absolute;
   z-index: 5;
@@ -553,12 +612,12 @@
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  gap: 30px;
+  gap: 14px;
   min-height: 88px;
   padding: 10px 20px 8px;
   border: 1px solid rgb(255 255 255 / 12%);
   border-radius: 30px;
-  background: rgb(15 18 22 / 82%);
+  background: rgb(16 16 20 / 82%);
   backdrop-filter: blur(18px);
 }
 
@@ -570,7 +629,7 @@
 }
 
 .live-call-screen .control-item > span {
-  color: rgb(245 242 247 / 62%);
+  color: rgb(238 237 232 / 62%);
   font-size: 10px;
 }
 
@@ -581,7 +640,7 @@
   min-width: 44px;
   min-height: 44px;
   border-radius: 18px;
-  color: #f5f2f7;
+  color: #f5f4f0;
   font-size: 22px;
   transition:
     transform 90ms ease,
@@ -592,26 +651,31 @@
   width: 52px;
   height: 52px;
   border: 1px solid rgb(255 255 255 / 12%);
-  background: rgb(36 32 42 / 88%);
+  background: rgb(21 24 33 / 88%);
 }
 
 .live-call-screen .control-button.is-active {
-  background: #f5f2f7;
-  color: #020406;
+  background: #f5f4f0;
+  color: #07080c;
+}
+
+.live-call-screen .control-button:disabled {
+  cursor: wait;
+  opacity: 0.58;
 }
 
 .live-call-screen .end-button {
   width: 58px;
   height: 58px;
   border: 0;
-  background: #ff637e;
-  color: #fff5f5;
+  background: #ed687a;
+  color: #fff6e9;
   font-size: 25px;
 }
 
 .live-call-screen .control-button:focus-visible,
 .live-call-screen .end-button:focus-visible {
-  outline: 3px solid #9fdaff;
+  outline: 3px solid #9bc3ff;
   outline-offset: 3px;
 }
 
@@ -633,6 +697,15 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .live-call-screen .camera-layer,
+  .live-orb-wrap {
+    transition: none;
+  }
+
+  .camera-focus-frame {
+    animation: none;
+  }
+
   .live-stage,
   .live-call-screen.has-results .live-stage {
     transform: none;

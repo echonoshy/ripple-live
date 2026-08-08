@@ -243,6 +243,27 @@ test('mobile home presents voice as the primary call entry with explicit camera 
   assert.doesNotMatch(cssSource, /#9046ff|--ripple-violet|--voice-accent:\s*#b98aff/)
 })
 
+test('live call owns camera transitions explicitly and renders truthful camera states', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const mediaSource = readFileSync(path.join(appRoot, 'src/media/LiveMedia.ts'), 'utf8')
+  const callSource = readFileSync(
+    path.join(appRoot, 'src/components/LiveCallScreen.tsx'),
+    'utf8',
+  )
+  const callCssSource = readFileSync(path.join(appRoot, 'src/live/LiveCall.css'), 'utf8')
+
+  assert.match(appSource, /createCameraOrchestrator/)
+  assert.match(appSource, /initialCameraRequestRef\.current = nextMode === 'video'/)
+  assert.match(appSource, /onFrameRequestState: \(active\)/)
+  assert.doesNotMatch(appSource, /withVideo:/)
+  assert.doesNotMatch(mediaSource, /withVideo/)
+  assert.match(callSource, /cameraPhase === 'opening'/)
+  assert.match(callSource, /frameRequestActive && cameraPhase === 'on'/)
+  assert.match(callSource, /aria-label=.*切换摄像头/s)
+  assert.match(callCssSource, /opacity 420ms/)
+  assert.match(callCssSource, /prefers-reduced-motion: reduce/)
+})
+
 test('mobile navigation exposes four tabs with screen-derived selection', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const navPath = path.join(appRoot, 'src/components/BottomNav.tsx')
@@ -404,7 +425,7 @@ test('mobile live call controls retain scoped focus and size contracts', () => {
 
   assert.match(
     cssSource,
-    /\.live-call-screen \.control-button:focus-visible,\s*\.live-call-screen \.end-button:focus-visible\s*\{[^}]*outline:\s*3px solid #9fdaff;[^}]*outline-offset:\s*3px;/s,
+    /\.live-call-screen \.control-button:focus-visible,\s*\.live-call-screen \.end-button:focus-visible\s*\{[^}]*outline:\s*3px solid #9bc3ff;[^}]*outline-offset:\s*3px;/s,
   )
   assert.match(
     cssSource,
@@ -412,11 +433,11 @@ test('mobile live call controls retain scoped focus and size contracts', () => {
   )
   assert.match(
     cssSource,
-    /\.live-call-screen \.control-button\.is-active\s*\{[^}]*background:\s*#f5f2f7;[^}]*color:\s*#020406;/s,
+    /\.live-call-screen \.control-button\.is-active\s*\{[^}]*background:\s*#f5f4f0;[^}]*color:\s*#07080c;/s,
   )
   assert.match(
     cssSource,
-    /\.live-call-screen \.end-button\s*\{[^}]*background:\s*#ff637e;/s,
+    /\.live-call-screen \.end-button\s*\{[^}]*background:\s*#ed687a;/s,
   )
 })
 

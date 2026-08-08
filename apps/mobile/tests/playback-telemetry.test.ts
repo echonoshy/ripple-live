@@ -186,7 +186,7 @@ test('LiveMedia normalizes non-finite playback levels to zero', async (t) => {
   const media = new LiveMedia({
     video: {} as HTMLVideoElement,
     canvas: {} as HTMLCanvasElement,
-    withVideo: false,
+    initialVideo: false,
     facingMode: 'user',
     onPlaybackStarted: () => {},
     onPlaybackEnded: () => {},

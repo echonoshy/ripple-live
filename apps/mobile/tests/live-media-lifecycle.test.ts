@@ -115,7 +115,7 @@ test('stop during a pending start disposes the late microphone stream without re
   const media = new LiveMedia({
     video,
     canvas: {} as HTMLCanvasElement,
-    withVideo: false,
+    initialVideo: false,
     facingMode: 'user',
     onPlaybackStarted: () => {},
     onPlaybackEnded: () => {},

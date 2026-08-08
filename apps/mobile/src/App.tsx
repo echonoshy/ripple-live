@@ -70,6 +70,10 @@ import {
 } from './library'
 import { cameraErrorAfterSwitch, visibleCallError } from './live/callErrors'
 import {
+  createCameraOrchestrator,
+  type CameraPhase,
+} from './live/cameraOrchestration'
+import {
   closeCallBeforeDetachedRefresh,
   createCallLifecycleGuard,
   createConversationOwnership,
@@ -191,6 +195,9 @@ export default function App() {
   const [sessionState, setSessionState] = useState<SessionState>('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const [cameraErrorMessage, setCameraErrorMessage] = useState('')
+  const [cameraPhase, setCameraPhase] = useState<CameraPhase>('off')
+  const [cameraPreviewVisible, setCameraPreviewVisible] = useState(false)
+  const [frameRequestActive, setFrameRequestActive] = useState(false)
   const [assistantText, setAssistantText] = useState('')
   const [userText, setUserText] = useState('')
   const [toolStatus, setToolStatus] = useState('')
@@ -257,6 +264,11 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sessionRef = useRef<RealtimeSession | null>(null)
   const mediaRef = useRef<LiveMedia | null>(null)
+  const cameraOrchestratorRef = useRef<ReturnType<
+    typeof createCameraOrchestrator
+  > | null>(null)
+  const initialCameraRequestRef = useRef(false)
+  const cameraFlipGenerationRef = useRef(0)
   const callLifecycleRef = useRef(createCallLifecycleGuard())
   const conversationOwnershipRef = useRef(createConversationOwnership())
   const navigationGuardRef = useRef(createLatestNavigationGuard())
@@ -324,8 +336,21 @@ export default function App() {
       .catch(() => {
         if (!active) return
         localStorage.removeItem('ripple-access-token')
+        callLifecycleRef.current.invalidate()
         navigationGuardRef.current.invalidate()
         conversationOwnershipRef.current.invalidate()
+        cameraOrchestratorRef.current?.invalidate()
+        cameraOrchestratorRef.current = null
+        cameraFlipGenerationRef.current += 1
+        mediaRef.current?.stop()
+        mediaRef.current = null
+        const liveSession = sessionRef.current
+        sessionRef.current = null
+        void liveSession?.close()
+        initialCameraRequestRef.current = false
+        setCameraPhase('off')
+        setCameraPreviewVisible(false)
+        setFrameRequestActive(false)
         setActiveConversationIdState(null)
         setSelectedConversation(null)
         setAccessToken('')
@@ -513,16 +538,29 @@ export default function App() {
 
   useEffect(() => {
     if (sessionState !== 'ended' && sessionState !== 'error') return
+    cameraOrchestratorRef.current?.invalidate()
+    cameraOrchestratorRef.current = null
+    cameraFlipGenerationRef.current += 1
     mediaRef.current?.stop()
     mediaRef.current = null
+    setCameraPhase('off')
+    setCameraPreviewVisible(false)
+    setFrameRequestActive(false)
     setCameraErrorMessage('')
     setInputLevel(0)
     setOutputLevel(0)
   }, [sessionState])
 
   const stopCall = useCallback(async () => {
+    cameraOrchestratorRef.current?.invalidate()
+    cameraOrchestratorRef.current = null
+    cameraFlipGenerationRef.current += 1
     mediaRef.current?.stop()
     mediaRef.current = null
+    initialCameraRequestRef.current = false
+    setCameraPhase('off')
+    setCameraPreviewVisible(false)
+    setFrameRequestActive(false)
     setCameraErrorMessage('')
     setInputLevel(0)
     setOutputLevel(0)
@@ -603,6 +641,9 @@ export default function App() {
       callLifecycle.invalidate()
       conversationOwnership.invalidate()
       navigationGuard.invalidate()
+      cameraOrchestratorRef.current?.invalidate()
+      cameraOrchestratorRef.current = null
+      cameraFlipGenerationRef.current += 1
       mediaRef.current = null
       sessionRef.current = null
       media?.stop()
@@ -611,7 +652,7 @@ export default function App() {
   }, [])
 
   const startCall = useCallback(
-    async (nextMode: RealtimeMode, owner: number) => {
+    async (owner: number) => {
       if (
         !callLifecycleRef.current.owns(owner) ||
         sessionRef.current ||
@@ -622,7 +663,7 @@ export default function App() {
         return
       }
 
-      setMode(nextMode)
+      setMode('audio')
       setErrorMessage('')
       setCameraErrorMessage('')
       setAssistantText('')
@@ -637,6 +678,7 @@ export default function App() {
       setSessionState('connecting')
 
       let session: RealtimeSession
+      let cameraOrchestrator: ReturnType<typeof createCameraOrchestrator>
       const conversationOwner = conversationOwnershipRef.current.current()
       const ownsSession = () =>
         callLifecycleRef.current.owns(owner) &&
@@ -655,7 +697,6 @@ export default function App() {
       const media = new LiveMedia({
         video: videoRef.current,
         canvas: canvasRef.current,
-        withVideo: nextMode === 'video',
         facingMode: cameraFacing,
         onPlaybackStarted: (bufferedMs) => {
           if (ownsSession()) session.outputPlaybackStarted(bufferedMs)
@@ -666,12 +707,15 @@ export default function App() {
         onOutputLevel: (level) => {
           if (ownsSession()) setOutputLevel(level)
         },
+        onCameraInterrupted: () => {
+          if (ownsSession()) void cameraOrchestrator.interrupt()
+        },
       })
       session = new RealtimeSession({
         server,
         accessToken,
         conversationId: activeConversationId ?? undefined,
-        mode: nextMode,
+        mode: 'audio',
         onState: (state) => {
           if (ownsSession()) setSessionState(state)
         },
@@ -714,6 +758,9 @@ export default function App() {
         },
         onFrameRequested: () =>
           ownsSession() ? media.captureFrame() : null,
+        onFrameRequestState: (active) => {
+          if (ownsSession()) setFrameRequestActive(active)
+        },
         onArtifact: (artifact) => {
           if (!ownsSession()) return
           setLiveArtifacts((items) =>
@@ -737,12 +784,42 @@ export default function App() {
           }, (level) => {
             if (ownsSession()) setInputLevel(level)
           })
-          if (!ownsSession()) media.stop()
+          if (!ownsSession()) {
+            media.stop()
+            return
+          }
+          if (initialCameraRequestRef.current) {
+            initialCameraRequestRef.current = false
+            await cameraOrchestrator.open(cameraFacing)
+          }
+        },
+      })
+
+      cameraOrchestrator = createCameraOrchestrator({
+        enableCamera: (facingMode) => media.enableCamera(facingMode),
+        disableCamera: () => media.disableCamera(),
+        setMode: (targetMode) => session.setMode(targetMode),
+        waitForTransition: () =>
+          window.matchMedia('(prefers-reduced-motion: reduce)').matches
+            ? Promise.resolve()
+            : new Promise((resolve) => window.setTimeout(resolve, 420)),
+        onSnapshot: (snapshot) => {
+          if (!ownsSession()) return
+          setCameraPhase(snapshot.phase)
+          setCameraPreviewVisible(snapshot.previewVisible)
+          if (snapshot.serverMode === 'audio' || snapshot.serverMode === 'video') {
+            setMode(snapshot.serverMode)
+          }
+          if (!snapshot.previewVisible) setFrameRequestActive(false)
+        },
+        onError: (message) => {
+          if (ownsSession()) setCameraErrorMessage(message)
         },
       })
 
       mediaRef.current = media
       sessionRef.current = session
+      cameraOrchestratorRef.current = cameraOrchestrator
 
       try {
         await session.connect()
@@ -755,6 +832,11 @@ export default function App() {
         }
         sessionRef.current = null
         mediaRef.current = null
+        cameraOrchestrator.invalidate()
+        if (cameraOrchestratorRef.current === cameraOrchestrator) {
+          cameraOrchestratorRef.current = null
+        }
+        initialCameraRequestRef.current = false
         media.stop()
         const closing = session.close()
         setInputLevel(0)
@@ -780,10 +862,10 @@ export default function App() {
     }
     const frame = window.requestAnimationFrame(() => {
       const owner = callLifecycleRef.current.claimStart()
-      if (owner !== null) void startCall(mode, owner)
+      if (owner !== null) void startCall(owner)
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [mode, screen, startCall])
+  }, [screen, startCall])
 
   const openCall = (
     nextMode: RealtimeMode,
@@ -798,7 +880,12 @@ export default function App() {
     }
     setHistoryBusy(false)
     setHistoryError('')
-    setMode(nextMode)
+    initialCameraRequestRef.current = nextMode === 'video'
+    setMode('audio')
+    setCameraPhase('off')
+    setCameraPreviewVisible(false)
+    setFrameRequestActive(false)
+    setCameraErrorMessage('')
     setSessionState('idle')
     dispatchLiveResults({ type: 'clear' })
     navigateTo('call')
@@ -871,14 +958,37 @@ export default function App() {
     if (next) sessionRef.current?.discardInput()
   }
 
+  const toggleCamera = async () => {
+    const orchestrator = cameraOrchestratorRef.current
+    if (!orchestrator) return
+    setCameraErrorMessage('')
+    const snapshot = orchestrator.current()
+    if (snapshot.recovery) {
+      await orchestrator.retry(cameraFacing)
+      return
+    }
+    if (snapshot.previewVisible) {
+      await orchestrator.close()
+      return
+    }
+    await orchestrator.open(cameraFacing)
+  }
+
   const flipCamera = async () => {
     const media = mediaRef.current
-    if (!media) return
+    const orchestrator = cameraOrchestratorRef.current
+    if (!media || !orchestrator || orchestrator.current().phase !== 'on') return
+    const flipGeneration = ++cameraFlipGenerationRef.current
     const next = cameraFacing === 'user' ? 'environment' : 'user'
     setCameraErrorMessage('')
     try {
       const outcome = await media.setFacingMode(next)
-      if (mediaRef.current !== media) return
+      if (
+        mediaRef.current !== media ||
+        cameraOrchestratorRef.current !== orchestrator ||
+        cameraFlipGenerationRef.current !== flipGeneration ||
+        orchestrator.current().phase !== 'on'
+      ) return
       if (outcome === 'stale') return
       if (outcome === 'failed') {
         setCameraErrorMessage((previous) =>
@@ -891,7 +1001,12 @@ export default function App() {
         cameraErrorAfterSwitch(previous, outcome),
       )
     } catch {
-      if (mediaRef.current === media) {
+      if (
+        mediaRef.current === media &&
+        cameraOrchestratorRef.current === orchestrator &&
+        cameraFlipGenerationRef.current === flipGeneration &&
+        orchestrator.current().phase === 'on'
+      ) {
         setCameraErrorMessage((previous) =>
           cameraErrorAfterSwitch(previous, 'failed'),
         )
@@ -927,6 +1042,19 @@ export default function App() {
 
   const signOut = async () => {
     const token = accessToken
+    callLifecycleRef.current.invalidate()
+    cameraOrchestratorRef.current?.invalidate()
+    cameraOrchestratorRef.current = null
+    cameraFlipGenerationRef.current += 1
+    mediaRef.current?.stop()
+    mediaRef.current = null
+    const liveSession = sessionRef.current
+    sessionRef.current = null
+    void liveSession?.close()
+    initialCameraRequestRef.current = false
+    setCameraPhase('off')
+    setCameraPreviewVisible(false)
+    setFrameRequestActive(false)
     localStorage.removeItem('ripple-access-token')
     setAccessToken('')
     setUser(null)
@@ -1955,6 +2083,9 @@ export default function App() {
       {screen === 'call' && (
         <LiveCallScreen
           mode={mode}
+          cameraPhase={cameraPhase}
+          cameraPreviewVisible={cameraPreviewVisible}
+          frameRequestActive={frameRequestActive}
           state={sessionState}
           elapsed={elapsed}
           muted={muted}
@@ -1971,6 +2102,7 @@ export default function App() {
           videoRef={videoRef}
           captureCanvasRef={canvasRef}
           onToggleMute={toggleMute}
+          onToggleCamera={toggleCamera}
           onFlipCamera={flipCamera}
           onDismissResult={(callId) =>
             dispatchLiveResults({ type: 'dismiss', callId })
