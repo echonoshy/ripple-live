@@ -438,6 +438,11 @@ Expected: the exact meeting-recordings directory and its files are permanently r
 cd /home/lake/workspace/ripple-live
 ./deploy/agent-stack/start.sh
 systemctl --user is-active ripple-agent-gateway.service
+for _ in $(seq 1 10)
+do
+  curl -fsS http://127.0.0.1:8700/health >/dev/null && break
+  sleep 1
+done
 curl -fsS http://127.0.0.1:8700/health
 curl -fsS http://127.0.0.1:8700/ready
 ./deploy/agent-stack/status.sh
@@ -454,16 +459,16 @@ do
   printf '%s %s -> %s\n' "$METHOD" "$PATH" "$STATUS"
   test "$STATUS" = 404
 done <<'EOF'
-POST /v1/meetings
 GET /v1/meetings
+POST /v1/meetings
 GET /v1/meetings/removal-probe
-POST /v1/meetings/removal-probe/chunks
-POST /v1/meetings/removal-probe/complete
-GET /v1/meetings/removal-probe/transcript
-GET /v1/meetings/removal-probe/summary
-GET /v1/meetings/removal-probe/todos
-POST /v1/meetings/removal-probe/todos/removal-probe/confirm
 DELETE /v1/meetings/removal-probe
+PATCH /v1/meetings/removal-probe/todos/removal-todo
+PUT /v1/meetings/removal-probe/chunks/0
+POST /v1/meetings/removal-probe/finalize
+POST /v1/meetings/removal-probe/retry
+POST /v1/meetings/removal-probe/audio-ticket
+GET /v1/meetings/removal-probe/audio
 EOF
 ```
 
@@ -508,8 +513,8 @@ Expected: startup does not recreate meeting tables or audio, database integrity 
 
 ```bash
 cd /home/lake/workspace/ripple-live
-RIPPLE_SMOKE_PYTHON=/home/lake/workspace/ripple-live/.venv-qwen3-asr-1.7b/bin/python \
-  python3 deploy/agent-stack/smoke-test.py --responses-only
+/home/lake/workspace/ripple-live/.venv-qwen3-asr-1.7b/bin/python \
+  deploy/agent-stack/smoke-test.py --responses-only
 ```
 
 Expected: the Responses-only model smoke passes; no alternate agent API protocol is exercised.
@@ -519,8 +524,8 @@ Expected: the Responses-only model smoke passes; no alternate agent API protocol
 ```bash
 test -n "${RIPPLE_SMOKE_ACCESS_TOKEN:-}"
 cd /home/lake/workspace/ripple-live
-RIPPLE_SMOKE_PYTHON=/home/lake/workspace/ripple-live/.venv-qwen3-asr-1.7b/bin/python \
-  python3 deploy/agent-stack/smoke-test.py
+/home/lake/workspace/ripple-live/.venv-qwen3-asr-1.7b/bin/python \
+  deploy/agent-stack/smoke-test.py
 ```
 
 Expected: authenticated Gateway health, realtime voice, Responses-backed tool use, TTS-to-ASR loopback, video-frame handling, cancellation, and response isolation all pass. The access token is consumed only from the existing shell environment and is never printed, stored, or committed; stop for the missing credential instead of weakening authentication.
@@ -529,7 +534,7 @@ Expected: authenticated Gateway health, realtime voice, Responses-backed tool us
 
 ```bash
 cd /home/lake/workspace/ripple-live
-! rg -n '/v1/meetings|MeetingRepository|MeetingWorker|meeting-recordings|RIPPLE_MEETING|ffmpeg' services/agent-gateway deploy/agent-stack
+! grep -R --exclude-dir=target -n -E '/v1/meetings|MeetingRepository|MeetingWorker|meeting-recordings|RIPPLE_MEETING|ffmpeg' services/agent-gateway deploy/agent-stack
 git status --short --branch
 git fetch origin
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)"
