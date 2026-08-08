@@ -20,8 +20,9 @@
   position: relative;
   isolation: isolate;
   background:
-    radial-gradient(circle at 38% 32%, #fff6e9 0 4%, #9bc3ff 12%, transparent 31%),
-    radial-gradient(circle at 50% 50%, #9bc3ff 0 24%, #2f77e6 49%, #0a2e75 67%, transparent 68%);
+    radial-gradient(circle at 33% 27%, #fff6e9 0%, #9bc3ff 11%, transparent 32%),
+    radial-gradient(circle at 72% 38%, rgb(155 195 255 / 72%) 0%, rgb(47 119 230 / 38%) 44%, transparent 76%),
+    radial-gradient(circle at 38% 67%, #2f77e6 0%, #0a2e75 74%);
   box-shadow:
     inset -18px -22px 36px rgb(10 46 117 / 56%);
 }
@@ -31,7 +32,7 @@
   z-index: -1;
   inset: 13%;
   border-radius: 50%;
-  box-shadow: 0 0 30px 14px rgb(155 195 255 / 18%);
+  box-shadow: 0 0 30px 14px rgb(155 195 255 / 6%);
   content: '';
 }
 

@@ -323,6 +323,44 @@ test('mobile live orb uses a single canvas renderer with a static fallback', () 
   assert.doesNotMatch(orbSource, /lottie|video/i)
 })
 
+test('mobile live orb fallback uses only off-center color fields', () => {
+  const cssSource = readFileSync(
+    path.join(appRoot, 'src/live/LiveCall.css'),
+    'utf8',
+  )
+  const fallbackRule = [...cssSource.matchAll(/^\.live-orb-fallback\s*\{([^}]*)\}/gm)]
+    .map((match) => match[1])
+    .find((body) => body.includes('radial-gradient'))
+
+  assert.ok(fallbackRule, 'fallback material rule should exist')
+  const radialFieldCount = (fallbackRule.match(/radial-gradient\(/g) ?? []).length
+  const offCenterFieldCount = (
+    fallbackRule.match(/radial-gradient\(circle at (?!50%\s+50%)[^,]+,/g) ?? []
+  ).length
+  assert.ok(radialFieldCount > 0, 'fallback should retain fluid color fields')
+  assert.equal(
+    offCenterFieldCount,
+    radialFieldCount,
+    'every fallback radial field should be explicitly off-center',
+  )
+})
+
+test('mobile live orb fallback near halo stays at or below six percent', () => {
+  const cssSource = readFileSync(
+    path.join(appRoot, 'src/live/LiveCall.css'),
+    'utf8',
+  )
+  const haloRule = cssSource.match(/^\.live-orb-fallback::after\s*\{([^}]*)\}/ms)?.[1]
+
+  assert.ok(haloRule, 'fallback near-halo pseudo-element should exist')
+  const opacity = haloRule.match(/box-shadow:[^;]*\/\s*([\d.]+)%\)/s)?.[1]
+  assert.ok(opacity, 'fallback near halo should declare percentage opacity')
+  assert.ok(
+    Number(opacity) <= 6,
+    `fallback near halo must not exceed 6% opacity; received ${opacity}%`,
+  )
+})
+
 test('mobile live call uses the immersive presentation contract', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const callSource = readFileSync(
