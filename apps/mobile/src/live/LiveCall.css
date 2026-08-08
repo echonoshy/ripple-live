@@ -1,0 +1,79 @@
+.live-orb-canvas,
+.live-orb-fallback {
+  display: block;
+  width: min(76vw, 360px);
+  max-width: 100%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: #020406;
+  opacity: 1;
+  transform: scale(0.94);
+  transform-origin: center;
+  transition:
+    transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity, filter;
+}
+
+.live-orb-fallback {
+  background:
+    radial-gradient(circle at 38% 32%, #ffffff 0 4%, #9edcff 12%, transparent 31%),
+    radial-gradient(circle at 50% 45%, #9edcff 0 23%, #4ca8e2 48%, #103b61 67%, transparent 69%),
+    #020406;
+  box-shadow:
+    0 0 36px rgb(76 168 226 / 36%),
+    inset -18px -22px 36px rgb(16 59 97 / 56%);
+}
+
+.live-orb-canvas.is-connecting,
+.live-orb-fallback.is-connecting {
+  opacity: 0.82;
+  transform: scale(0.88);
+}
+
+.live-orb-canvas.is-listening,
+.live-orb-fallback.is-listening {
+  filter: brightness(1.06);
+  transform: scale(1);
+}
+
+.live-orb-canvas.is-thinking,
+.live-orb-fallback.is-thinking {
+  filter: brightness(0.92);
+  transform: scale(0.86);
+}
+
+.live-orb-canvas.is-tool,
+.live-orb-fallback.is-tool {
+  filter: brightness(0.88);
+  transform: translateY(-12%) scale(0.65);
+}
+
+.live-orb-canvas.is-speaking,
+.live-orb-fallback.is-speaking {
+  filter: brightness(1.12);
+  transform: scale(1.04);
+}
+
+.live-orb-canvas.is-ended,
+.live-orb-fallback.is-ended {
+  opacity: 0;
+  transform: scale(0.75);
+}
+
+.live-orb-canvas.is-error,
+.live-orb-fallback.is-error {
+  filter: saturate(0.42) brightness(0.82);
+  transform: scale(0.9);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-orb-canvas,
+  .live-orb-fallback,
+  .live-orb-canvas[class*='is-'],
+  .live-orb-fallback[class*='is-'] {
+    transform: none;
+    transition-property: opacity, filter;
+  }
+}

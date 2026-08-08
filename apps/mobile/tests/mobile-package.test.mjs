@@ -199,6 +199,27 @@ test('mobile home presents video as the primary call entry', () => {
   assert.match(cssSource, /\.call-entry\.is-video/)
 })
 
+test('mobile live orb uses a single canvas renderer with a static fallback', () => {
+  for (const file of [
+    'live/orbRenderer.ts',
+    'components/LiveOrb.tsx',
+    'live/LiveCall.css',
+  ]) {
+    assert.equal(
+      existsSync(path.join(appRoot, 'src', file)),
+      true,
+      `${file} should exist`,
+    )
+  }
+
+  const orbSource = readFileSync(
+    path.join(appRoot, 'src/components/LiveOrb.tsx'),
+    'utf8',
+  )
+  assert.equal((orbSource.match(/<canvas/g) ?? []).length, 1)
+  assert.doesNotMatch(orbSource, /lottie|video/i)
+})
+
 test('mobile libraries expose accessible shared management controls', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
