@@ -321,7 +321,9 @@ export class LiveMedia {
       event: MessageEvent<PlaybackStateMessage>,
     ) => {
       if (event.data.type === 'audio-level') {
-        event.data.level = Math.min(1, Math.max(0, event.data.level ?? 0))
+        event.data.level = Number.isFinite(event.data.level)
+          ? Math.min(1, Math.max(0, event.data.level ?? 0))
+          : 0
         this.options.onOutputLevel(event.data.level)
         return
       }

@@ -38,11 +38,23 @@ class StreamPlaybackProcessor extends AudioWorkletProcessor {
         this.playing = false
         this.ending = false
         this.playbackEnded = false
-        this.levelSquareSum = 0
-        this.levelSampleCount = 0
-        this.port.postMessage({ type: 'audio-level', level: 0 })
+        this.resetOutputLevel()
       }
     }
+  }
+
+  resetOutputLevel() {
+    this.levelSquareSum = 0
+    this.levelSampleCount = 0
+    this.port.postMessage({ type: 'audio-level', level: 0 })
+  }
+
+  endPlayback() {
+    if (this.playbackEnded) return
+    this.playbackEnded = true
+    this.playing = false
+    this.port.postMessage({ type: 'playback-ended' })
+    this.resetOutputLevel()
   }
 
   process(_inputs, outputs) {
@@ -51,6 +63,10 @@ class StreamPlaybackProcessor extends AudioWorkletProcessor {
     output.fill(0)
 
     if (!this.playing) {
+      if (this.ending && !this.queuedSamples) {
+        this.endPlayback()
+        return true
+      }
       const threshold = this.started
         ? this.rebufferSamples
         : this.initialBufferSamples
@@ -99,26 +115,18 @@ class StreamPlaybackProcessor extends AudioWorkletProcessor {
     if (outputOffset < output.length) {
       this.playing = false
       if (this.ending && !this.playbackEnded) {
-        this.playbackEnded = true
-        this.port.postMessage({ type: 'playback-ended' })
-        this.levelSquareSum = 0
-        this.levelSampleCount = 0
-        this.port.postMessage({ type: 'audio-level', level: 0 })
+        this.endPlayback()
       } else if (!this.ending) {
         this.underruns += 1
         this.port.postMessage({
           type: 'playback-underrun',
           count: this.underruns,
         })
+        this.resetOutputLevel()
       }
     }
     if (this.ending && !this.queuedSamples && !this.playbackEnded) {
-      this.playbackEnded = true
-      this.playing = false
-      this.port.postMessage({ type: 'playback-ended' })
-      this.levelSquareSum = 0
-      this.levelSampleCount = 0
-      this.port.postMessage({ type: 'audio-level', level: 0 })
+      this.endPlayback()
     }
     return true
   }
