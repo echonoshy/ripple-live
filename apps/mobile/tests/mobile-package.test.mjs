@@ -550,15 +550,55 @@ test('mobile live call renders typed result receipts without unsafe HTML', () =>
     path.join(appRoot, 'src/components/LiveCallScreen.tsx'),
     'utf8',
   )
+  const callCssSource = readFileSync(
+    path.join(appRoot, 'src/live/LiveCall.css'),
+    'utf8',
+  )
 
   assert.match(resultSource, /memory_receipt/)
   assert.match(resultSource, /todo_receipt/)
   assert.match(resultSource, /weather/)
   assert.match(resultSource, /search/)
+  assert.match(resultSource, /WarningCircle/)
+  assert.match(resultSource, /live-result-icon is-receipt/)
+  assert.match(resultSource, /is-failure/)
+  assert.doesNotMatch(resultSource, /weight="fill"|weight="bold"/)
+  for (const icon of ['CheckCircle', 'CloudSun', 'ListChecks', 'MagnifyingGlass', 'WarningCircle', 'X']) {
+    assert.match(
+      resultSource,
+      new RegExp(`<${icon}[^>]*weight="regular"`),
+      `${icon} should use the regular icon weight`,
+    )
+  }
   assert.doesNotMatch(resultSource, /<a\b|href=|target=/)
   assert.match(resultSource, /openExternalUrl/)
   assert.doesNotMatch(resultSource, /dangerouslySetInnerHTML/)
+  assert.doesNotMatch(resultSource, /JSON\.stringify|<pre\b/)
   assert.match(callSource, /<LiveResultSheet/)
+  assert.match(callSource, /className="live-artifact-sheet"/)
+  assert.match(callSource, /<AuthenticatedArtifact/)
+  assert.match(callSource, /return <img src=\{source\}/)
+
+  const resultStyles = callCssSource.slice(
+    callCssSource.indexOf('.live-output-tray'),
+    callCssSource.indexOf('@keyframes camera-focus-in'),
+  )
+  assert.match(resultStyles, /\.live-output-tray\s*\{[^}]*max-height:\s*42dvh;/s)
+  assert.match(resultStyles, /\.live-output-tray\s*\{[^}]*bottom:\s*calc\(max\(14px, env\(safe-area-inset-bottom\)\) \+ 72px\);/s)
+  assert.match(resultStyles, /\.live-output-tray\s*\{[^}]*animation:\s*live-result-enter 280ms/s)
+  assert.match(resultStyles, /\.live-result-sheet\s*\{[^}]*overflow-y:\s*auto;/s)
+  assert.match(resultStyles, /\.live-result-card\s*\{[^}]*padding:\s*14px 8px 14px 14px;[^}]*border:\s*1px solid var\(--line\);[^}]*border-radius:\s*(?:18|20)px;[^}]*background:\s*var\(--surface-raised\);/s)
+  assert.doesNotMatch(resultStyles, /rgb\(158 220 255|rgb\(10 23 32/)
+  assert.match(resultStyles, /\.live-result-dismiss\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;[^}]*font-size:\s*18px;/s)
+  assert.match(resultStyles, /\.live-result-icon\s*\{[^}]*font-size:\s*20px;/s)
+  assert.match(resultStyles, /\.live-result-icon\.is-brand\s*\{[^}]*color:\s*var\(--orb-cobalt\);/s)
+  assert.match(resultStyles, /\.live-result-icon\.is-receipt\s*\{[^}]*color:\s*var\(--success\);/s)
+  assert.match(resultStyles, /\.live-result-icon\.is-failure\s*\{[^}]*color:\s*var\(--danger\);/s)
+  assert.match(resultStyles, /font-size:\s*14px;/)
+  assert.match(resultStyles, /font-size:\s*(?:10|11|12)px;/)
+  assert.match(callCssSource, /\.live-call-screen\.has-results \.live-stage\s*\{[^}]*transform:\s*translateY\(-32px\);/s)
+  assert.match(callCssSource, /\.live-call-screen\.has-results \.live-orb-canvas,[\s\S]*?\.live-call-screen\.has-results \.live-orb-fallback\s*\{[^}]*animation:\s*none;[^}]*transform:\s*scale\(0\.70\);/s)
+  assert.doesNotMatch(callCssSource, /\.live-call-screen\.has-results \.call-controls/)
 })
 
 test('mobile opens live search sources through the native external-browser capability', () => {

@@ -105,6 +105,83 @@ test('renders an out-of-range finite todo due time without crashing the result s
   assert.match(html, /仍然显示待办/)
 })
 
+test('renders every controlled result shape without exposing raw payloads or false success copy', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(LiveResultSheet, {
+      results: [
+        {
+          kind: 'memory_receipt',
+          callId: 'memory-call',
+          memoryId: 'memory-1',
+          title: '记住常用车站',
+          status: 'success',
+        },
+        {
+          kind: 'todo_receipt',
+          callId: 'todo-call',
+          todoId: 'todo-1',
+          title: '明早取快递',
+          dueAt: null,
+          status: 'success',
+        },
+        {
+          kind: 'todo_list',
+          callId: 'todo-list-call',
+          titles: ['买牛奶'],
+          completed: false,
+          status: 'success',
+        },
+        {
+          kind: 'search',
+          callId: 'search-call',
+          items: [{
+            title: '可信来源',
+            url: 'https://example.com/source',
+            snippet: '来源摘要',
+          }],
+          status: 'success',
+        },
+        {
+          kind: 'weather',
+          callId: 'weather-call',
+          location: '杭州',
+          summary: '多云',
+          temperature: 26,
+          status: 'success',
+        },
+        {
+          kind: 'generic',
+          callId: 'error-call',
+          label: '记忆操作未完成',
+          status: 'error',
+        },
+      ] satisfies LiveResult[],
+      onDismiss: () => {},
+    }),
+  )
+
+  for (const copy of [
+    '记忆已保存',
+    '记住常用车站',
+    '待办已创建',
+    '明早取快递',
+    '当前待办',
+    '买牛奶',
+    '搜索结果',
+    '可信来源',
+    '来源摘要',
+    '杭州',
+    '多云',
+    '记忆操作未完成',
+  ]) {
+    assert.match(html, new RegExp(copy))
+  }
+  assert.match(html, /aria-label="在外部浏览器打开来源：可信来源"/)
+  assert.match(html, /live-result-card is-error/)
+  assert.doesNotMatch(html, /操作已完成/)
+  assert.doesNotMatch(html, /<pre|memoryId|todoId|callId|\{&quot;/)
+})
+
 test('coalesces repeated leave requests until the active close finishes', async () => {
   const releases: Array<() => void> = []
   let closes = 0

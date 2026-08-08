@@ -3,6 +3,7 @@ import {
   CloudSun,
   ListChecks,
   MagnifyingGlass,
+  WarningCircle,
   X,
 } from '@phosphor-icons/react'
 import type { ReactNode } from 'react'
@@ -34,14 +35,14 @@ function ResultBody({ result }: { result: LiveResult }) {
   switch (result.kind) {
     case 'memory_receipt':
       return (
-        <Receipt icon={<CheckCircle weight="fill" />} label="记忆已保存">
+        <Receipt icon={<CheckCircle weight="regular" />} label="记忆已保存">
           {result.title}
         </Receipt>
       )
     case 'todo_receipt': {
       const due = dueLabel(result.dueAt)
       return (
-        <Receipt icon={<ListChecks weight="fill" />} label="待办已创建">
+        <Receipt icon={<ListChecks weight="regular" />} label="待办已创建">
           <span>{result.title}</span>
           {due && <small>{due}</small>}
         </Receipt>
@@ -66,7 +67,9 @@ function ResultBody({ result }: { result: LiveResult }) {
       return (
         <div className="live-result-detail">
           <strong className="live-result-heading">
-            <MagnifyingGlass aria-hidden="true" />
+            <span className="live-result-icon is-brand" aria-hidden="true">
+              <MagnifyingGlass weight="regular" />
+            </span>
             搜索结果
           </strong>
           <ul className="live-result-sources">
@@ -90,7 +93,9 @@ function ResultBody({ result }: { result: LiveResult }) {
     case 'weather':
       return (
         <div className="live-result-weather">
-          <CloudSun aria-hidden="true" />
+          <span className="live-result-icon is-brand" aria-hidden="true">
+            <CloudSun weight="regular" />
+          </span>
           <div>
             <strong>{result.location}</strong>
             <span>{result.summary}</span>
@@ -103,7 +108,14 @@ function ResultBody({ result }: { result: LiveResult }) {
     case 'generic':
       return (
         <div className="live-result-generic">
-          {result.status === 'success' && <CheckCircle weight="fill" aria-hidden="true" />}
+          <span
+            className={`live-result-icon ${result.status === 'success' ? 'is-brand' : 'is-failure'}`}
+            aria-hidden="true"
+          >
+            {result.status === 'success'
+              ? <CheckCircle weight="regular" />
+              : <WarningCircle weight="regular" />}
+          </span>
           <span>{result.label}</span>
         </div>
       )
@@ -123,7 +135,7 @@ function Receipt({
 }) {
   return (
     <div className="live-result-receipt">
-      <span className="live-result-icon" aria-hidden="true">{icon}</span>
+      <span className="live-result-icon is-receipt" aria-hidden="true">{icon}</span>
       <div>
         <strong>{label}</strong>
         {children}
@@ -153,7 +165,7 @@ export function LiveResultSheet({ results, onDismiss }: LiveResultSheetProps) {
             aria-label={`关闭此结果：${result.kind === 'generic' ? result.label : result.kind}`}
             onClick={() => onDismiss(result.callId)}
           >
-            <X weight="bold" aria-hidden="true" />
+            <X weight="regular" aria-hidden="true" />
           </button>
         </article>
       ))}
