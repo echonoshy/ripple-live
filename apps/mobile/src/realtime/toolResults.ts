@@ -52,24 +52,73 @@ const MAX_TODO_ROWS = 5
 const MAX_SEARCH_ROWS = 3
 const INVALID_CALL_ID = 'unknown-call'
 const ZERO_WIDTH_JOINER = '\u200D'
+const CARRIAGE_RETURN = '\r'
+const LINE_FEED = '\n'
 const graphemeExtension = /^(?:\p{Mark}|\p{Emoji_Modifier}|\p{Variation_Selector})$/u
-
-const segmenter =
-  typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
-    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
-    : null
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function own(record: object, key: PropertyKey) {
+  const descriptor = Object.getOwnPropertyDescriptor(record, key)
+  return descriptor !== undefined && Object.hasOwn(descriptor, 'value')
+}
+
+function ownValue<T>(record: object, key: PropertyKey): T | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(record, key)
+  return descriptor !== undefined && Object.hasOwn(descriptor, 'value')
+    ? (descriptor.value as T)
+    : undefined
+}
+
+function hasOwnAccessor(record: object, key: PropertyKey) {
+  return Object.hasOwn(record, key) && !own(record, key)
+}
+
+function codePoint(value: string) {
+  return value.codePointAt(0) ?? 0
+}
+
+function isRegionalIndicator(value: string) {
+  const point = codePoint(value)
+  return point >= 0x1f1e6 && point <= 0x1f1ff
+}
+
+type HangulType = 'L' | 'V' | 'T' | 'LV' | 'LVT'
+
+function hangulType(value: string): HangulType | null {
+  const point = codePoint(value)
+  if ((point >= 0x1100 && point <= 0x115f) || (point >= 0xa960 && point <= 0xa97c)) return 'L'
+  if ((point >= 0x1160 && point <= 0x11a7) || (point >= 0xd7b0 && point <= 0xd7c6)) return 'V'
+  if ((point >= 0x11a8 && point <= 0x11ff) || (point >= 0xd7cb && point <= 0xd7fb)) return 'T'
+  if (point >= 0xac00 && point <= 0xd7a3) return (point - 0xac00) % 28 === 0 ? 'LV' : 'LVT'
+  return null
+}
+
+function joinsHangul(previous: HangulType | null, next: HangulType | null) {
+  if (!previous || !next) return false
+  if (previous === 'L') return next === 'L' || next === 'V' || next === 'LV' || next === 'LVT'
+  if (previous === 'LV' || previous === 'V') return next === 'V' || next === 'T'
+  return (previous === 'LVT' || previous === 'T') && next === 'T'
 }
 
 function fallbackGraphemes(value: string) {
   const graphemes: string[] = []
   let current = ''
   let joined = false
+  let regionalIndicatorCount = 0
+  let currentHangul: HangulType | null = null
   for (const character of value) {
     if (!current) {
       current = character
+      regionalIndicatorCount = isRegionalIndicator(character) ? 1 : 0
+      currentHangul = hangulType(character)
+      continue
+    }
+    const nextHangul = hangulType(character)
+    if (current === CARRIAGE_RETURN && character === LINE_FEED) {
+      current += character
       continue
     }
     if (joined || character === ZERO_WIDTH_JOINER || graphemeExtension.test(character)) {
@@ -77,16 +126,31 @@ function fallbackGraphemes(value: string) {
       joined = character === ZERO_WIDTH_JOINER
       continue
     }
+    if (isRegionalIndicator(character) && regionalIndicatorCount % 2 === 1) {
+      current += character
+      regionalIndicatorCount += 1
+      continue
+    }
+    if (joinsHangul(currentHangul, nextHangul)) {
+      current += character
+      currentHangul = nextHangul
+      continue
+    }
     graphemes.push(current)
     current = character
+    joined = false
+    regionalIndicatorCount = isRegionalIndicator(character) ? 1 : 0
+    currentHangul = nextHangul
   }
   if (current) graphemes.push(current)
   return graphemes
 }
 
 function truncate(value: string, maximum: number) {
-  if (segmenter) {
+  const Segmenter = typeof Intl !== 'undefined' ? Intl.Segmenter : undefined
+  if (typeof Segmenter === 'function') {
     const graphemes: string[] = []
+    const segmenter = new Segmenter(undefined, { granularity: 'grapheme' })
     for (const item of segmenter.segment(value)) {
       if (graphemes.length === maximum) break
       graphemes.push(item.segment)
@@ -105,7 +169,12 @@ function displayText(value: unknown, maximum = MAX_TEXT_LENGTH): string | null {
 function hasControlCharacter(value: string) {
   for (const character of value) {
     const codePoint = character.codePointAt(0)
-    if (codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)) return true
+    if (
+      codePoint !== undefined &&
+      (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f))
+    ) {
+      return true
+    }
   }
   return false
 }
@@ -132,7 +201,8 @@ function sourceUrl(value: unknown): string | null {
       (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
       !parsed.hostname ||
       parsed.username ||
-      parsed.password
+      parsed.password ||
+      parsed.href.length > MAX_URL_LENGTH
     ) {
       return null
     }
@@ -143,7 +213,7 @@ function sourceUrl(value: unknown): string | null {
 }
 
 function isSuccessful(value: unknown): value is Record<string, unknown> {
-  return isRecord(value) && value.ok === true
+  return isRecord(value) && own(value, 'ok') && ownValue(value, 'ok') === true
 }
 
 function generic(callId: string, name: string, success: boolean): LiveResult {
@@ -164,22 +234,25 @@ function generic(callId: string, name: string, success: boolean): LiveResult {
 }
 
 function parseMemory(callId: string, result: Record<string, unknown>): LiveResult | null {
-  const memory = result.memory
-  if (!isRecord(memory)) return null
-  const memoryId = identifier(memory.id)
-  const title = displayText(memory.user_note)
+  if (!own(result, 'memory')) return null
+  const memory = ownValue(result, 'memory')
+  if (!isRecord(memory) || !own(memory, 'id') || !own(memory, 'user_note')) return null
+  const memoryId = identifier(ownValue(memory, 'id'))
+  const title = displayText(ownValue(memory, 'user_note'))
   if (!memoryId || !title) return null
   return { kind: 'memory_receipt', callId, memoryId, title, status: 'success' }
 }
 
 function parseTodo(callId: string, result: Record<string, unknown>): LiveResult | null {
-  const todo = result.todo
-  if (!isRecord(todo)) return null
-  const todoId = identifier(todo.id)
-  const title = displayText(todo.title)
+  if (!own(result, 'todo')) return null
+  const todo = ownValue(result, 'todo')
+  if (!isRecord(todo) || !own(todo, 'id') || !own(todo, 'title')) return null
+  const todoId = identifier(ownValue(todo, 'id'))
+  const title = displayText(ownValue(todo, 'title'))
   if (!todoId || !title) return null
 
-  const dueValue = todo.due_at
+  if (hasOwnAccessor(todo, 'due_at')) return null
+  const dueValue = own(todo, 'due_at') ? ownValue(todo, 'due_at') : undefined
   const dueAt = dueValue === undefined || dueValue === null ? null : finiteNumber(dueValue)
   if (dueAt === null && dueValue !== undefined && dueValue !== null) return null
   return { kind: 'todo_receipt', callId, todoId, title, dueAt, status: 'success' }
@@ -194,7 +267,8 @@ function validatedRows<T>(
   const rows: T[] = []
   for (let index = 0; index < count; index += 1) {
     if (!Object.hasOwn(values, index)) return null
-    const row = parse(values[index])
+    if (!own(values, index)) return null
+    const row = parse(ownValue(values, index))
     if (row === null) return null
     rows.push(row)
   }
@@ -202,30 +276,39 @@ function validatedRows<T>(
 }
 
 function parseTodoList(callId: string, result: Record<string, unknown>): LiveResult | null {
-  if (typeof result.completed !== 'boolean' || !Array.isArray(result.todos)) return null
-  const titles = validatedRows(result.todos, MAX_TODO_ROWS, (todo) => {
-    if (!isRecord(todo)) return null
-    return displayText(todo.title)
+  if (!own(result, 'completed') || !own(result, 'todos')) return null
+  const completed = ownValue(result, 'completed')
+  const todos = ownValue(result, 'todos')
+  if (typeof completed !== 'boolean' || !Array.isArray(todos)) return null
+  const titles = validatedRows(todos, MAX_TODO_ROWS, (todo) => {
+    if (!isRecord(todo) || !own(todo, 'title')) return null
+    return displayText(ownValue(todo, 'title'))
   })
   if (!titles) return null
   return {
     kind: 'todo_list',
     callId,
     titles,
-    completed: result.completed,
+    completed,
     status: 'success',
   }
 }
 
 function parseSearch(callId: string, result: Record<string, unknown>): LiveResult | null {
-  if (!isRecord(result.data) || !Array.isArray(result.data.results) || result.data.results.length === 0) {
+  if (!own(result, 'data')) return null
+  const data = ownValue(result, 'data')
+  if (!isRecord(data) || !own(data, 'results')) return null
+  const searchResults = ownValue(data, 'results')
+  if (!Array.isArray(searchResults) || searchResults.length === 0) {
     return null
   }
-  const items = validatedRows(result.data.results, MAX_SEARCH_ROWS, (source) => {
-    if (!isRecord(source)) return null
-    const title = displayText(source.title)
-    const url = sourceUrl(source.url)
-    const snippet = displayText(source.snippet, MAX_SNIPPET_LENGTH)
+  const items = validatedRows(searchResults, MAX_SEARCH_ROWS, (source) => {
+    if (!isRecord(source) || !own(source, 'title') || !own(source, 'url') || !own(source, 'snippet')) {
+      return null
+    }
+    const title = displayText(ownValue(source, 'title'))
+    const url = sourceUrl(ownValue(source, 'url'))
+    const snippet = displayText(ownValue(source, 'snippet'), MAX_SNIPPET_LENGTH)
     return title && url && snippet ? { title, url, snippet } : null
   })
   if (!items) return null
@@ -241,56 +324,81 @@ function numericTemperature(value: unknown): number | null {
 }
 
 function parseWeather(callId: string, result: Record<string, unknown>): LiveResult | null {
-  if (!isRecord(result.data)) return null
-  const directLocation = displayText(result.data.location)
-  const directSummary = displayText(result.data.summary)
-  const directTemperature = result.data.temperature
-  const hasDirectTemperature = directTemperature === undefined || directTemperature === null || finiteNumber(directTemperature) !== null
-  if (directLocation && directSummary && hasDirectTemperature) {
+  if (!own(result, 'data')) return null
+  const data = ownValue(result, 'data')
+  if (!isRecord(data)) return null
+
+  const hasDirectFields = own(data, 'location') && own(data, 'summary')
+  const directLocation = hasDirectFields ? displayText(ownValue(data, 'location')) : null
+  const directSummary = hasDirectFields ? displayText(ownValue(data, 'summary')) : null
+  const hasDirectTemperature = !Object.hasOwn(data, 'temperature') || own(data, 'temperature')
+  const directTemperature = own(data, 'temperature') ? ownValue(data, 'temperature') : undefined
+  const directTemperatureValid =
+    directTemperature === undefined || directTemperature === null || finiteNumber(directTemperature) !== null
+  if (directLocation && directSummary && hasDirectTemperature && directTemperatureValid) {
     return {
       kind: 'weather',
       callId,
       location: directLocation,
       summary: directSummary,
-      temperature: directTemperature === undefined || directTemperature === null ? null : finiteNumber(directTemperature),
+      temperature:
+        directTemperature === undefined || directTemperature === null
+          ? null
+          : finiteNumber(directTemperature),
       status: 'success',
     }
   }
 
-  if (!isRecord(result.data.location) || !isRecord(result.data.now)) return null
-  const location = displayText(result.data.location.name)
-  const summary = displayText(result.data.now.text)
-  const rawTemperature = result.data.now.temp
+  if (!own(data, 'location') || !own(data, 'now')) return null
+  const locationData = ownValue(data, 'location')
+  const now = ownValue(data, 'now')
+  if (!isRecord(locationData) || !isRecord(now) || !own(locationData, 'name') || !own(now, 'text')) {
+    return null
+  }
+  const location = displayText(ownValue(locationData, 'name'))
+  const summary = displayText(ownValue(now, 'text'))
+  const hasTemperature = !Object.hasOwn(now, 'temp') || own(now, 'temp')
+  const rawTemperature = own(now, 'temp') ? ownValue(now, 'temp') : undefined
   const temperature = rawTemperature === undefined || rawTemperature === null ? null : numericTemperature(rawTemperature)
-  if (!location || !summary || (temperature === null && rawTemperature !== undefined && rawTemperature !== null)) {
+  if (
+    !location ||
+    !summary ||
+    !hasTemperature ||
+    (temperature === null && rawTemperature !== undefined && rawTemperature !== null)
+  ) {
     return null
   }
   return { kind: 'weather', callId, location, summary, temperature, status: 'success' }
 }
 
 export function parseLiveResult(event: ToolCompletion): LiveResult {
-  const validCallId = identifier(event.callId)
+  const eventRecord = isRecord(event) ? event : null
+  const validCallId = eventRecord && own(eventRecord, 'callId')
+    ? identifier(ownValue(eventRecord, 'callId'))
+    : null
   const callId = validCallId ?? INVALID_CALL_ID
-  const name = typeof event.name === 'string' ? event.name : ''
+  const nameValue = eventRecord && own(eventRecord, 'name') ? ownValue(eventRecord, 'name') : undefined
+  const name = typeof nameValue === 'string' ? nameValue : ''
+  const result = eventRecord && own(eventRecord, 'result') ? ownValue(eventRecord, 'result') : undefined
   if (!validCallId) return generic(callId, name, false)
-  if (!isSuccessful(event.result)) return generic(callId, name, false)
+  if (!isSuccessful(result)) return generic(callId, name, false)
 
   let parsed: LiveResult | null
   switch (name) {
     case 'remember':
-      parsed = parseMemory(callId, event.result)
+      parsed = parseMemory(callId, result)
       break
     case 'create_todo':
-      parsed = parseTodo(callId, event.result)
+      parsed = parseTodo(callId, result)
       break
     case 'list_todos':
-      parsed = parseTodoList(callId, event.result)
+      parsed = parseTodoList(callId, result)
       break
     case 'web_search':
-      parsed = parseSearch(callId, event.result)
+      parsed = parseSearch(callId, result)
       break
     case 'weather_lookup':
-      parsed = parseWeather(callId, event.result)
+      parsed = parseWeather(callId, result)
       break
     default:
       return generic(callId, name, true)

@@ -408,3 +408,157 @@ test('keeps display truncation on complete grapheme clusters', () => {
     assert.equal(zwjResult.title, `${'a'.repeat(119)}👩‍💻`)
   }
 })
+
+test('rejects every C1 control character in opaque identifiers', () => {
+  for (let codePoint = 0x80; codePoint <= 0x9f; codePoint += 1) {
+    const c1 = String.fromCodePoint(codePoint)
+    assert.deepEqual(
+      parseLiveResult({
+        callId: `call${c1}`,
+        name: 'remember',
+        result: { ok: true, memory: { id: 'mem', user_note: '标题' } },
+      }),
+      { kind: 'generic', callId: 'unknown-call', label: '记忆操作未完成', status: 'error' },
+    )
+    assert.equal(
+      parseLiveResult({
+        callId: 'c1-memory',
+        name: 'remember',
+        result: { ok: true, memory: { id: `mem${c1}`, user_note: '标题' } },
+      }).kind,
+      'generic',
+    )
+    assert.equal(
+      parseLiveResult({
+        callId: 'c1-todo',
+        name: 'create_todo',
+        result: { ok: true, todo: { id: `todo${c1}`, title: '标题' } },
+      }).kind,
+      'generic',
+    )
+  }
+})
+
+test('requires own data properties at every validated payload layer', () => {
+  const inheritedEnvelope = Object.create({ ok: true })
+  inheritedEnvelope.memory = { id: 'mem-envelope', user_note: '标题' }
+
+  const inheritedMemory = Object.create({ id: 'mem-inherited' })
+  inheritedMemory.user_note = '标题'
+
+  const inheritedTodo = Object.create({ title: '继承标题' })
+  inheritedTodo.id = 'todo-inherited'
+
+  const inheritedTodoList = Object.create({ completed: false })
+  inheritedTodoList.ok = true
+  inheritedTodoList.todos = [{ title: '待办' }]
+
+  const inheritedData = Object.create({
+    results: [{ title: '来源', url: 'https://example.com', snippet: '摘要' }],
+  })
+
+  const inheritedSource = Object.create({ title: '继承来源' })
+  inheritedSource.url = 'https://example.com'
+  inheritedSource.snippet = '摘要'
+
+  const inheritedLocation = Object.create({ name: '上海' })
+  const nestedWeather = {
+    ok: true,
+    data: { location: inheritedLocation, now: { text: '晴', temp: '20' } },
+  }
+
+  const events = [
+    { callId: 'own-envelope', name: 'remember', result: inheritedEnvelope },
+    { callId: 'own-memory', name: 'remember', result: { ok: true, memory: inheritedMemory } },
+    { callId: 'own-todo', name: 'create_todo', result: { ok: true, todo: inheritedTodo } },
+    { callId: 'own-list', name: 'list_todos', result: inheritedTodoList },
+    { callId: 'own-data', name: 'web_search', result: { ok: true, data: inheritedData } },
+    {
+      callId: 'own-source',
+      name: 'web_search',
+      result: { ok: true, data: { results: [inheritedSource] } },
+    },
+    { callId: 'own-weather', name: 'weather_lookup', result: nestedWeather },
+  ]
+
+  for (const event of events) {
+    const result = parseLiveResult(event)
+    assert.equal(result.kind, 'generic')
+    assert.equal(result.status, 'error')
+  }
+})
+
+test('rejects accessors without invoking their getters', () => {
+  const memory: Record<string, unknown> = { user_note: '标题' }
+  let getterCalls = 0
+  Object.defineProperty(memory, 'id', {
+    enumerable: true,
+    get: () => {
+      getterCalls += 1
+      throw new Error('untrusted getter executed')
+    },
+  })
+
+  const result = parseLiveResult({
+    callId: 'accessor',
+    name: 'remember',
+    result: { ok: true, memory },
+  })
+
+  assert.deepEqual(result, {
+    kind: 'generic',
+    callId: 'accessor',
+    label: '记忆操作未完成',
+    status: 'error',
+  })
+  assert.equal(getterCalls, 0)
+})
+
+test('rejects source URLs whose canonical form exceeds the URL cap', () => {
+  const url = `https://example.com/${'界'.repeat(700)}`
+  const result = parseLiveResult({
+    callId: 'long-canonical-url',
+    name: 'web_search',
+    result: { ok: true, data: { results: [{ title: '来源', url, snippet: '摘要' }] } },
+  })
+
+  assert.deepEqual(result, {
+    kind: 'generic',
+    callId: 'long-canonical-url',
+    label: '搜索未完成',
+    status: 'error',
+  })
+})
+
+async function withForcedFallback<T>(callback: (parse: typeof parseLiveResult) => T) {
+  const descriptor = Object.getOwnPropertyDescriptor(Intl, 'Segmenter')
+  Object.defineProperty(Intl, 'Segmenter', { configurable: true, value: undefined })
+  try {
+    const module = await import(`../src/realtime/toolResults.ts?fallback=${Date.now()}`)
+    return callback(module.parseLiveResult)
+  } finally {
+    if (descriptor) Object.defineProperty(Intl, 'Segmenter', descriptor)
+    else delete (Intl as Record<string, unknown>).Segmenter
+  }
+}
+
+test('fallback segmentation keeps flags, Hangul, and CRLF complete at the boundary', async () => {
+  const prefix = 'a'.repeat(119)
+  const cases = [
+    { callId: 'fallback-flag', title: `${prefix}🇨🇳z`, expected: `${prefix}🇨🇳` },
+    { callId: 'fallback-hangul', title: `${prefix}\u1100\u1161z`, expected: `${prefix}\u1100\u1161` },
+    { callId: 'fallback-crlf', title: `${prefix}\r\nz`, expected: `${prefix}\r\n` },
+  ]
+
+  for (const item of cases) {
+    const result = await withForcedFallback((parse) =>
+      parse({
+        callId: item.callId,
+        name: 'remember',
+        result: { ok: true, memory: { id: `${item.callId}-id`, user_note: item.title } },
+      }),
+    )
+    assert.equal(result.kind, 'memory_receipt')
+    if (result.kind === 'memory_receipt') assert.equal(result.title, item.expected)
+  }
+})
