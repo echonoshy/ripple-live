@@ -115,6 +115,10 @@ function normalizeServer(server: string) {
     .replace(/\/+$/, '')
 }
 
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
 async function connectTauriWebSocket(
   url: string,
   onMessage: (message: TauriMessage) => void,
@@ -371,7 +375,7 @@ export class RealtimeSession {
       case 'input.frame.requested': {
         const frame = this.options.onFrameRequested()
         const responseId = event.response_id
-        if (!responseId) {
+        if (!isNonBlankString(responseId)) {
           this.options.onError('服务端没有提供画面请求标识')
           break
         }
@@ -385,7 +389,8 @@ export class RealtimeSession {
         this.options.onUserText(event.text?.trim() ?? '')
         break
       case 'response.created':
-        this.currentResponseId = event.response_id ?? null
+        if (!isNonBlankString(event.response_id)) return
+        this.currentResponseId = event.response_id
         this.completedToolCallIds.clear()
         this.playbackStartedReported = false
         this.assistantText = ''
@@ -400,9 +405,9 @@ export class RealtimeSession {
         break
       case 'response.tool.completed':
         if (!this.isCurrentResponse(event)) return
-        if (!this.emitToolResult(event)) return
         this.options.onTool(event.name ? `${event.name} 已完成` : '工具调用已完成')
         this.options.onState('thinking')
+        this.emitToolResult(event)
         break
       case 'response.text.delta':
         if (!this.isCurrentResponse(event)) return
@@ -449,7 +454,11 @@ export class RealtimeSession {
   }
 
   private isCurrentResponse(event: RealtimeEvent) {
-    return !event.response_id || event.response_id === this.currentResponseId
+    return (
+      this.currentResponseId !== null &&
+      isNonBlankString(event.response_id) &&
+      event.response_id === this.currentResponseId
+    )
   }
 
   private emitToolResult(event: RealtimeEvent) {
@@ -462,7 +471,7 @@ export class RealtimeSession {
       !event.name.trim() ||
       this.completedToolCallIds.has(event.call_id)
     ) {
-      return false
+      return
     }
 
     this.completedToolCallIds.add(event.call_id)
@@ -475,7 +484,6 @@ export class RealtimeSession {
     } catch {
       // Consumer rendering must not interrupt the realtime transport.
     }
-    return true
   }
 
   private matchesEndpointTurn(turnId: string | undefined) {

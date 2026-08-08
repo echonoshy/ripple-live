@@ -137,7 +137,94 @@ test('ignores stale, uncorrelated, and blank tool results', () => {
   })
 
   assert.deepEqual(harness.results, [])
-  assert.deepEqual(harness.tools, [''])
+  assert.deepEqual(harness.tools, [
+    '',
+    'remember 已完成',
+    '\t 已完成',
+  ])
+})
+
+test('a blank tool call id still completes the current tool state', () => {
+  const harness = failureHarness()
+  harness.receive({ type: 'response.created', response_id: 'response-1' })
+  harness.receive({
+    type: 'response.tool.started',
+    response_id: 'response-1',
+    name: 'remember',
+  })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 'response-1',
+    call_id: ' ',
+    name: 'remember',
+  })
+
+  assert.deepEqual(harness.results, [])
+  assert.equal(harness.tools.at(-1), 'remember 已完成')
+  assert.equal(harness.states.at(-1), 'thinking')
+})
+
+test('a duplicate tool completion still restores thinking without re-emitting its result', () => {
+  const harness = failureHarness()
+  harness.receive({ type: 'response.created', response_id: 'response-1' })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 'response-1',
+    call_id: 'call-1',
+    name: 'remember',
+    result: { ok: true },
+  })
+  harness.receive({
+    type: 'response.tool.started',
+    response_id: 'response-1',
+    name: 'remember',
+  })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 'response-1',
+    call_id: 'call-1',
+    name: 'remember',
+    result: { ok: true },
+  })
+
+  assert.deepEqual(harness.results, [
+    { callId: 'call-1', name: 'remember', result: { ok: true } },
+  ])
+  assert.equal(harness.tools.at(-1), 'remember 已完成')
+  assert.equal(harness.states.at(-1), 'thinking')
+})
+
+test('invalid response ids neither replace nor complete the active response', () => {
+  const harness = failureHarness()
+  harness.receive({ type: 'response.created', response_id: 'response-current' })
+  harness.receive({ type: 'response.created', response_id: 7 })
+  harness.receive({
+    type: 'response.tool.started',
+    response_id: 'response-current',
+    name: 'remember',
+  })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 7,
+    call_id: 'call-1',
+    name: 'remember',
+  })
+  harness.receive({ type: 'response.done', response_id: 7 })
+  harness.receive({ type: 'response.failed', response_id: ' ' })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 'response-current',
+    call_id: 'call-2',
+    name: 'remember',
+    result: { ok: true },
+  })
+
+  assert.deepEqual(harness.results, [
+    { callId: 'call-2', name: 'remember', result: { ok: true } },
+  ])
+  assert.equal(harness.tools.at(-1), 'remember 已完成')
+  assert.equal(harness.states.at(-1), 'thinking')
+  assert.deepEqual(harness.responseFailures, [])
 })
 
 test('does not re-emit tool results after response completion', () => {
