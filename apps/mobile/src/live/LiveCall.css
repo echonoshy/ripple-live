@@ -378,6 +378,12 @@
   font-size: 25px;
 }
 
+.live-call-screen .control-button:focus-visible,
+.live-call-screen .end-button:focus-visible {
+  outline: 3px solid #9fdaff;
+  outline-offset: 3px;
+}
+
 .live-call-screen .control-button:active,
 .live-call-screen .end-button:active,
 .live-call-screen .call-icon:active {

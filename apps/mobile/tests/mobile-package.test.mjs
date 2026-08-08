@@ -249,6 +249,30 @@ test('mobile live call uses the immersive presentation contract', () => {
   )
 })
 
+test('mobile live call controls retain scoped focus and size contracts', () => {
+  const cssSource = readFileSync(
+    path.join(appRoot, 'src/live/LiveCall.css'),
+    'utf8',
+  )
+
+  assert.match(
+    cssSource,
+    /\.live-call-screen \.control-button:focus-visible,\s*\.live-call-screen \.end-button:focus-visible\s*\{[^}]*outline:\s*3px solid #9fdaff;[^}]*outline-offset:\s*3px;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.live-call-screen \.control-button,\s*\.live-call-screen \.end-button\s*\{[^}]*min-width:\s*44px;[^}]*min-height:\s*44px;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.live-call-screen \.control-button\.is-active\s*\{[^}]*background:\s*#f5f2f7;[^}]*color:\s*#020406;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.live-call-screen \.end-button\s*\{[^}]*background:\s*#ff637e;/s,
+  )
+})
+
 test('mobile libraries expose accessible shared management controls', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
