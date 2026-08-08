@@ -26,7 +26,7 @@ use ripple_agent_gateway::{
     endpointing::{EndpointEvaluation, is_stop_command},
     memory::{MemoryService, TodoUpdate},
     orchestrator::AgentOrchestrator,
-    protocol::{ClientEvent, VideoFrame},
+    protocol::{ClientEvent, SessionMode, VideoFrame},
     response_gate::{GateDecision, GateOutcome},
 };
 use serde::Deserialize;
@@ -39,7 +39,8 @@ use tower_http::{
 use tracing::{Level, error, info, warn};
 use uuid::Uuid;
 
-const REALTIME_PROTOCOL_VERSION: u32 = 4;
+const REALTIME_PROTOCOL_MIN: u32 = 4;
+const REALTIME_PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Clone)]
 struct AppState {
@@ -395,10 +396,25 @@ fn client_protocol_version(event: &ClientEvent) -> Option<u32> {
         .and_then(|version| u32::try_from(version).ok())
 }
 
-fn validate_protocol_version(version: Option<u32>) -> Result<(), ()> {
-    (version == Some(REALTIME_PROTOCOL_VERSION))
-        .then_some(())
+fn validate_protocol_version(version: Option<u32>) -> Result<u32, ()> {
+    version
+        .filter(|version| (REALTIME_PROTOCOL_MIN..=REALTIME_PROTOCOL_VERSION).contains(version))
         .ok_or(())
+}
+
+fn unsupported_mode_change_event(
+    negotiated_protocol_version: u32,
+    event: &ClientEvent,
+) -> Option<Value> {
+    (negotiated_protocol_version < 5).then(|| {
+        json!({
+            "type": "error",
+            "code": "unsupported_protocol",
+            "message": "当前会话协议不支持切换模式",
+            "response_id": event.response_id,
+            "mode": event.extra.get("mode").and_then(Value::as_str)
+        })
+    })
 }
 
 fn audio_duration_ms(sample_count: usize, sample_rate: u32) -> u128 {
@@ -1472,7 +1488,8 @@ async fn handle_socket(
     let mut active_response: Option<ActiveResponse> = None;
     let mut activation_mode = ActivationMode::Continuous;
     let mut awake_until: Option<Instant> = None;
-    let mut session_mode = "audio".to_owned();
+    let mut session_mode = SessionMode::Audio;
+    let mut negotiated_protocol_version: Option<u32> = None;
     let mut session_ready = false;
     let mut pending_turn: Option<PendingTurn> = None;
     let mut pending_endpoint: Option<PendingEndpoint> = None;
@@ -1608,7 +1625,7 @@ async fn handle_socket(
                             &mut active_response,
                             activation_mode,
                             &mut awake_until,
-                            &session_mode,
+                            session_mode,
                             &mut frames,
                             &mut pending_turn,
                             &turn_id,
@@ -1688,7 +1705,7 @@ async fn handle_socket(
                     "gate_respond",
                 )
                 .await;
-                if session_mode == "video" {
+                if session_mode == SessionMode::Video {
                     if let Some(superseded) = pending_turn.take() {
                         record_event_best_effort(
                             &state.context,
@@ -1798,7 +1815,7 @@ async fn handle_socket(
                 json!({
                     "type": "error",
                     "code": "unsupported_protocol",
-                    "message": "必须先使用协议 v4 初始化会话"
+                    "message": "必须先使用协议 v4 或 v5 初始化会话"
                 }),
             )
             .await;
@@ -1807,28 +1824,51 @@ async fn handle_socket(
 
         let result = match event.kind.as_str() {
             "session.start" => {
+                if session_ready {
+                    send_event(
+                        &event_sender,
+                        json!({
+                            "type": "error",
+                            "code": "session_already_started",
+                            "message": "会话已经初始化"
+                        }),
+                    )
+                    .await?;
+                    continue;
+                }
                 activation_mode = ActivationMode::parse(
                     event.extra.get("activation_mode").and_then(Value::as_str),
                 );
                 let protocol_version = client_protocol_version(&event);
-                if validate_protocol_version(protocol_version).is_err() {
+                let Ok(accepted_protocol_version) = validate_protocol_version(protocol_version)
+                else {
                     send_event(
                         &event_sender,
                         json!({
                             "type": "error",
                             "code": "unsupported_protocol",
-                            "message": "客户端与服务端协议版本不一致，需要使用协议 v4"
+                            "message": "客户端与服务端协议版本不一致，需要使用协议 v4 或 v5"
                         }),
                     )
                     .await?;
                     break;
-                }
-                session_mode = event
-                    .extra
-                    .get("mode")
-                    .and_then(Value::as_str)
-                    .unwrap_or("audio")
-                    .to_owned();
+                };
+                let initial_mode = event.extra.get("mode").and_then(Value::as_str);
+                let Ok(accepted_mode) = SessionMode::parse_initial(initial_mode) else {
+                    send_event(
+                        &event_sender,
+                        json!({
+                            "type": "error",
+                            "code": "invalid_mode",
+                            "message": "会话模式只支持 audio 或 video",
+                            "mode": initial_mode
+                        }),
+                    )
+                    .await?;
+                    break;
+                };
+                negotiated_protocol_version = Some(accepted_protocol_version);
+                session_mode = accepted_mode;
                 session_ready = true;
                 let result = send_event(
                     &event_sender,
@@ -1839,10 +1879,10 @@ async fn handle_socket(
                             ActivationMode::Wake => "wake",
                             ActivationMode::Continuous => "continuous",
                         },
-                        "protocol_version": REALTIME_PROTOCOL_VERSION,
+                        "protocol_version": accepted_protocol_version,
                         "sample_rate_in": state.settings.sample_rate_in,
                         "sample_rate_out": state.settings.sample_rate_out,
-                        "mode": session_mode
+                        "mode": session_mode.as_str()
                     }),
                 )
                 .await;
@@ -1852,11 +1892,51 @@ async fn handle_socket(
                         &state.context,
                         &session_id,
                         "server.session.ready",
-                        &json!({"mode": event.extra.get("mode")}),
+                        &json!({
+                            "mode": session_mode.as_str(),
+                            "protocol_version": accepted_protocol_version
+                        }),
                     )
                     .await;
                 }
                 result
+            }
+            "session.mode.set" => {
+                let negotiated_protocol_version = negotiated_protocol_version
+                    .expect("a ready session always has a negotiated protocol version");
+                if let Some(error) =
+                    unsupported_mode_change_event(negotiated_protocol_version, &event)
+                {
+                    send_event(&event_sender, error).await
+                } else {
+                    let requested_mode = event.extra.get("mode").and_then(Value::as_str);
+                    match SessionMode::parse(requested_mode) {
+                        Ok(accepted_mode) => {
+                            session_mode = accepted_mode;
+                            send_event(
+                                &event_sender,
+                                json!({
+                                    "type": "session.mode.changed",
+                                    "mode": session_mode.as_str()
+                                }),
+                            )
+                            .await
+                        }
+                        Err(_) => {
+                            send_event(
+                                &event_sender,
+                                json!({
+                                    "type": "error",
+                                    "code": "invalid_mode",
+                                    "message": "会话模式只支持 audio 或 video",
+                                    "response_id": event.response_id,
+                                    "mode": requested_mode
+                                }),
+                            )
+                            .await
+                        }
+                    }
+                }
             }
             "input.audio.append" => {
                 let result = endpoint_state.append_audio(event.audio.as_deref(), &state.settings);
@@ -2083,7 +2163,7 @@ async fn handle_socket(
                         &mut active_response,
                         activation_mode,
                         &mut awake_until,
-                        &session_mode,
+                        session_mode,
                         &mut frames,
                         &mut pending_turn,
                         turn_id,
@@ -2314,7 +2394,7 @@ async fn queue_voice_transcript(
     active_response: &mut Option<ActiveResponse>,
     activation_mode: ActivationMode,
     awake_until: &mut Option<Instant>,
-    session_mode: &str,
+    session_mode: SessionMode,
     frames: &mut VecDeque<VideoFrame>,
     pending_turn: &mut Option<PendingTurn>,
     turn_id: &str,
@@ -2400,7 +2480,7 @@ async fn queue_voice_transcript(
                 "response_id": response_id,
                 "text": transcript,
                 "reason": decision.reason,
-                "needs_frame": session_mode == "video"
+                "needs_frame": session_mode == SessionMode::Video
             }),
         )
         .await?;
@@ -2866,19 +2946,29 @@ mod tests {
     }
 
     #[test]
-    fn mobile_protocol_v4_start_is_accepted_exactly() {
-        let mobile_start: ClientEvent = serde_json::from_value(json!({
-            "type": "session.start",
-            "protocol_version": 4,
-            "client_build": "android-contract-test",
-            "mode": "audio"
+    fn realtime_protocol_accepts_v4_and_v5_during_rollout() {
+        assert_eq!(validate_protocol_version(Some(4)), Ok(4));
+        assert_eq!(validate_protocol_version(Some(5)), Ok(5));
+        assert_eq!(validate_protocol_version(None), Err(()));
+        assert_eq!(validate_protocol_version(Some(3)), Err(()));
+        assert_eq!(validate_protocol_version(Some(6)), Err(()));
+    }
+
+    #[test]
+    fn v4_mode_change_rejection_preserves_request_correlation() {
+        let event: ClientEvent = serde_json::from_value(json!({
+            "type": "session.mode.set",
+            "response_id": "mode-request-4",
+            "mode": "video"
         }))
         .unwrap();
 
-        assert!(validate_protocol_version(client_protocol_version(&mobile_start)).is_ok());
-        assert!(validate_protocol_version(None).is_err());
-        assert!(validate_protocol_version(Some(2)).is_err());
-        assert!(validate_protocol_version(Some(3)).is_err());
+        let error = unsupported_mode_change_event(4, &event).unwrap();
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["code"], "unsupported_protocol");
+        assert_eq!(error["response_id"], "mode-request-4");
+        assert_eq!(error["mode"], "video");
+        assert!(unsupported_mode_change_event(5, &event).is_none());
     }
 
     #[test]
