@@ -64,6 +64,7 @@ import {
 } from './library'
 import { cameraErrorAfterSwitch, visibleCallError } from './live/callErrors'
 import {
+  closeCallBeforeDetachedRefresh,
   createCallLifecycleGuard,
   createConversationOwnership,
   createLatestNavigationGuard,
@@ -484,45 +485,56 @@ export default function App() {
         const conversationOwner = conversationOwnershipRef.current.current()
         const routeOwner = navigateTo('home')
         const token = accessToken
-        try {
-          await stopCall()
-          if (conversationOwnershipRef.current.release(conversationOwner.owner)) {
-            setActiveConversationIdState(null)
-          }
-          if (!conversationOwner.conversationId || !token) return
-
-          try {
-            const [summary, messages] = await Promise.all([
-              conversation(server, token, conversationOwner.conversationId),
-              conversationMessages(
-                server,
-                token,
-                conversationOwner.conversationId,
-              ),
-            ])
-            if (!navigationGuardRef.current.owns(routeOwner)) return
-            setHistoryError('')
-            setHistoryBusy(false)
-            setSelectedConversation(summary)
-            setHistoryMessages(messages)
-            preloadedConversationIdRef.current = summary.id
-            setScreen('conversation')
-          } catch (error) {
-            if (!navigationGuardRef.current.owns(routeOwner)) return
-            setSelectedConversation(null)
-            setHistoryMessages([])
-            setHistoryBusy(false)
-            setHistoryError(
-              `通话已结束，但无法刷新聊天记录：${
-                error instanceof Error ? error.message : '请稍后重试'
-              }`,
-            )
-            setScreen('home')
-          }
-        } finally {
-          callLifecycleRef.current.finishLeave()
-          setSessionState('idle')
-        }
+        await closeCallBeforeDetachedRefresh({
+          close: async () => {
+            try {
+              await stopCall()
+            } finally {
+              if (
+                conversationOwnershipRef.current.release(
+                  conversationOwner.owner,
+                )
+              ) {
+                setActiveConversationIdState(null)
+              }
+            }
+          },
+          finishClose: () => {
+            callLifecycleRef.current.finishLeave()
+            setSessionState('idle')
+          },
+          refresh: async () => {
+            if (!conversationOwner.conversationId || !token) return
+            try {
+              const [summary, messages] = await Promise.all([
+                conversation(server, token, conversationOwner.conversationId),
+                conversationMessages(
+                  server,
+                  token,
+                  conversationOwner.conversationId,
+                ),
+              ])
+              if (!navigationGuardRef.current.owns(routeOwner)) return
+              setHistoryError('')
+              setHistoryBusy(false)
+              setSelectedConversation(summary)
+              setHistoryMessages(messages)
+              preloadedConversationIdRef.current = summary.id
+              setScreen('conversation')
+            } catch (error) {
+              if (!navigationGuardRef.current.owns(routeOwner)) return
+              setSelectedConversation(null)
+              setHistoryMessages([])
+              setHistoryBusy(false)
+              setHistoryError(
+                `通话已结束，但无法刷新聊天记录：${
+                  error instanceof Error ? error.message : '请稍后重试'
+                }`,
+              )
+              setScreen('home')
+            }
+          },
+        })
       }),
     [accessToken, navigateTo, server, stopCall],
   )

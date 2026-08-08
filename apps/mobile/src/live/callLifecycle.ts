@@ -14,6 +14,23 @@ export function createSingleFlight(operation: () => Promise<void>) {
   }
 }
 
+export async function closeCallBeforeDetachedRefresh({
+  close,
+  finishClose,
+  refresh,
+}: {
+  close: () => Promise<void>
+  finishClose: () => void
+  refresh: () => Promise<void>
+}) {
+  try {
+    await close()
+  } finally {
+    finishClose()
+  }
+  void refresh()
+}
+
 type CallLifecyclePhase =
   | 'idle'
   | 'opening'

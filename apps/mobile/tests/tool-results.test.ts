@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { LiveResultSheet } from '../src/components/LiveResultSheet.tsx'
 import {
   createCallLifecycleGuard,
+  closeCallBeforeDetachedRefresh,
   createConversationOwnership,
   createLatestNavigationGuard,
   createSingleFlight,
@@ -204,6 +205,65 @@ test('new navigation prevents an older leave from routing afterward', () => {
   navigation.begin()
 
   assert.equal(navigation.owns(leaveRoute), false)
+})
+
+test('a delayed old refresh cannot block or overwrite a replacement call lifecycle', async () => {
+  const lifecycle = createCallLifecycleGuard()
+  const navigation = createLatestNavigationGuard()
+  const refreshReleases: Array<() => void> = []
+  let screen = 'call'
+  let sessionState = 'active'
+  let closes = 0
+
+  const leave = createSingleFlight(async () => {
+    if (!lifecycle.beginLeave()) return
+    const routeOwner = navigation.begin()
+    screen = 'home'
+    await closeCallBeforeDetachedRefresh({
+      close: async () => {
+        closes += 1
+      },
+      finishClose: () => {
+        lifecycle.finishLeave()
+        sessionState = 'idle'
+      },
+      refresh: async () => {
+        await new Promise<void>((resolve) => refreshReleases.push(resolve))
+        if (navigation.owns(routeOwner)) screen = 'conversation'
+      },
+    })
+  })
+
+  assert.equal(lifecycle.requestOpen(), true)
+  assert.notEqual(lifecycle.claimStart(), null)
+  await leave()
+  assert.equal(refreshReleases.length, 1)
+
+  assert.equal(lifecycle.requestOpen(), true)
+  assert.notEqual(lifecycle.claimStart(), null)
+  navigation.begin()
+  screen = 'call'
+  sessionState = 'active'
+  refreshReleases[0]?.()
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(screen, 'call')
+  assert.equal(sessionState, 'active')
+
+  await leave()
+
+  assert.equal(closes, 2)
+  assert.equal(refreshReleases.length, 2)
+  assert.equal(screen, 'home')
+  assert.equal(sessionState, 'idle')
+
+  navigation.begin()
+  screen = 'memories'
+  refreshReleases[1]?.()
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(screen, 'memories')
+  assert.equal(sessionState, 'idle')
 })
 
 test('browser source opening uses a new isolated tab without replacing the call', async () => {
