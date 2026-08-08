@@ -368,10 +368,13 @@ test('a regressed rAF timestamp starts low-tier recovery from a fresh observatio
 
     browser.setNow(4499)
     runNextFrame(browser, 4499)
-    runCadence(browser, 4499 + (1000 / 120), 5000, 120)
+    runCadence(browser, 4499 + (1000 / 120), 5200, 120)
     assert.equal(harness.latestProps.current.qualityTier, 'low')
 
-    runCadence(browser, 5000 + (1000 / 120), 9600, 120)
+    runCadence(browser, 5200 + (1000 / 120), 9400, 120)
+    assert.equal(harness.latestProps.current.qualityTier, 'low')
+
+    runCadence(browser, 9400 + (1000 / 120), 9600, 120)
     assert.equal(harness.latestProps.current.qualityTier, 'high')
     cleanup()
   } finally {
