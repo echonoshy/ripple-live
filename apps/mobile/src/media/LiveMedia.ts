@@ -32,6 +32,8 @@ type PlaybackStateMessage = {
   count?: number
 }
 
+type CameraSwitchResult = 'switched' | 'stale' | 'failed'
+
 function resample(
   samples: Float32Array,
   sourceRate: number,
@@ -80,154 +82,227 @@ export class LiveMedia {
   private speechActive = false
   private preRoll: Float32Array[] = []
   private preRollSamples = 0
+  private lifecycleGeneration = 0
+  private cameraGeneration = 0
+  private startPromise: Promise<void> | null = null
+  private pendingStreams = new Set<MediaStream>()
+  private pendingContexts = new Set<AudioContext>()
 
   constructor(options: LiveMediaOptions) {
     this.options = options
     this.facingMode = options.facingMode
   }
 
-  async start(
+  start(
+    onChunk: (audio: Float32Array, frame: string | null) => void,
+    onSpeechStart: () => void,
+    onSpeechEnd: () => void,
+    onLevel: (level: number) => void,
+  ): Promise<void> {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      return Promise.reject(new Error('当前设备不支持麦克风或摄像头采集'))
+    }
+    if (this.startPromise) return this.startPromise
+    if (this.running) return Promise.resolve()
+
+    const generation = ++this.lifecycleGeneration
+    const cameraOperation = ++this.cameraGeneration
+    const task = this.startInternal(
+      generation,
+      cameraOperation,
+      onChunk,
+      onSpeechStart,
+      onSpeechEnd,
+      onLevel,
+    ).finally(() => {
+      if (this.startPromise === task) this.startPromise = null
+    })
+    this.startPromise = task
+    return task
+  }
+
+  private async startInternal(
+    generation: number,
+    cameraOperation: number,
     onChunk: (audio: Float32Array, frame: string | null) => void,
     onSpeechStart: () => void,
     onSpeechEnd: () => void,
     onLevel: (level: number) => void,
   ) {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('当前设备不支持麦克风或摄像头采集')
-    }
+    try {
+      if (this.options.withVideo) {
+        await this.replaceCamera(
+          this.facingMode,
+          generation,
+          cameraOperation,
+        )
+        if (!this.isCurrent(generation)) return
+      }
 
-    if (this.options.withVideo) await this.openCamera()
+      if (!await this.openPlayback(generation)) return
 
-    await this.openPlayback()
-
-    this.audioStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-      video: false,
-    })
-
-    this.captureContext = new AudioContext()
-    await this.captureContext.audioWorklet.addModule('/capture-processor.js')
-    if (this.captureContext.state === 'suspended') {
-      await this.captureContext.resume()
-    }
-
-    this.sourceNode = this.captureContext.createMediaStreamSource(this.audioStream)
-    this.captureNode = new AudioWorkletNode(
-      this.captureContext,
-      'second-chunk-processor',
-    )
-    this.silentGain = this.captureContext.createGain()
-    this.silentGain.gain.value = 0
-    this.sourceNode.connect(this.captureNode)
-    this.captureNode.connect(this.silentGain)
-    this.silentGain.connect(this.captureContext.destination)
-    this.running = true
-
-    this.captureNode.port.onmessage = (
-      event: MessageEvent<AudioChunkMessage | AudioLevelMessage>,
-    ) => {
-      if (!this.running) return
-      if (event.data.type === 'audio-level') {
-        onLevel(this.muted ? 0 : Math.min(1, event.data.level * 8))
+      const audioStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      })
+      this.pendingStreams.add(audioStream)
+      if (!this.isCurrent(generation)) {
+        this.disposePendingStream(audioStream)
         return
       }
-      const resampled = resampleTo16k(
-        event.data.samples,
-        event.data.sampleRate,
-      )
-      const audio = this.muted
-        ? new Float32Array(resampled.length)
-        : resampled
-      const beginSpeech = () => {
-        if (this.speechActive || this.muted) return
-        this.speechActive = true
-        onSpeechStart()
-        for (const buffered of this.preRoll) onChunk(buffered, null)
-        this.preRoll = []
-        this.preRollSamples = 0
-      }
-      const endSpeech = () => {
-        if (!this.speechActive) return
-        this.speechActive = false
-        onSpeechEnd()
-      }
-      if (this.fallbackVad && !this.muted) {
-        let squareSum = 0
-        for (const sample of audio) squareSum += sample * sample
-        const rms = Math.sqrt(squareSum / Math.max(1, audio.length))
-        if (!this.fallbackSpeaking && rms >= 0.02) {
-          this.fallbackSpeaking = true
-          this.fallbackSilenceChunks = 0
-          beginSpeech()
-        } else if (this.fallbackSpeaking) {
-          this.fallbackSilenceChunks =
-            rms < 0.012 ? this.fallbackSilenceChunks + 1 : 0
-          if (this.fallbackSilenceChunks >= 8) {
-            this.fallbackSpeaking = false
-            this.fallbackSilenceChunks = 0
-            endSpeech()
-          }
-        }
-      }
-      if (this.speechActive) {
-        onChunk(audio, null)
-      } else if (!this.muted) {
-        this.preRoll.push(audio)
-        this.preRollSamples += audio.length
-        const maxPreRollSamples = 16_000
-        while (
-          this.preRollSamples > maxPreRollSamples &&
-          this.preRoll.length > 1
-        ) {
-          this.preRollSamples -= this.preRoll.shift()?.length ?? 0
-        }
-      }
-    }
+      this.pendingStreams.delete(audioStream)
+      this.audioStream = audioStream
 
-    try {
-      this.vad = await MicVAD.new({
-        model: 'v5',
-        baseAssetPath: '/vad/',
-        onnxWASMBasePath: '/vad/ort/',
-        getStream: async () => {
-          if (!this.audioStream) throw new Error('麦克风流尚未启动')
-          return this.audioStream
-        },
-        pauseStream: async () => {},
-        resumeStream: async (stream) => stream,
-        positiveSpeechThreshold: 0.6,
-        negativeSpeechThreshold: 0.35,
-        redemptionMs: 500,
-        minSpeechMs: 96,
-        preSpeechPadMs: 0,
-        ortConfig: (ort) => {
-          ort.env.wasm.numThreads = 1
-        },
-        onSpeechRealStart: () => {
-          if (this.running && !this.muted && !this.speechActive) {
-            this.speechActive = true
-            onSpeechStart()
-            for (const buffered of this.preRoll) onChunk(buffered, null)
-            this.preRoll = []
-            this.preRollSamples = 0
+      const captureContext = new AudioContext()
+      this.pendingContexts.add(captureContext)
+      await captureContext.audioWorklet.addModule('/capture-processor.js')
+      if (!this.isCurrent(generation)) {
+        this.disposePendingContext(captureContext)
+        return
+      }
+      if (captureContext.state === 'suspended') await captureContext.resume()
+      if (!this.isCurrent(generation)) {
+        this.disposePendingContext(captureContext)
+        return
+      }
+
+      const sourceNode = captureContext.createMediaStreamSource(audioStream)
+      const captureNode = new AudioWorkletNode(
+        captureContext,
+        'second-chunk-processor',
+      )
+      const silentGain = captureContext.createGain()
+      silentGain.gain.value = 0
+      sourceNode.connect(captureNode)
+      captureNode.connect(silentGain)
+      silentGain.connect(captureContext.destination)
+      this.pendingContexts.delete(captureContext)
+      this.captureContext = captureContext
+      this.sourceNode = sourceNode
+      this.captureNode = captureNode
+      this.silentGain = silentGain
+      this.running = true
+
+      captureNode.port.onmessage = (
+        event: MessageEvent<AudioChunkMessage | AudioLevelMessage>,
+      ) => {
+        if (!this.running) return
+        if (event.data.type === 'audio-level') {
+          onLevel(this.muted ? 0 : Math.min(1, event.data.level * 8))
+          return
+        }
+        const resampled = resampleTo16k(
+          event.data.samples,
+          event.data.sampleRate,
+        )
+        const audio = this.muted
+          ? new Float32Array(resampled.length)
+          : resampled
+        const beginSpeech = () => {
+          if (this.speechActive || this.muted) return
+          this.speechActive = true
+          onSpeechStart()
+          for (const buffered of this.preRoll) onChunk(buffered, null)
+          this.preRoll = []
+          this.preRollSamples = 0
+        }
+        const endSpeech = () => {
+          if (!this.speechActive) return
+          this.speechActive = false
+          onSpeechEnd()
+        }
+        if (this.fallbackVad && !this.muted) {
+          let squareSum = 0
+          for (const sample of audio) squareSum += sample * sample
+          const rms = Math.sqrt(squareSum / Math.max(1, audio.length))
+          if (!this.fallbackSpeaking && rms >= 0.02) {
+            this.fallbackSpeaking = true
+            this.fallbackSilenceChunks = 0
+            beginSpeech()
+          } else if (this.fallbackSpeaking) {
+            this.fallbackSilenceChunks =
+              rms < 0.012 ? this.fallbackSilenceChunks + 1 : 0
+            if (this.fallbackSilenceChunks >= 8) {
+              this.fallbackSpeaking = false
+              this.fallbackSilenceChunks = 0
+              endSpeech()
+            }
           }
-        },
-        onSpeechEnd: () => {
-          if (this.running && !this.muted && this.speechActive) {
-            this.speechActive = false
-            onSpeechEnd()
+        }
+        if (this.speechActive) {
+          onChunk(audio, null)
+        } else if (!this.muted) {
+          this.preRoll.push(audio)
+          this.preRollSamples += audio.length
+          const maxPreRollSamples = 16_000
+          while (
+            this.preRollSamples > maxPreRollSamples &&
+            this.preRoll.length > 1
+          ) {
+            this.preRollSamples -= this.preRoll.shift()?.length ?? 0
           }
-        },
-      })
+        }
+      }
+
+      let vad: MicVAD
+      try {
+        vad = await MicVAD.new({
+          model: 'v5',
+          baseAssetPath: '/vad/',
+          onnxWASMBasePath: '/vad/ort/',
+          getStream: async () => {
+            if (!this.isCurrent(generation)) {
+              throw new Error('麦克风采集已停止')
+            }
+            return audioStream
+          },
+          pauseStream: async () => {},
+          resumeStream: async (stream) => stream,
+          positiveSpeechThreshold: 0.6,
+          negativeSpeechThreshold: 0.35,
+          redemptionMs: 500,
+          minSpeechMs: 96,
+          preSpeechPadMs: 0,
+          ortConfig: (ort) => {
+            ort.env.wasm.numThreads = 1
+          },
+          onSpeechRealStart: () => {
+            if (this.running && !this.muted && !this.speechActive) {
+              this.speechActive = true
+              onSpeechStart()
+              for (const buffered of this.preRoll) onChunk(buffered, null)
+              this.preRoll = []
+              this.preRollSamples = 0
+            }
+          },
+          onSpeechEnd: () => {
+            if (this.running && !this.muted && this.speechActive) {
+              this.speechActive = false
+              onSpeechEnd()
+            }
+          },
+        })
+      } catch (error) {
+        if (!this.isCurrent(generation)) return
+        console.warn('Silero VAD 初始化失败，已切换到本地能量检测', error)
+        this.vad = null
+        this.fallbackVad = true
+        return
+      }
+      if (!this.isCurrent(generation)) {
+        void vad.destroy().catch(() => {})
+        return
+      }
+      this.vad = vad
     } catch (error) {
-      console.warn('Silero VAD 初始化失败，已切换到本地能量检测', error)
-      this.vad = null
-      this.fallbackVad = true
+      if (!this.isCurrent(generation)) return
+      this.stop()
+      throw error
     }
   }
 
@@ -240,11 +315,26 @@ export class LiveMedia {
     }
   }
 
-  async setFacingMode(facingMode: 'user' | 'environment') {
-    this.facingMode = facingMode
-    if (!this.options.withVideo) return
-    this.stopCamera()
-    await this.openCamera()
+  async setFacingMode(
+    facingMode: 'user' | 'environment',
+  ): Promise<CameraSwitchResult> {
+    if (!this.options.withVideo) {
+      this.facingMode = facingMode
+      return 'switched'
+    }
+    const generation = this.lifecycleGeneration
+    const cameraOperation = ++this.cameraGeneration
+    try {
+      return await this.replaceCamera(
+        facingMode,
+        generation,
+        cameraOperation,
+      )
+    } catch {
+      return this.isCameraCurrent(generation, cameraOperation)
+        ? 'failed'
+        : 'stale'
+    }
   }
 
   enqueueOutput(samples: Float32Array) {
@@ -269,6 +359,9 @@ export class LiveMedia {
   }
 
   stop() {
+    this.lifecycleGeneration += 1
+    this.cameraGeneration += 1
+    this.startPromise = null
     this.running = false
     this.fallbackVad = false
     this.fallbackSpeaking = false
@@ -291,21 +384,32 @@ export class LiveMedia {
     this.silentGain = null
     this.audioStream?.getTracks().forEach((track) => track.stop())
     this.audioStream = null
+    for (const stream of this.pendingStreams) {
+      stream.getTracks().forEach((track) => track.stop())
+    }
+    this.pendingStreams.clear()
     void this.captureContext?.close()
     this.captureContext = null
     void this.playbackContext?.close()
     this.playbackContext = null
+    for (const context of this.pendingContexts) void context.close().catch(() => {})
+    this.pendingContexts.clear()
     this.stopCamera()
   }
 
-  private async openPlayback() {
-    this.playbackContext = new AudioContext({
+  private async openPlayback(generation = this.lifecycleGeneration) {
+    const playbackContext = new AudioContext({
       latencyHint: 'interactive',
       sampleRate: 24000,
     })
-    await this.playbackContext.audioWorklet.addModule('/playback-processor.js')
-    this.playbackNode = new AudioWorkletNode(
-      this.playbackContext,
+    this.pendingContexts.add(playbackContext)
+    await playbackContext.audioWorklet.addModule('/playback-processor.js')
+    if (!this.isCurrent(generation)) {
+      this.disposePendingContext(playbackContext)
+      return false
+    }
+    const playbackNode = new AudioWorkletNode(
+      playbackContext,
       'stream-playback-processor',
       {
         numberOfInputs: 0,
@@ -317,7 +421,7 @@ export class LiveMedia {
         },
       },
     )
-    this.playbackNode.port.onmessage = (
+    playbackNode.port.onmessage = (
       event: MessageEvent<PlaybackStateMessage>,
     ) => {
       if (event.data.type === 'audio-level') {
@@ -335,31 +439,79 @@ export class LiveMedia {
         this.options.onPlaybackStarted(event.data.bufferedMs ?? 0)
         console.info('[Ripple Live] buffered playback started', {
           bufferedMs: event.data.bufferedMs,
-          sampleRate: this.playbackContext?.sampleRate,
+          sampleRate: playbackContext.sampleRate,
         })
       } else if (event.data.type === 'playback-ended') {
         this.options.onPlaybackEnded()
       }
     }
-    this.playbackNode.connect(this.playbackContext.destination)
-    if (this.playbackContext.state === 'suspended') {
-      await this.playbackContext.resume()
+    playbackNode.connect(playbackContext.destination)
+    if (playbackContext.state === 'suspended') {
+      await playbackContext.resume()
     }
+    if (!this.isCurrent(generation)) {
+      playbackNode.disconnect()
+      this.disposePendingContext(playbackContext)
+      return false
+    }
+    this.pendingContexts.delete(playbackContext)
+    this.playbackContext = playbackContext
+    this.playbackNode = playbackNode
+    return true
   }
 
-  private async openCamera() {
-    this.videoStream = await navigator.mediaDevices.getUserMedia({
+  private async replaceCamera(
+    facingMode: 'user' | 'environment',
+    generation: number,
+    cameraOperation: number,
+  ) {
+    const replacement = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
-        facingMode: { ideal: this.facingMode },
+        facingMode: { ideal: facingMode },
         width: { ideal: 1280 },
         height: { ideal: 720 },
       },
     })
-    this.options.video.srcObject = this.videoStream
+    this.pendingStreams.add(replacement)
+    if (!this.isCameraCurrent(generation, cameraOperation)) {
+      this.disposePendingStream(replacement)
+      return 'stale'
+    }
+
+    const previous = this.videoStream
+    const previousTransform = this.options.video.style.transform
+    this.options.video.srcObject = replacement
     this.options.video.style.transform =
-      this.facingMode === 'user' ? 'scaleX(-1)' : 'none'
-    await this.options.video.play()
+      facingMode === 'user' ? 'scaleX(-1)' : 'none'
+    try {
+      await this.options.video.play()
+    } catch (error) {
+      this.disposePendingStream(replacement)
+      if (this.isCurrent(generation)) {
+        this.restoreCamera(previous, previousTransform, replacement)
+      }
+      if (this.isCameraCurrent(generation, cameraOperation)) {
+        throw error
+      }
+      return 'stale'
+    }
+
+    if (!this.isCameraCurrent(generation, cameraOperation)) {
+      this.disposePendingStream(replacement)
+      if (this.isCurrent(generation)) {
+        this.restoreCamera(previous, previousTransform, replacement)
+      }
+      return 'stale'
+    }
+
+    this.pendingStreams.delete(replacement)
+    this.videoStream = replacement
+    this.facingMode = facingMode
+    if (previous && previous !== replacement) {
+      previous.getTracks().forEach((track) => track.stop())
+    }
+    return 'switched'
   }
 
   private stopCamera() {
@@ -367,6 +519,36 @@ export class LiveMedia {
     this.videoStream = null
     this.options.video.pause()
     this.options.video.srcObject = null
+  }
+
+  private restoreCamera(
+    previous: MediaStream | null,
+    previousTransform: string,
+    replacement: MediaStream,
+  ) {
+    if (this.options.video.srcObject !== replacement) return
+    this.options.video.srcObject = previous
+    this.options.video.style.transform = previousTransform
+    if (previous) void this.options.video.play().catch(() => {})
+    else this.options.video.pause()
+  }
+
+  private isCurrent(generation: number) {
+    return this.lifecycleGeneration === generation
+  }
+
+  private isCameraCurrent(generation: number, cameraOperation: number) {
+    return this.isCurrent(generation) && this.cameraGeneration === cameraOperation
+  }
+
+  private disposePendingStream(stream: MediaStream) {
+    if (!this.pendingStreams.delete(stream)) return
+    stream.getTracks().forEach((track) => track.stop())
+  }
+
+  private disposePendingContext(context: AudioContext) {
+    if (!this.pendingContexts.delete(context)) return
+    void context.close().catch(() => {})
   }
 
   captureFrame() {

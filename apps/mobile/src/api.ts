@@ -397,9 +397,11 @@ export async function assetBlob(
   server: string,
   token: string,
   contentUrl: string,
+  signal?: AbortSignal,
 ) {
   const response = await fetch(`${httpBase(server)}${contentUrl}`, {
     headers: { Authorization: `Bearer ${token}` },
+    signal,
   })
   if (!response.ok) throw new Error(`图片加载失败 (${response.status})`)
   return response.blob()

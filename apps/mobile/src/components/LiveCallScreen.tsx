@@ -49,17 +49,20 @@ function AuthenticatedArtifact({
   useEffect(() => {
     let active = true
     let objectUrl = ''
-    void assetBlob(server, accessToken, artifact.content_url)
+    const controller = new AbortController()
+    void assetBlob(server, accessToken, artifact.content_url, controller.signal)
       .then((blob) => {
         if (!active) return
         objectUrl = URL.createObjectURL(blob)
         setSource(objectUrl)
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        if (error instanceof Error && error.name === 'AbortError') return
         if (active) setSource('')
       })
     return () => {
       active = false
+      controller.abort()
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
   }, [accessToken, artifact.content_url, server])
@@ -145,7 +148,7 @@ export function LiveCallScreen({
             className="icon-button call-icon"
             type="button"
             aria-label="切换摄像头"
-            onClick={() => void onFlipCamera()}
+            onClick={() => { void onFlipCamera().catch(() => {}) }}
           >
             <CameraRotate />
           </button>

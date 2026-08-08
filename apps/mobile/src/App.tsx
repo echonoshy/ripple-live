@@ -551,9 +551,24 @@ export default function App() {
   }
 
   const flipCamera = async () => {
+    const media = mediaRef.current
+    if (!media) return
     const next = cameraFacing === 'user' ? 'environment' : 'user'
-    setCameraFacing(next)
-    await mediaRef.current?.setFacingMode(next)
+    try {
+      const outcome = await media.setFacingMode(next)
+      if (mediaRef.current !== media) return
+      if (outcome === 'stale') return
+      if (outcome === 'failed') {
+        setErrorMessage('无法切换摄像头，请重试')
+        return
+      }
+      setCameraFacing(next)
+      setErrorMessage('')
+    } catch {
+      if (mediaRef.current === media) {
+        setErrorMessage('无法切换摄像头，请重试')
+      }
+    }
   }
 
   const submitAuth = async () => {
