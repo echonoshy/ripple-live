@@ -24,6 +24,7 @@ import {
   assetBlob,
   batchConversations,
   batchMemories,
+  conversation,
   conversationMessages,
   conversationMutation,
   conversations,
@@ -64,6 +65,8 @@ import {
 import { cameraErrorAfterSwitch, visibleCallError } from './live/callErrors'
 import {
   createCallLifecycleGuard,
+  createConversationOwnership,
+  createLatestNavigationGuard,
   createSingleFlight,
 } from './live/callLifecycle'
 import { liveResultsReducer } from './live/liveResults'
@@ -212,6 +215,7 @@ export default function App() {
   const [historySelection, setHistorySelection] = useState<Set<string>>(new Set())
   const [historySelectionMode, setHistorySelectionMode] = useState(false)
   const [selectedConversation, setSelectedConversation] = useState<ConversationSummary | null>(null)
+  const [activeConversationId, setActiveConversationIdState] = useState<string | null>(null)
   const [memoryItems, setMemoryItems] = useState<VisualMemory[]>([])
   const [memoryBusy, setMemoryBusy] = useState(false)
   const [memoryError, setMemoryError] = useState('')
@@ -247,10 +251,19 @@ export default function App() {
   const sessionRef = useRef<RealtimeSession | null>(null)
   const mediaRef = useRef<LiveMedia | null>(null)
   const callLifecycleRef = useRef(createCallLifecycleGuard())
+  const conversationOwnershipRef = useRef(createConversationOwnership())
+  const navigationGuardRef = useRef(createLatestNavigationGuard())
+  const preloadedConversationIdRef = useRef<string | null>(null)
   const longPressTimerRef = useRef<number | null>(null)
   const pointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
   const todoPointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
   const suppressClickRef = useRef(false)
+
+  const navigateTo = useCallback((nextScreen: Screen) => {
+    const owner = navigationGuardRef.current.begin()
+    setScreen(nextScreen)
+    return owner
+  }, [])
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedHistoryQuery(historyQuery), 250)
@@ -301,6 +314,10 @@ export default function App() {
       .catch(() => {
         if (!active) return
         localStorage.removeItem('ripple-access-token')
+        navigationGuardRef.current.invalidate()
+        conversationOwnershipRef.current.invalidate()
+        setActiveConversationIdState(null)
+        setSelectedConversation(null)
         setAccessToken('')
         setUser(null)
       })
@@ -340,6 +357,10 @@ export default function App() {
 
   useEffect(() => {
     if (screen !== 'conversation' || !accessToken || !selectedConversation) return
+    if (preloadedConversationIdRef.current === selectedConversation.id) {
+      preloadedConversationIdRef.current = null
+      return
+    }
     let active = true
     setHistoryBusy(true)
     setHistoryError('')
@@ -460,23 +481,62 @@ export default function App() {
     () =>
       createSingleFlight(async () => {
         if (!callLifecycleRef.current.beginLeave()) return
-        setScreen('home')
+        const conversationOwner = conversationOwnershipRef.current.current()
+        const routeOwner = navigateTo('home')
+        const token = accessToken
         try {
           await stopCall()
+          if (conversationOwnershipRef.current.release(conversationOwner.owner)) {
+            setActiveConversationIdState(null)
+          }
+          if (!conversationOwner.conversationId || !token) return
+
+          try {
+            const [summary, messages] = await Promise.all([
+              conversation(server, token, conversationOwner.conversationId),
+              conversationMessages(
+                server,
+                token,
+                conversationOwner.conversationId,
+              ),
+            ])
+            if (!navigationGuardRef.current.owns(routeOwner)) return
+            setHistoryError('')
+            setHistoryBusy(false)
+            setSelectedConversation(summary)
+            setHistoryMessages(messages)
+            preloadedConversationIdRef.current = summary.id
+            setScreen('conversation')
+          } catch (error) {
+            if (!navigationGuardRef.current.owns(routeOwner)) return
+            setSelectedConversation(null)
+            setHistoryMessages([])
+            setHistoryBusy(false)
+            setHistoryError(
+              `通话已结束，但无法刷新聊天记录：${
+                error instanceof Error ? error.message : '请稍后重试'
+              }`,
+            )
+            setScreen('home')
+          }
         } finally {
           callLifecycleRef.current.finishLeave()
           setSessionState('idle')
         }
       }),
-    [stopCall],
+    [accessToken, navigateTo, server, stopCall],
   )
 
   useEffect(() => {
     const callLifecycle = callLifecycleRef.current
+    const conversationOwnership = conversationOwnershipRef.current
+    const navigationGuard = navigationGuardRef.current
     return () => {
       const media = mediaRef.current
       const session = sessionRef.current
       callLifecycle.invalidate()
+      conversationOwnership.invalidate()
+      navigationGuard.invalidate()
       mediaRef.current = null
       sessionRef.current = null
       media?.stop()
@@ -511,9 +571,21 @@ export default function App() {
       setSessionState('connecting')
 
       let session: RealtimeSession
+      const conversationOwner = conversationOwnershipRef.current.current()
       const ownsSession = () =>
         callLifecycleRef.current.owns(owner) &&
         sessionRef.current === session
+      const setActiveConversationId = (conversationId: string) => {
+        if (!ownsSession()) return
+        const confirmedConversationId =
+          conversationOwnershipRef.current.confirm(
+            conversationOwner.owner,
+            conversationId,
+          )
+        if (confirmedConversationId) {
+          setActiveConversationIdState(confirmedConversationId)
+        }
+      }
       const media = new LiveMedia({
         video: videoRef.current,
         canvas: canvasRef.current,
@@ -532,6 +604,7 @@ export default function App() {
       session = new RealtimeSession({
         server,
         accessToken,
+        conversationId: activeConversationId ?? undefined,
         mode: nextMode,
         onState: (state) => {
           if (ownsSession()) setSessionState(state)
@@ -583,7 +656,7 @@ export default function App() {
               : [...items, artifact],
           )
         },
-        onConversation: () => {},
+        onConversation: setActiveConversationId,
         onReady: async () => {
           if (!ownsSession()) return
           await media.start((audio) => {
@@ -628,7 +701,7 @@ export default function App() {
         await closing
       }
     },
-    [accessToken, cameraFacing, server],
+    [accessToken, activeConversationId, cameraFacing, server],
   )
 
   useEffect(() => {
@@ -646,27 +719,38 @@ export default function App() {
     return () => window.cancelAnimationFrame(frame)
   }, [mode, screen, startCall])
 
-  const openCall = (nextMode: RealtimeMode) => {
+  const openCall = (
+    nextMode: RealtimeMode,
+    conversationId?: string,
+  ) => {
     if (!callLifecycleRef.current.requestOpen()) return
+    const conversationOwner = conversationOwnershipRef.current.begin(conversationId)
+    setActiveConversationIdState(conversationOwner.conversationId)
+    if (!conversationOwner.conversationId) {
+      setSelectedConversation(null)
+      setHistoryMessages([])
+    }
+    setHistoryBusy(false)
+    setHistoryError('')
     setMode(nextMode)
     setSessionState('idle')
     dispatchLiveResults({ type: 'clear' })
-    setScreen('call')
+    navigateTo('call')
   }
 
   const selectTab = (tab: AppTab) => {
     switch (tab) {
       case 'chat':
-        setScreen('home')
+        navigateTo('home')
         break
       case 'memories':
-        setScreen('memories')
+        navigateTo('memories')
         break
       case 'todos':
-        setScreen('todos')
+        navigateTo('todos')
         break
       case 'profile':
-        setScreen('settings')
+        navigateTo('settings')
         break
     }
   }
@@ -737,7 +821,10 @@ export default function App() {
     localStorage.removeItem('ripple-access-token')
     setAccessToken('')
     setUser(null)
-    setScreen('home')
+    conversationOwnershipRef.current.invalidate()
+    setActiveConversationIdState(null)
+    setSelectedConversation(null)
+    navigateTo('home')
     setHistoryItems([])
     setHistoryMessages([])
     setMemoryItems([])
@@ -1007,6 +1094,18 @@ export default function App() {
         setHistoryItems((items) => items.filter((item) => !ids.includes(item.id)))
         setHistorySelection(new Set())
         setHistorySelectionMode(false)
+        if (selectedConversation && ids.includes(selectedConversation.id)) {
+          setSelectedConversation(null)
+          setHistoryMessages([])
+        }
+        const conversationOwner = conversationOwnershipRef.current.current()
+        if (
+          conversationOwner.conversationId &&
+          ids.includes(conversationOwner.conversationId)
+        ) {
+          conversationOwnershipRef.current.release(conversationOwner.owner)
+          setActiveConversationIdState(null)
+        }
       } else if (kind === 'memory') {
         if (ids.length === 1) {
           await memoryMutation(server, accessToken, ids[0], 'delete')
@@ -1181,7 +1280,8 @@ export default function App() {
         <ConversationHome
           onStartAudio={() => openCall('audio')}
           onStartVideo={() => openCall('video')}
-          onOpenHistory={() => setScreen('history')}
+          onOpenHistory={() => navigateTo('history')}
+          historyError={historyError}
         />
       )}
 
@@ -1192,7 +1292,7 @@ export default function App() {
               className="icon-button"
               type="button"
               aria-label="返回"
-              onClick={() => setScreen('home')}
+              onClick={() => navigateTo('home')}
             >
               <ArrowLeft />
             </button>
@@ -1298,8 +1398,9 @@ export default function App() {
                                 toggleSelection(setHistorySelection, item.id)
                                 return
                               }
+                              preloadedConversationIdRef.current = null
                               setSelectedConversation(item)
-                              setScreen('conversation')
+                              navigateTo('conversation')
                             }}
                           >
                             {historySelectionMode && (
@@ -1334,7 +1435,7 @@ export default function App() {
       {screen === 'todos' && (
         <section className="history-screen todo-screen">
           <header className="screen-header">
-            <button className="icon-button" type="button" aria-label="返回" onClick={() => setScreen('home')}>
+            <button className="icon-button" type="button" aria-label="返回" onClick={() => navigateTo('home')}>
               <ArrowLeft />
             </button>
             <h1>待办</h1>
@@ -1467,7 +1568,7 @@ export default function App() {
               className="icon-button"
               type="button"
               aria-label="返回"
-              onClick={() => setScreen('home')}
+              onClick={() => navigateTo('home')}
             >
               <ArrowLeft />
             </button>
@@ -1644,7 +1745,7 @@ export default function App() {
               className="icon-button"
               type="button"
               aria-label="返回聊天历史"
-              onClick={() => setScreen('history')}
+              onClick={() => navigateTo('history')}
             >
               <ArrowLeft />
             </button>
@@ -1660,6 +1761,12 @@ export default function App() {
               </button>
             </div>
             <time>{formatHistoryTime(selectedConversation.updated_at)}</time>
+            <button
+              type="button"
+              onClick={() => openCall('audio', selectedConversation.id)}
+            >
+              继续语音
+            </button>
           </div>
 
           {historyBusy && (
@@ -1709,7 +1816,7 @@ export default function App() {
               className="icon-button"
               type="button"
               aria-label="返回"
-              onClick={() => setScreen('home')}
+              onClick={() => navigateTo('home')}
             >
               <ArrowLeft />
             </button>

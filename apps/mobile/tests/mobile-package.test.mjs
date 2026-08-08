@@ -199,6 +199,7 @@ test('mobile todos retain completed items in a dedicated view', () => {
 
 test('mobile home presents voice as the primary call entry with explicit camera access', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const apiSource = readFileSync(path.join(appRoot, 'src/api.ts'), 'utf8')
   const homePath = path.join(appRoot, 'src/components/ConversationHome.tsx')
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
 
@@ -213,6 +214,10 @@ test('mobile home presents voice as the primary call entry with explicit camera 
   assert.match(homeSource, /onClick=\{onOpenHistory\}/)
   assert.match(appSource, /onStartAudio=\{\(\) => openCall\('audio'\)\}/)
   assert.match(appSource, /onStartVideo=\{\(\) => openCall\('video'\)\}/)
+  assert.match(apiSource, /export async function conversation\(/)
+  assert.match(appSource, /conversationId:\s*activeConversationId/)
+  assert.match(appSource, /onConversation:\s*setActiveConversationId/)
+  assert.match(appSource, /openCall\('audio', selectedConversation\.id\)/)
   assert.doesNotMatch(appSource, /打开镜头，开始聊聊/)
   assert.doesNotMatch(homeSource, /统计|最近对话|自动保存/)
   assert.match(cssSource, /--canvas:\s*#020406/)

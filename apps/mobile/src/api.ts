@@ -174,6 +174,20 @@ export async function conversations(
   return payload.data
 }
 
+export async function conversation(
+  server: string,
+  token: string,
+  id: string,
+) {
+  const payload = await request<{ data: ConversationSummary }>(
+    server,
+    `/v1/conversations/${encodeURIComponent(id)}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
 export async function updateConversation(
   server: string,
   token: string,

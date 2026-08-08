@@ -11,6 +11,7 @@ import {
 } from '../src/realtime/protocol.ts'
 
 type FakeSocket = {
+  url: string
   onopen: (() => void) | null
   onmessage: ((event: { data: string }) => void) | null
   onerror: (() => void) | null
@@ -37,7 +38,7 @@ function installDeferredWebSockets(t: Parameters<typeof test>[1] extends (contex
     sendResult: Promise<void> | null = null
     closes = 0
 
-    constructor(_url: string) {
+    constructor(readonly url: string) {
       sockets.push(this)
     }
 
@@ -81,10 +82,16 @@ function installDeferredWebSockets(t: Parameters<typeof test>[1] extends (contex
   return sockets
 }
 
-function connectingSession(states: string[], ready: { count: number }) {
+function connectingSession(
+  states: string[],
+  ready: { count: number },
+  conversationId?: string,
+  onConversation: (conversationId: string) => void = () => {},
+) {
   return new RealtimeSession({
     server: '127.0.0.1:8700',
     accessToken: 'test-token',
+    conversationId,
     mode: 'audio',
     onState: (state) => states.push(state),
     onError: () => {},
@@ -101,9 +108,56 @@ function connectingSession(states: string[], ready: { count: number }) {
     onReady: async () => {
       ready.count += 1
     },
-    onConversation: () => {},
+    onConversation,
   })
 }
+
+test('a new session omits conversation ownership from its realtime URL', async (t) => {
+  const sockets = installDeferredWebSockets(t)
+  const session = connectingSession([], { count: 0 })
+
+  const connecting = session.connect()
+  assert.equal(sockets.length, 1)
+  const url = new URL(sockets[0]?.url ?? '')
+  assert.equal(url.searchParams.has('conversation_id'), false)
+
+  sockets[0]?.open()
+  await connecting
+})
+
+test('a resumed session encodes its opaque conversation ID exactly once', async (t) => {
+  const sockets = installDeferredWebSockets(t)
+  const conversationId = 'conv/with ?&=% unicode 你好'
+  const session = connectingSession([], { count: 0 }, conversationId)
+
+  const connecting = session.connect()
+  assert.equal(sockets.length, 1)
+  const url = new URL(sockets[0]?.url ?? '')
+  assert.deepEqual(url.searchParams.getAll('conversation_id'), [conversationId])
+  assert.equal((sockets[0]?.url.match(/conversation_id=/g) ?? []).length, 1)
+
+  sockets[0]?.open()
+  await connecting
+})
+
+test('server conversation callbacks accept nonblank IDs and reject malformed replacements', () => {
+  const confirmed: string[] = []
+  const session = connectingSession(
+    [],
+    { count: 0 },
+    'conv_existing',
+    (conversationId) => confirmed.push(conversationId),
+  )
+  const receive = (event: Record<string, unknown>) =>
+    (session as unknown as { handleText(text: string): void }).handleText(
+      JSON.stringify(event),
+    )
+
+  receive({ type: 'session.created', conversation_id: 'conv_server' })
+  receive({ type: 'session.created', conversation_id: '  ' })
+
+  assert.deepEqual(confirmed, ['conv_server'])
+})
 
 test('close invalidates a pending browser connection and closes its late transport', async (t) => {
   const sockets = installDeferredWebSockets(t)

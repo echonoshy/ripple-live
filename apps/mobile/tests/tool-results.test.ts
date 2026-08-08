@@ -6,6 +6,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { LiveResultSheet } from '../src/components/LiveResultSheet.tsx'
 import {
   createCallLifecycleGuard,
+  createConversationOwnership,
+  createLatestNavigationGuard,
   createSingleFlight,
 } from '../src/live/callLifecycle.ts'
 import { createExternalUrlOpener } from '../src/live/externalLinks.ts'
@@ -170,6 +172,38 @@ test('a failed connect invalidates ownership without enabling an automatic retry
 
   assert.equal(lifecycle.requestOpen(), true)
   assert.notEqual(lifecycle.claimStart(), null)
+})
+
+test('conversation ownership rejects stale callbacks and stale leave cleanup', () => {
+  const ownership = createConversationOwnership()
+  const first = ownership.begin('conv_old')
+  const second = ownership.begin('conv_new')
+
+  assert.equal(ownership.confirm(first.owner, 'conv_stale'), null)
+  assert.equal(ownership.release(first.owner), false)
+  assert.deepEqual(ownership.current(), second)
+  assert.equal(ownership.confirm(second.owner, 'conv_server'), 'conv_server')
+  assert.equal(ownership.current().conversationId, 'conv_server')
+})
+
+test('new conversation ownership clears resume state and rejects blank IDs', () => {
+  const ownership = createConversationOwnership()
+  ownership.begin('conv_existing')
+
+  const fresh = ownership.begin()
+
+  assert.equal(fresh.conversationId, null)
+  assert.equal(ownership.confirm(fresh.owner, '  '), null)
+  assert.equal(ownership.current().conversationId, null)
+})
+
+test('new navigation prevents an older leave from routing afterward', () => {
+  const navigation = createLatestNavigationGuard()
+  const leaveRoute = navigation.begin()
+
+  navigation.begin()
+
+  assert.equal(navigation.owns(leaveRoute), false)
 })
 
 test('browser source opening uses a new isolated tab without replacing the call', async () => {

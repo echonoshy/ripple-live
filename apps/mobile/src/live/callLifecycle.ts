@@ -66,3 +66,59 @@ export function createCallLifecycleGuard() {
     },
   }
 }
+
+function validConversationId(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+export function createConversationOwnership() {
+  let generation = 0
+  let conversationId: string | null = null
+
+  const snapshot = () => ({ owner: generation, conversationId })
+
+  return {
+    begin(nextConversationId?: string) {
+      generation += 1
+      conversationId = validConversationId(nextConversationId)
+        ? nextConversationId
+        : null
+      return snapshot()
+    },
+    current: snapshot,
+    confirm(owner: number, nextConversationId: string) {
+      if (owner !== generation || !validConversationId(nextConversationId)) {
+        return null
+      }
+      conversationId = nextConversationId
+      return conversationId
+    },
+    release(owner: number) {
+      if (owner !== generation) return false
+      generation += 1
+      conversationId = null
+      return true
+    },
+    invalidate() {
+      generation += 1
+      conversationId = null
+    },
+  }
+}
+
+export function createLatestNavigationGuard() {
+  let generation = 0
+
+  return {
+    begin() {
+      generation += 1
+      return generation
+    },
+    owns(owner: number) {
+      return owner === generation
+    },
+    invalidate() {
+      generation += 1
+    },
+  }
+}

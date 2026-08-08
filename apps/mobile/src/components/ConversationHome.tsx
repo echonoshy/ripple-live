@@ -8,10 +8,12 @@ export function ConversationHome({
   onStartAudio,
   onStartVideo,
   onOpenHistory,
+  historyError,
 }: {
   onStartAudio(): void
   onStartVideo(): void
   onOpenHistory(): void
+  historyError?: string
 }) {
   return (
     <section className="conversation-home">
@@ -46,6 +48,11 @@ export function ConversationHome({
           <VideoCamera aria-hidden="true" />
           打开镜头
         </button>
+        {historyError && (
+          <p className="history-error" role="status">
+            {historyError}
+          </p>
+        )}
       </div>
     </section>
   )

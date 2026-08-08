@@ -188,7 +188,9 @@ export class RealtimeSession {
 
   constructor(options: SessionOptions) {
     this.options = options
-    this.conversationId = options.conversationId ?? null
+    this.conversationId = isNonBlankString(options.conversationId)
+      ? options.conversationId
+      : null
   }
 
   async connect() {
@@ -392,9 +394,22 @@ export class RealtimeSession {
 
     switch (event.type) {
       case 'session.created':
-        this.conversationId =
-          event.conversation_id ?? event.session_id ?? this.conversationId
-        if (this.conversationId) this.options.onConversation(this.conversationId)
+        if (isNonBlankString(event.conversation_id)) {
+          this.conversationId = event.conversation_id
+          this.options.onConversation(this.conversationId)
+        } else if (
+          event.conversation_id === undefined &&
+          isNonBlankString(event.session_id)
+        ) {
+          this.conversationId = event.session_id
+          this.options.onConversation(this.conversationId)
+        } else if (
+          event.conversation_id === undefined &&
+          event.session_id === undefined &&
+          this.conversationId
+        ) {
+          this.options.onConversation(this.conversationId)
+        }
         console.info('[Ripple Live] session created', {
           conversationId: this.conversationId,
         })
