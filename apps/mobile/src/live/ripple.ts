@@ -2,6 +2,9 @@ import type { VisualState } from './motion'
 
 export type RippleKind = 'speech' | 'assistant' | 'tool' | 'interrupt'
 export type RippleSignal = { id: number; kind: RippleKind }
+export type RippleSignalEmitter = {
+  emit(kind: RippleKind): RippleSignal
+}
 export type RippleInput = {
   signal: RippleSignal | null
   visualState: VisualState
@@ -25,6 +28,23 @@ export const RIPPLE_MOTION = {
 
 const HALO_PULSE_MS = 160
 const ASSISTANT_EMPHASIS_LEVEL = 0.28
+
+export function createRippleSignalEmitter(lastId = 0): RippleSignalEmitter {
+  if (!Number.isSafeInteger(lastId) || lastId < 0 || lastId > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError('Ripple signal ID must be a non-negative safe integer')
+  }
+
+  let currentId = lastId
+  return {
+    emit(kind) {
+      if (currentId === Number.MAX_SAFE_INTEGER) {
+        throw new RangeError('Ripple signal ID exceeds the safe integer range')
+      }
+      currentId += 1
+      return { id: currentId, kind }
+    },
+  }
+}
 
 export type RippleState = {
   activeKind: RippleKind | null

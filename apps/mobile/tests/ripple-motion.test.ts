@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   RIPPLE_MOTION,
   advanceRipple,
+  createRippleSignalEmitter,
   createRippleState,
   type RippleSignal,
 } from '../src/live/ripple.ts'
@@ -68,14 +69,52 @@ test('enabling reduced motion stops an active ring immediately', () => {
 
 test('tracks only the highest consumed incrementing signal ID', () => {
   let state = createRippleState()
+  const emitter = createRippleSignalEmitter()
   for (let id = 1; id <= 1000; id++) {
     state = advanceRipple(
       state,
-      { signal: signal(id, 'speech'), visualState: 'listening', outputLevel: 0, reducedMotion: false },
+      { signal: emitter.emit('speech'), visualState: 'listening', outputLevel: 0, reducedMotion: false },
       id * 1300,
     ).state
   }
 
   assert.equal(state.lastConsumedSignalId, 1000)
   assert.equal('consumedSignalIds' in state, false)
+})
+
+test('emits positive, monotonically increasing safe signal IDs', () => {
+  const emitter = createRippleSignalEmitter()
+  assert.deepEqual(emitter.emit('speech'), { id: 1, kind: 'speech' })
+  assert.deepEqual(emitter.emit('tool'), { id: 2, kind: 'tool' })
+})
+
+test('refuses to roll an emitter beyond the largest safe signal ID', () => {
+  const emitter = createRippleSignalEmitter(Number.MAX_SAFE_INTEGER - 1)
+  assert.equal(emitter.emit('speech').id, Number.MAX_SAFE_INTEGER)
+  assert.throws(() => emitter.emit('tool'), RangeError)
+})
+
+test('treats repeated and lower emitter IDs as stale', () => {
+  const emitter = createRippleSignalEmitter()
+  const first = emitter.emit('speech')
+  const second = emitter.emit('tool')
+  let state = advanceRipple(
+    createRippleState(),
+    { signal: second, visualState: 'tool', outputLevel: 0, reducedMotion: false },
+    1000,
+  ).state
+  let next = advanceRipple(
+    state,
+    { signal: first, visualState: 'listening', outputLevel: 0, reducedMotion: false },
+    2300,
+  )
+  assert.equal(next.frame.kind, null)
+  assert.equal(next.state.lastConsumedSignalId, second.id)
+
+  next = advanceRipple(
+    next.state,
+    { signal: second, visualState: 'tool', outputLevel: 0, reducedMotion: false },
+    3600,
+  )
+  assert.equal(next.frame.kind, null)
 })
