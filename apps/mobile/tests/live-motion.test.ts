@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   captionTextForState,
@@ -109,6 +110,46 @@ test('uses approved motion timing', () => {
     cameraMs: 420,
     captionHoldMs: 1800,
   })
+})
+
+test('live orb uses the compact state scale ranges and RMS inputs', () => {
+  const cssSource = readFileSync(
+    new URL('../src/live/LiveCall.css', import.meta.url),
+    'utf8',
+  )
+  const callSource = readFileSync(
+    new URL('../src/components/LiveCallScreen.tsx', import.meta.url),
+    'utf8',
+  )
+
+  assert.match(cssSource, /width:\s*188px/)
+  assert.match(
+    cssSource,
+    /@keyframes live-orb-idle-breath\s*\{\s*from\s*\{[^}]*scale\(0\.965\)[^}]*\}\s*to\s*\{[^}]*scale\(1\.025\)/,
+  )
+  assert.match(cssSource, /animation:\s*live-orb-idle-breath 4\.2s/)
+  assert.match(
+    cssSource,
+    /@keyframes live-orb-connecting\s*\{\s*from\s*\{[^}]*scale\(0\.92\)[^}]*\}\s*to\s*\{[^}]*scale\(0\.96\)/,
+  )
+  assert.match(
+    cssSource,
+    /@keyframes live-orb-thinking\s*\{\s*from\s*\{[^}]*scale\(0\.94\)[^}]*\}\s*to\s*\{[^}]*scale\(0\.98\)/,
+  )
+  assert.match(
+    cssSource,
+    /@keyframes live-orb-tool\s*\{\s*from\s*\{[^}]*translateY\(-32px\) scale\(0\.68\)[^}]*\}\s*to\s*\{[^}]*translateY\(-32px\) scale\(0\.72\)/,
+  )
+  assert.match(cssSource, /is-listening[^}]*scale\(var\(--live-input-scale\)\)/)
+  assert.match(cssSource, /is-speaking[^}]*scale\(var\(--live-output-scale\)\)/)
+  assert.match(
+    cssSource,
+    /@keyframes live-orb-interrupt-release\s*\{\s*0%\s*\{[^}]*scale\(1\.04\)[^}]*\}\s*55%\s*\{[^}]*scale\(0\.92\)[^}]*\}\s*100%\s*\{[^}]*scale\(1\)/,
+  )
+  assert.match(cssSource, /is-interruption-release[^}]*160ms/)
+  assert.match(cssSource, /is-error[^}]*saturate\([^)]*\)[^}]*scale\(0\.92\)/)
+  assert.match(callSource, /0\.98 \+ clampLevel\(inputLevel\) \* 0\.065/)
+  assert.match(callSource, /0\.96 \+ clampLevel\(outputLevel\) \* 0\.115/)
 })
 
 test('uses the interruption release only for speaking-to-listening', () => {

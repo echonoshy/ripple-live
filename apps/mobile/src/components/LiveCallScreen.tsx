@@ -1,16 +1,17 @@
 import {
   CameraRotate,
+  CaretDown,
   Microphone,
   MicrophoneSlash,
-  PhoneDisconnect,
   VideoCamera,
   VideoCameraSlash,
   X,
 } from '@phosphor-icons/react'
-import { useEffect, useState, type RefObject } from 'react'
+import { useEffect, useState, type CSSProperties, type RefObject } from 'react'
 import { assetBlob } from '../api'
 import { mapSessionState } from '../live/motion'
 import type { CameraPhase } from '../live/cameraOrchestration'
+import type { RippleSignal } from '../live/ripple'
 import type {
   RealtimeMode,
   ResponseArtifact,
@@ -25,19 +26,24 @@ import { LiveResultSheet } from './LiveResultSheet'
 const stateLabels: Record<SessionState, string> = {
   idle: '准备就绪',
   connecting: '正在连接',
-  preparing: '正在准备模型',
-  listening: '正在聆听',
-  thinking: '正在思考',
-  using_tool: '正在使用工具',
-  speaking: '正在回答',
+  preparing: '准备中',
+  listening: '我在听',
+  thinking: '想一想',
+  using_tool: '处理中',
+  speaking: '',
   ended: '通话已结束',
-  error: '连接异常',
+  error: '连接断开',
 }
 
 function formatDuration(seconds: number) {
   const minutes = Math.floor(seconds / 60)
   const rest = seconds % 60
   return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
+}
+
+function clampLevel(level: number) {
+  if (!Number.isFinite(level)) return 0
+  return Math.min(1, Math.max(0, level))
 }
 
 function AuthenticatedArtifact({
@@ -87,6 +93,7 @@ export type LiveCallScreenProps = {
   muted: boolean
   inputLevel: number
   outputLevel: number
+  rippleSignal: RippleSignal | null
   userText: string
   assistantText: string
   toolStatus: string
@@ -115,6 +122,7 @@ export function LiveCallScreen({
   muted,
   inputLevel,
   outputLevel,
+  rippleSignal,
   userText,
   assistantText,
   toolStatus,
@@ -136,24 +144,15 @@ export function LiveCallScreen({
   const stateDetail = state === 'using_tool' && toolStatus
     ? toolStatus
     : stateLabels[state]
-  const cameraStatus = frameRequestActive && cameraPhase === 'on'
-    ? '正在识别'
-    : cameraPhase === 'opening'
+  const cameraStatus = cameraPhase === 'opening'
       ? '正在开启镜头'
       : cameraPhase === 'on'
         ? '镜头已开启'
-        : cameraPhase === 'closing'
-          ? '正在关闭镜头'
-          : cameraPhase === 'error' && cameraPreviewVisible
-            ? '镜头状态待同步'
-            : stateDetail
-  const statusClass = state === 'error'
-    ? 'is-error'
-    : state === 'speaking'
-      ? 'is-speaking'
-      : state === 'idle' || state === 'ended'
-        ? ''
-        : 'is-live'
+        : stateDetail
+  const orbStyle = {
+    '--live-input-scale': 0.98 + clampLevel(inputLevel) * 0.065,
+    '--live-output-scale': 0.96 + clampLevel(outputLevel) * 0.115,
+  } as CSSProperties
   return (
     <section
       className={`call-screen live-call-screen ${videoMode ? 'has-video' : 'has-audio'} server-${mode} camera-phase-${cameraPhase} ${results.length > 0 ? 'has-results' : ''}`}
@@ -176,21 +175,19 @@ export function LiveCallScreen({
       )}
 
       <header className="call-header">
-        <span className="call-mode">
-          {cameraPhase === 'opening'
-            ? '正在开启镜头'
-            : cameraPhase === 'on'
-              ? '镜头已开启'
-              : cameraPhase === 'closing'
-                ? '正在关闭镜头'
-                : cameraPhase === 'error' && videoMode
-                  ? '镜头待同步'
-                  : '语音'} · 智能响应
-        </span>
-        <div className={`call-status ${statusClass}`} role="status">
-          <span aria-hidden="true" />
-          <strong>{stateDetail}</strong>
-          <small aria-hidden="true">{formatDuration(elapsed)}</small>
+        <button
+          className="icon-button call-icon call-collapse"
+          type="button"
+          aria-label="收起通话"
+          onClick={() => void onLeave()}
+        >
+          <CaretDown aria-hidden="true" />
+        </button>
+        <div className="call-title">
+          <strong>Ripple</strong>
+          <span aria-label={`通话时长 ${formatDuration(elapsed)}`}>
+            {formatDuration(elapsed)}
+          </span>
         </div>
         {cameraPhase === 'on' ? (
           <button
@@ -199,22 +196,27 @@ export function LiveCallScreen({
             aria-label="切换摄像头"
             onClick={() => { void onFlipCamera().catch(() => {}) }}
           >
-            <CameraRotate />
+            <CameraRotate aria-hidden="true" />
           </button>
         ) : <span className="header-spacer" />}
       </header>
 
       <div className="live-stage">
-        <div className="live-orb-wrap">
+        <div className="live-orb-wrap" style={orbStyle}>
           <LiveOrb
             state={mapSessionState(state)}
             inputLevel={inputLevel}
             outputLevel={outputLevel}
+            rippleSignal={rippleSignal}
           />
         </div>
 
         <div className="live-feedback">
-          <span className="live-state-label">{cameraStatus}</span>
+          {cameraStatus && (
+            <span className="live-state-label" role="status">
+              {cameraStatus}
+            </span>
+          )}
           <LiveCaption
             userText={userText}
             assistantText={assistantText}
@@ -250,62 +252,47 @@ export function LiveCallScreen({
       )}
 
       <footer className="call-controls">
-        <div className="control-item">
-          <button
-            className={`control-button ${muted ? 'is-active' : ''}`}
-            type="button"
-            aria-label={muted ? '取消静音' : '静音'}
-            onClick={onToggleMute}
-          >
-            {muted ? <MicrophoneSlash /> : <Microphone />}
-          </button>
-          <span>{muted ? '取消静音' : '静音'}</span>
-        </div>
-        <div className="control-item">
-          <button
-            className={`control-button camera-control ${videoMode ? 'is-active' : ''}`}
-            type="button"
-            aria-label={
-              !cameraControlReady
-                ? '镜头尚未就绪'
-                : cameraBusy
-                ? cameraStatus
-                : videoMode
-                  ? '关闭镜头'
-                  : cameraPhase === 'error'
-                    ? '重试镜头'
-                    : '开启镜头'
-            }
-            disabled={!cameraControlReady || cameraBusy}
-            onClick={() => { void onToggleCamera().catch(() => {}) }}
-          >
-            {videoMode ? <VideoCameraSlash /> : <VideoCamera />}
-          </button>
-          <span>
-            {!cameraControlReady
-              ? '准备中'
+        <button
+          className={`control-button camera-control ${videoMode ? 'is-active' : ''}`}
+          type="button"
+          aria-label={
+            !cameraControlReady
+              ? '镜头尚未就绪'
               : cameraPhase === 'opening'
-              ? '开启中'
-              : cameraPhase === 'closing'
-                ? '关闭中'
-                : cameraPhase === 'error'
-                  ? '重试'
+                ? '正在开启镜头'
+                : cameraPhase === 'closing'
+                  ? '正在关闭镜头'
                   : videoMode
                     ? '关闭镜头'
-                    : '开启镜头'}
-          </span>
-        </div>
-        <div className="control-item">
-          <button
-            className="end-button"
-            type="button"
-            aria-label="结束通话"
-            onClick={() => void onLeave()}
-          >
-            <PhoneDisconnect weight="fill" />
-          </button>
-          <span>结束</span>
-        </div>
+                    : cameraPhase === 'error'
+                      ? '重试镜头'
+                      : '开启镜头'
+          }
+          disabled={!cameraControlReady || cameraBusy}
+          onClick={() => { void onToggleCamera().catch(() => {}) }}
+        >
+          {videoMode
+            ? <VideoCameraSlash aria-hidden="true" />
+            : <VideoCamera aria-hidden="true" />}
+        </button>
+        <button
+          className={`control-button ${muted ? 'is-active' : ''}`}
+          type="button"
+          aria-label={muted ? '取消静音' : '静音'}
+          onClick={onToggleMute}
+        >
+          {muted
+            ? <MicrophoneSlash aria-hidden="true" />
+            : <Microphone aria-hidden="true" />}
+        </button>
+        <button
+          className="end-button"
+          type="button"
+          aria-label="结束通话"
+          onClick={() => void onLeave()}
+        >
+          <X weight="bold" aria-hidden="true" />
+        </button>
       </footer>
     </section>
   )

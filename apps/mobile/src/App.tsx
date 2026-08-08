@@ -83,6 +83,7 @@ import {
 } from './live/callLifecycle'
 import { liveResultsReducer } from './live/liveResults'
 import { createMinimumVisibleSignal } from './live/frameRequestVisibility'
+import { createRippleSignal, type RippleSignal } from './live/ripple'
 import { LiveMedia } from './media/LiveMedia'
 import { notifyDueTodos } from './reminders'
 import {
@@ -262,6 +263,7 @@ export default function App() {
   const [renameError, setRenameError] = useState('')
   const [liveArtifacts, setLiveArtifacts] = useState<ResponseArtifact[]>([])
   const [liveResults, dispatchLiveResults] = useReducer(liveResultsReducer, [])
+  const [rippleSignal, setRippleSignal] = useState<RippleSignal | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -702,6 +704,7 @@ export default function App() {
       setToolStatus('')
       setLiveArtifacts([])
       dispatchLiveResults({ type: 'clear' })
+      setRippleSignal(null)
       setElapsed(0)
       setMuted(false)
       setInputLevel(0)
@@ -801,6 +804,7 @@ export default function App() {
         onToolResult: (event) => {
           if (!ownsSession()) return
           dispatchLiveResults({ type: 'add', result: parseLiveResult(event) })
+          setRippleSignal(createRippleSignal('tool'))
         },
         onAudio: (audio) => {
           if (ownsSession()) media.enqueueOutput(audio)
@@ -809,7 +813,9 @@ export default function App() {
           if (ownsSession()) media.finishOutput()
         },
         onInterrupted: () => {
-          if (ownsSession()) media.clearOutput()
+          if (!ownsSession()) return
+          media.clearOutput()
+          setRippleSignal(createRippleSignal('interrupt'))
         },
         onFrameRequested: () =>
           ownsSession() ? media.captureFrame() : null,
@@ -835,6 +841,7 @@ export default function App() {
             if (!ownsSession()) return
             setUserText('')
             setAssistantText('')
+            setRippleSignal(createRippleSignal('speech'))
             void session.speechStarted()
           }, () => {
             if (ownsSession()) void session.speechPaused()
@@ -976,6 +983,7 @@ export default function App() {
     setCameraErrorMessage('')
     setSessionState('idle')
     dispatchLiveResults({ type: 'clear' })
+    setRippleSignal(null)
     navigateTo('call')
   }
 
@@ -2192,6 +2200,7 @@ export default function App() {
           muted={muted}
           inputLevel={inputLevel}
           outputLevel={outputLevel}
+          rippleSignal={rippleSignal}
           userText={userText}
           assistantText={assistantText}
           toolStatus={toolStatus}

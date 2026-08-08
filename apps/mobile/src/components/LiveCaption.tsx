@@ -31,8 +31,13 @@ export function LiveCaption({ userText, assistantText, state }: LiveCaptionProps
   }, [assistantText, source, text, userText])
 
   return (
-    <div className="live-caption" aria-live="polite" aria-atomic="true">
+    <p
+      className="live-caption"
+      data-caption-source={visible ? source : undefined}
+      aria-live="polite"
+      aria-atomic="true"
+    >
       {visible}
-    </div>
+    </p>
   )
 }

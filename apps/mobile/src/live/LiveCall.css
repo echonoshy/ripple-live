@@ -1,19 +1,24 @@
 .live-orb-canvas,
 .live-orb-fallback {
   display: block;
-  width: min(76vw, 360px);
-  max-width: 100%;
+  width: 188px;
+  max-width: calc(100vw - 64px);
   aspect-ratio: 1;
   border-radius: 50%;
   background: transparent;
   opacity: 1;
-  transform: scale(0.94);
+  transform: scale(1);
   transform-origin: center;
   transition:
     transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
     opacity 280ms cubic-bezier(0.22, 1, 0.36, 1),
     filter 280ms cubic-bezier(0.22, 1, 0.36, 1);
   will-change: transform, opacity, filter;
+}
+
+.live-orb-canvas.is-idle,
+.live-orb-fallback.is-idle {
+  animation: live-orb-idle-breath 4.2s ease-in-out infinite alternate;
 }
 
 .live-orb-fallback {
@@ -39,36 +44,37 @@
 .live-orb-canvas.is-connecting,
 .live-orb-fallback.is-connecting {
   opacity: 0.82;
-  transform: scale(0.88);
+  animation: live-orb-connecting 1.8s ease-in-out infinite alternate;
 }
 
 .live-orb-canvas.is-listening,
 .live-orb-fallback.is-listening {
   filter: brightness(1.06);
-  transform: scale(1);
+  transform: scale(var(--live-input-scale));
 }
 
 .live-orb-canvas.is-interruption-release,
 .live-orb-fallback.is-interruption-release {
   transition-duration: 160ms;
+  animation: live-orb-interrupt-release 160ms ease-out both;
 }
 
 .live-orb-canvas.is-thinking,
 .live-orb-fallback.is-thinking {
   filter: brightness(0.92);
-  transform: scale(0.86);
+  animation: live-orb-thinking 2.2s ease-in-out infinite alternate;
 }
 
 .live-orb-canvas.is-tool,
 .live-orb-fallback.is-tool {
   filter: brightness(0.88);
-  transform: translateY(-12%) scale(0.65);
+  animation: live-orb-tool 1.4s ease-in-out infinite alternate;
 }
 
 .live-orb-canvas.is-speaking,
 .live-orb-fallback.is-speaking {
   filter: brightness(1.12);
-  transform: scale(1.04);
+  transform: scale(var(--live-output-scale));
 }
 
 .live-orb-canvas.is-ended,
@@ -80,7 +86,61 @@
 .live-orb-canvas.is-error,
 .live-orb-fallback.is-error {
   filter: saturate(0.42) brightness(0.82);
-  transform: scale(0.9);
+  transform: scale(0.92);
+}
+
+@keyframes live-orb-idle-breath {
+  from {
+    transform: scale(0.965);
+  }
+
+  to {
+    transform: scale(1.025);
+  }
+}
+
+@keyframes live-orb-connecting {
+  from {
+    transform: scale(0.92);
+  }
+
+  to {
+    transform: scale(0.96);
+  }
+}
+
+@keyframes live-orb-thinking {
+  from {
+    transform: scale(0.94);
+  }
+
+  to {
+    transform: scale(0.98);
+  }
+}
+
+@keyframes live-orb-tool {
+  from {
+    transform: translateY(-32px) scale(0.68);
+  }
+
+  to {
+    transform: translateY(-32px) scale(0.72);
+  }
+}
+
+@keyframes live-orb-interrupt-release {
+  0% {
+    transform: scale(1.04);
+  }
+
+  55% {
+    transform: scale(0.92);
+  }
+
+  100% {
+    transform: scale(1);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -88,6 +148,7 @@
   .live-orb-fallback,
   .live-orb-canvas[class*='is-'],
   .live-orb-fallback[class*='is-'] {
+    animation: none;
     transform: none;
     transition-property: opacity, filter;
   }
@@ -177,63 +238,27 @@
   z-index: 3;
   display: grid;
   grid-template-columns: 1fr auto 1fr;
-  align-items: start;
-  min-height: 52px;
-}
-
-.live-call-screen .call-mode {
-  padding-top: 12px;
-  color: rgb(238 237 232 / 62%);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.live-call-screen .call-status {
-  display: grid;
-  grid-template-columns: auto minmax(0, auto);
   align-items: center;
-  column-gap: 7px;
-  min-width: 116px;
-  max-width: min(54vw, 220px);
-  padding: 8px 14px;
-  border: 1px solid rgb(255 255 255 / 12%);
-  border-radius: 18px;
-  background: rgb(16 16 20 / 76%);
-  text-align: left;
-  backdrop-filter: blur(18px);
+  min-height: 44px;
 }
 
-.live-call-screen .call-status > span {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: rgb(238 237 232 / 42%);
+.live-call-screen .call-title {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  line-height: 1;
 }
 
-.live-call-screen .call-status.is-live > span,
-.live-call-screen .call-status.is-speaking > span {
-  background: #9bc3ff;
+.live-call-screen .call-title strong {
+  font-size: 14px;
+  font-weight: 680;
+  letter-spacing: -0.01em;
 }
 
-.live-call-screen .call-status.is-error > span {
-  background: #ed687a;
-}
-
-.live-call-screen .call-status strong {
-  overflow: hidden;
-  font-size: 12px;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.live-call-screen .call-status small {
-  grid-column: 1 / -1;
-  margin-top: 3px;
+.live-call-screen .call-title span {
   color: rgb(238 237 232 / 62%);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
-  text-align: center;
 }
 
 .live-call-screen .call-icon {
@@ -248,6 +273,10 @@
   backdrop-filter: blur(18px);
 }
 
+.live-call-screen .call-collapse {
+  justify-self: start;
+}
+
 .live-stage {
   position: relative;
   z-index: 2;
@@ -257,13 +286,13 @@
   align-items: center;
   justify-content: center;
   min-height: 0;
-  padding: 20px 0 172px;
+  padding: 0 0 88px;
   transform-origin: center;
   transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .live-call-screen.has-results .live-stage {
-  transform: translateY(-28px) scale(0.94);
+  transform: translateY(-28px);
 }
 
 .has-video .live-stage {
@@ -272,12 +301,12 @@
 
 .live-orb-wrap {
   display: grid;
-  flex: 1;
+  flex: 0 0 auto;
   place-items: center;
   width: 100%;
   min-height: 0;
   opacity: 1;
-  transform: scale(1);
+  transform: translateY(-18px);
   transition:
     opacity 420ms cubic-bezier(0.22, 1, 0.36, 1),
     transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -286,43 +315,40 @@
 
 .live-call-screen.has-video .live-orb-wrap {
   opacity: 0;
-  transform: scale(0.88);
+  transform: translateY(-18px) scale(0.88);
   pointer-events: none;
 }
 
 .live-feedback {
-  width: 100%;
-  min-height: 74px;
+  width: min(100%, 360px);
+  min-height: 58px;
+  margin-top: 10px;
   text-align: center;
 }
 
 .live-state-label {
   display: block;
   color: rgb(238 237 232 / 64%);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 650;
   letter-spacing: 0.02em;
 }
 
 .live-caption {
-  min-height: 32px;
-  margin-top: 8px;
+  min-height: 26px;
+  margin: 7px 0 0;
   overflow: hidden;
   color: #f5f4f0;
-  font-size: clamp(16px, 4.6vw, 21px);
-  font-weight: 650;
-  line-height: 1.5;
+  font-size: clamp(15px, 4.2vw, 17px);
+  font-weight: 620;
+  line-height: 1.45;
   text-overflow: ellipsis;
   text-shadow: 0 2px 18px rgb(0 0 0 / 72%);
   white-space: nowrap;
 }
 
 .has-video .live-feedback {
-  padding: 14px 16px;
-  border: 1px solid rgb(255 255 255 / 12%);
-  border-radius: 18px;
-  background: rgb(6 9 12 / 56%);
-  backdrop-filter: blur(18px);
+  margin-bottom: 4px;
 }
 
 .live-error {
@@ -346,7 +372,7 @@
   z-index: 4;
   top: calc(max(18px, env(safe-area-inset-top)) + 74px);
   right: 18px;
-  bottom: calc(max(14px, env(safe-area-inset-bottom)) + 104px);
+  bottom: calc(max(14px, env(safe-area-inset-bottom)) + 72px);
   left: 18px;
   display: flex;
   flex-direction: column;
@@ -620,36 +646,21 @@
   bottom: max(14px, env(safe-area-inset-bottom));
   left: 18px;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: center;
-  gap: 14px;
-  min-height: 88px;
-  padding: 10px 20px 8px;
-  border: 1px solid rgb(255 255 255 / 12%);
-  border-radius: 30px;
-  background: rgb(16 16 20 / 82%);
-  backdrop-filter: blur(18px);
-}
-
-.live-call-screen .control-item {
-  display: grid;
-  justify-items: center;
-  width: 68px;
-  gap: 6px;
-}
-
-.live-call-screen .control-item > span {
-  color: rgb(238 237 232 / 62%);
-  font-size: 10px;
+  gap: 22px;
+  min-height: 50px;
 }
 
 .live-call-screen .control-button,
 .live-call-screen .end-button {
   display: grid;
   place-items: center;
+  width: 50px;
+  height: 50px;
   min-width: 44px;
   min-height: 44px;
-  border-radius: 18px;
+  border-radius: 50%;
   color: #f5f4f0;
   font-size: 22px;
   transition:
@@ -658,8 +669,6 @@
 }
 
 .live-call-screen .control-button {
-  width: 52px;
-  height: 52px;
   border: 1px solid rgb(255 255 255 / 12%);
   background: rgb(21 24 33 / 88%);
 }
@@ -675,12 +684,10 @@
 }
 
 .live-call-screen .end-button {
-  width: 58px;
-  height: 58px;
   border: 0;
   background: #ed687a;
   color: #fff6e9;
-  font-size: 25px;
+  font-size: 23px;
 }
 
 .live-call-screen .control-button:focus-visible,
@@ -697,12 +704,7 @@
 
 @media (max-height: 700px) {
   .live-stage {
-    padding-top: 8px;
-  }
-
-  .live-orb-canvas,
-  .live-orb-fallback {
-    width: min(60vw, 260px);
+    padding-bottom: 76px;
   }
 }
 
