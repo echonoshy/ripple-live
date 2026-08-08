@@ -199,6 +199,17 @@ function todoDateInputValue(dueAt: number | null) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
+function notificationPermissionLabel() {
+  try {
+    if (typeof Notification === 'undefined') return '当前环境不可查询'
+    if (Notification.permission === 'granted') return '已允许'
+    if (Notification.permission === 'denied') return '已拒绝'
+    return '尚未询问'
+  } catch {
+    return '当前环境不可查询'
+  }
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home')
   const [mode, setMode] = useState<RealtimeMode>('audio')
@@ -1295,6 +1306,7 @@ export default function App() {
           timestamp: item.captured_at ?? item.created_at,
           isPinned: item.is_pinned,
           archivedAt: item.archived_at,
+          hasCover: Boolean(item.cover),
         }))
         .filter((item) => matchesLibraryQuery(item, memoryQuery)),
     [memoryItems, memoryQuery],
@@ -1826,7 +1838,6 @@ export default function App() {
               <Plus />
             </button>
           </header>
-          <p className="todo-intro">管理日常事项、提醒和完成记录。完成后会归档在“已完成”中；向右滑动事项可删除，点击编辑可调整标题或提醒时间。</p>
           <div className="todo-toolbar">
             <div className="todo-view-switch" role="tablist" aria-label="待办状态">
               <button
@@ -1836,7 +1847,7 @@ export default function App() {
                 aria-selected={todoView === 'active'}
                 onClick={() => setTodoView('active')}
               >
-                待处理
+                进行中
               </button>
               <button
                 className={todoView === 'completed' ? 'is-active' : ''}
@@ -1885,7 +1896,7 @@ export default function App() {
                   <button className="todo-swipe-delete danger-action" type="button" onClick={() => setDeleteRequest({ kind: 'todo', ids: [todo.id] })}>
                     <Trash aria-hidden="true" /> 删除
                   </button>
-                  <div className="todo-card todo-card-surface">
+                  <div className={`todo-card todo-card-surface ${todoView === 'completed' ? 'is-completed' : ''}`}>
                     <button
                       className="todo-complete"
                       type="button"
@@ -1900,16 +1911,16 @@ export default function App() {
                       <span className="todo-cover todo-text-cover"><CheckCircle /></span>
                     )}
                     <div className="todo-copy">
-                      <div className="todo-title-row">
-                        <strong>{todo.title}</strong>
-                        <button className="todo-edit" type="button" aria-label={`编辑：${todo.title}`} onClick={() => setTodoEditor({ todo, title: todo.title, dueAt: todoDateInputValue(todo.due_at) })}>
-                          <NotePencil />
-                        </button>
-                      </div>
+                      <strong>{todo.title}</strong>
                       {todo.visual_summary && <p>{todo.visual_summary}</p>}
+                    </div>
+                    <div className="todo-row-meta">
                       <time className={todo.due_at && todo.due_at < Date.now() / 1000 && todoView === 'active' ? 'is-overdue' : ''}>
                         {todoView === 'completed' && todo.completed_at ? `完成：${formatHistoryTime(todo.completed_at)}` : todoDueLabel(todo.due_at)}
                       </time>
+                      <button className="todo-edit" type="button" aria-label={`编辑：${todo.title}`} onClick={() => setTodoEditor({ todo, title: todo.title, dueAt: todoDateInputValue(todo.due_at) })}>
+                        <NotePencil />
+                      </button>
                     </div>
                   </div>
                 </article>
@@ -1935,7 +1946,7 @@ export default function App() {
               {todoEditor.dueAt && <button type="button" onClick={() => setTodoEditor({ ...todoEditor, dueAt: '' })}>清除提醒</button>}
               <span />
               <button type="button" onClick={() => setTodoEditor(null)}>取消</button>
-              <button className="primary-button" type="button" onClick={() => void saveTodo()}>保存</button>
+              <button className="primary-button" type="button" disabled={!todoEditor.title.trim()} onClick={() => void saveTodo()}>保存</button>
             </div>
           </section>
         </div>
@@ -1998,7 +2009,7 @@ export default function App() {
           {!memoryBusy && !memoryError && memoryGroups.length === 0 && (
             <div className="history-empty">
               <ImagesSquare />
-              <h2>{memoryQuery ? '没有找到相关记忆' : memoryScope === 'archived' ? '还没有归档记忆' : memoryScope === 'pinned' ? '还没有置顶记忆' : '还没有保存记忆'}</h2>
+              <h2>{memoryQuery ? '没有找到相关记忆' : memoryScope === 'archived' ? '还没有归档记忆' : memoryScope === 'pinned' ? '还没有置顶记忆' : memoryScope === 'images' ? '还没有图片记忆' : '还没有保存记忆'}</h2>
               <p>{memoryQuery ? '试试搜索物品、地点或备注里的关键词。' : '视频通话时说“帮我记住这个”，我会保存当时的内容和画面。'}</p>
               {memoryQuery ? (
                 <button type="button" onClick={() => setMemoryQuery('')}>清除搜索</button>
@@ -2062,6 +2073,7 @@ export default function App() {
                             {memory.is_pinned && <PushPin className="memory-pin" weight="fill" aria-label="已置顶" />}
                             <span className="memory-card-body">
                               <strong>{memory.user_note || '未命名记忆'}</strong>
+                              {memory.visual_summary && <span className="memory-card-note">{memory.visual_summary}</span>}
                               <time>{formatHistoryTime(memory.captured_at ?? memory.created_at)}</time>
                             </span>
                           </button>
@@ -2104,7 +2116,7 @@ export default function App() {
                 <div className="memory-actions">
                   {editingMemoryId === selectedMemory.id ? (
                     <>
-                      <button type="button" onClick={() => void saveMemoryEdit(selectedMemory.id)}>保存</button>
+                      <button type="button" disabled={!memoryDraft.trim()} onClick={() => void saveMemoryEdit(selectedMemory.id)}>保存</button>
                       <button type="button" onClick={() => { setEditingMemoryId(null); setMemoryDraft('') }}>取消</button>
                     </>
                   ) : (
@@ -2202,7 +2214,7 @@ export default function App() {
       )}
 
       {screen === 'settings' && (
-        <section className="settings-screen">
+        <section className="settings-screen profile-screen">
           <header className="screen-header">
             <button
               className="icon-button"
@@ -2212,17 +2224,54 @@ export default function App() {
             >
               <ArrowLeft />
             </button>
-            <h1>账户设置</h1>
+            <h1>我的</h1>
             <span className="header-spacer" />
           </header>
 
-          <div className="account-panel">
-            <div>
-              <span>当前账号</span>
-              <strong>{user.email}</strong>
-            </div>
-            <button type="button" onClick={() => void signOut()}>
-              <SignOut />
+          <div className="profile-groups">
+            <section className="profile-section" aria-labelledby="profile-account-heading">
+              <h2 id="profile-account-heading">账户与连接</h2>
+              <dl className="profile-info-list">
+                <div className="profile-info-row">
+                  <dt>当前账号</dt>
+                  <dd>{user.email}</dd>
+                </div>
+                <div className="profile-info-row">
+                  <dt>连接服务</dt>
+                  <dd>{server}</dd>
+                </div>
+                <div className="profile-info-row">
+                  <dt>通知权限</dt>
+                  <dd>{notificationPermissionLabel()}</dd>
+                </div>
+              </dl>
+            </section>
+
+            <section className="profile-section" aria-labelledby="profile-experience-heading">
+              <h2 id="profile-experience-heading">通话体验</h2>
+              <div className="profile-copy-row">
+                <strong>实时字幕</strong>
+                <p>通话时自动显示你和 Ripple 正在说的内容。</p>
+              </div>
+              <button className="profile-navigation-row" type="button" onClick={() => navigateTo('memories')}>
+                <span>
+                  <strong>视觉记忆</strong>
+                  <small>查看通话中保存的画面与备注</small>
+                </span>
+                <ImagesSquare aria-hidden="true" />
+              </button>
+            </section>
+
+            <section className="profile-section" aria-labelledby="profile-privacy-heading">
+              <h2 id="profile-privacy-heading">数据使用</h2>
+              <div className="profile-copy-row">
+                <strong>麦克风与相机</strong>
+                <p>麦克风音频仅用于实时对话；相机画面只在你开启视频或 Ripple 请求画面时发送到已连接服务。</p>
+              </div>
+            </section>
+
+            <button className="profile-logout" type="button" onClick={() => void signOut()}>
+              <SignOut aria-hidden="true" />
               退出登录
             </button>
           </div>
@@ -2278,9 +2327,19 @@ export default function App() {
           >
             <span className="confirm-dialog-mark"><Trash aria-hidden="true" /></span>
             <h2 id="delete-dialog-title">
-              删除{deleteRequest.ids.length > 1 ? `${deleteRequest.ids.length} 项` : deleteRequest.kind === 'history' ? '这段对话' : '这条记忆'}？
+              删除{deleteRequest.ids.length > 1
+                ? `${deleteRequest.ids.length} 项`
+                : deleteRequest.kind === 'history'
+                  ? '这段对话'
+                  : deleteRequest.kind === 'todo' ? '这条待办' : '这条记忆'}？
             </h2>
-            <p id="delete-dialog-description">删除后无法恢复。视觉记忆与聊天记录会分别保留，不会连带删除。</p>
+            <p id="delete-dialog-description">
+              {deleteRequest.kind === 'todo'
+                ? '删除后无法恢复，提醒和完成记录也会一并移除。'
+                : deleteRequest.kind === 'history'
+                  ? '删除后无法恢复，但视觉记忆和待办会分别保留。'
+                  : '删除后无法恢复，但不会删除关联的聊天记录。'}
+            </p>
             <div>
               <button type="button" onClick={() => setDeleteRequest(null)}>取消</button>
               <button className="danger-action" type="button" autoFocus onClick={() => void confirmDelete()}>确认删除</button>

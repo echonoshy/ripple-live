@@ -193,8 +193,9 @@ test('mobile todos retain completed items in a dedicated view', () => {
 
   assert.match(appSource, /const \[todoView, setTodoView\] = useState<'active' \| 'completed'>\('active'\)/)
   assert.match(appSource, /todos\(server, accessToken, todoView === 'completed'\)/)
+  assert.match(appSource, /\n\s*进行中\n\s*<\/button>/)
   assert.match(appSource, /\n\s*已完成\n\s*<\/button>/)
-  assert.match(appSource, /完成后会归档在“已完成”中/)
+  assert.doesNotMatch(appSource, /className="todo-intro"/)
   assert.match(appSource, /完成：\$\{formatHistoryTime\(todo\.completed_at\)\}/)
   assert.match(cssSource, /\.todo-view-switch/)
 })
@@ -796,6 +797,67 @@ test('mobile libraries expose accessible shared management controls', () => {
   assert.match(cssSource, /\.library-region\s*{[^}]*margin-top:\s*24px/s)
   assert.match(cssSource, /\.history-list \.history-row\s*{[^}]*min-height:\s*64px/s)
   assert.match(cssSource, /\.memory-library-grid\s*{[^}]*gap:\s*8px/s)
+})
+
+test('supporting screens use truthful content and the shared warm hierarchy', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
+  const toolbarSource = readFileSync(
+    path.join(appRoot, 'src/components/LibraryToolbar.tsx'),
+    'utf8',
+  )
+
+  assert.match(toolbarSource, /const memoryScopes[\s\S]*?label:\s*'全部'[\s\S]*?label:\s*'置顶'[\s\S]*?label:\s*'图片'/)
+  assert.match(toolbarSource, /aria-label="更多记忆管理"/)
+  assert.match(toolbarSource, /onScopeChange\('archived'\)/)
+  assert.match(appSource, /hasCover:\s*Boolean\(item\.cover\)/)
+  assert.match(appSource, /className="memory-card-note"/)
+  assert.match(
+    cssSource,
+    /\.memory-card-hit \.memory-card-body strong\s*{[^}]*font-size:\s*14px;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.memory-card-hit \.memory-card-body time\s*{[^}]*font-size:\s*10px;/s,
+  )
+
+  assert.match(appSource, /className=\{`todo-card todo-card-surface \$\{todoView === 'completed' \? 'is-completed' : ''\}`\}/)
+  assert.match(appSource, /className="todo-row-meta"/)
+  assert.match(
+    cssSource,
+    /\.todo-swipe-shell\s*{[^}]*border:\s*0;[^}]*border-bottom:\s*1px solid var\(--line\);[^}]*border-radius:\s*0;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.todo-complete\s*{[^}]*width:\s*44px;[^}]*height:\s*44px;[^}]*border-radius:\s*50%;/s,
+  )
+  assert.match(cssSource, /\.todo-card\.is-completed\s*{[^}]*opacity:\s*0\.52;/s)
+  assert.match(cssSource, /\.todo-card\.is-completed strong\s*{[^}]*text-decoration:\s*line-through;/s)
+
+  for (const copy of [
+    '当前账号',
+    '连接服务',
+    '通知权限',
+    '实时字幕',
+    '视觉记忆',
+    '麦克风与相机',
+    '通话时自动显示你和 Ripple 正在说的内容',
+  ]) {
+    assert.match(appSource, new RegExp(copy))
+  }
+  assert.match(appSource, /notificationPermissionLabel\(\)/)
+  assert.match(appSource, /navigateTo\('memories'\)/)
+  assert.match(appSource, /\{server\}/)
+  assert.doesNotMatch(appSource, /type="checkbox"|role="switch"/)
+
+  assert.match(
+    cssSource,
+    /\.memory-detail-sheet,\s*\.todo-editor,\s*\.confirm-dialog\s*{[^}]*border:\s*1px solid var\(--line\);[^}]*background:\s*var\(--surface-raised\);/s,
+  )
+  assert.match(cssSource, /\.confirm-dialog button\.danger-action\s*{[^}]*color:\s*var\(--danger\);/s)
+  assert.match(appSource, /disabled=\{!todoEditor\.title\.trim\(\)\}/)
+  assert.match(appSource, /disabled=\{!memoryDraft\.trim\(\)\}/)
+  assert.match(appSource, /deleteRequest\.kind === 'todo' \? '这条待办'/)
 })
 
 test('history and conversation detail use a compact voice-first hierarchy', () => {

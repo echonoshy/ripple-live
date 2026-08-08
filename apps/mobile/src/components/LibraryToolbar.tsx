@@ -1,4 +1,5 @@
-import { Archive, CheckSquare, MagnifyingGlass, PushPin, X } from '@phosphor-icons/react'
+import { Archive, CheckSquare, DotsThreeVertical, MagnifyingGlass, PushPin, X } from '@phosphor-icons/react'
+import { useState } from 'react'
 import type { LibraryAction, LibraryView } from '../library'
 
 export type LibraryToolbarProps = {
@@ -16,10 +17,16 @@ export type LibraryToolbarProps = {
   onCancelSelection(): void
 }
 
-const scopes: Array<{ value: LibraryView; label: string }> = [
+const historyScopes: Array<{ value: LibraryView; label: string }> = [
   { value: 'all', label: '全部' },
   { value: 'pinned', label: '已置顶' },
   { value: 'archived', label: '已归档' },
+]
+
+const memoryScopes: Array<{ value: LibraryView; label: string }> = [
+  { value: 'all', label: '全部' },
+  { value: 'pinned', label: '置顶' },
+  { value: 'images', label: '图片' },
 ]
 
 export function LibraryToolbar({
@@ -36,6 +43,11 @@ export function LibraryToolbar({
   onSelectAll,
   onCancelSelection,
 }: LibraryToolbarProps) {
+  const [memoryMenuOpen, setMemoryMenuOpen] = useState(false)
+  const searchId = kind === '聊天历史' ? 'history-search' : 'memory-search'
+  const compactHistory = kind === '聊天历史'
+  const scopes = compactHistory ? historyScopes : memoryScopes
+
   if (selectionMode) {
     return (
       <div className="library-selection-bar" aria-label={`已选择 ${selectionCount} 项`}>
@@ -69,14 +81,15 @@ export function LibraryToolbar({
     )
   }
 
-  const searchId = kind === '聊天历史' ? 'history-search' : 'memory-search'
-  const compactHistory = kind === '聊天历史'
   const manageButton = (
     <button
       className="library-manage-button"
       type="button"
       aria-label={`管理${kind}`}
-      onClick={onStartSelection}
+      onClick={() => {
+        setMemoryMenuOpen(false)
+        onStartSelection()
+      }}
     >
       <CheckSquare aria-hidden="true" />
       <span>管理</span>
@@ -109,7 +122,10 @@ export function LibraryToolbar({
             type="button"
             className={scope === item.value ? 'is-active' : ''}
             aria-pressed={scope === item.value}
-            onClick={() => onScopeChange(item.value)}
+            onClick={() => {
+              setMemoryMenuOpen(false)
+              onScopeChange(item.value)
+            }}
           >
             {item.label}
           </button>
@@ -118,9 +134,40 @@ export function LibraryToolbar({
       {!compactHistory && (
         <div className="library-toolbar-meta">
           <p>
-            <strong>置顶</strong>会留在最近记录并排在最前；<strong>归档</strong>会从最近记录移出，且不再作为 Agent 的联想素材。
+            {scope === 'archived'
+              ? '正在查看已归档记忆，可在管理模式中恢复。'
+              : '图片筛选只显示有保存画面的记忆。'}
           </p>
-          {manageButton}
+          <div className="library-toolbar-actions">
+            {manageButton}
+            <div className="library-overflow">
+              <button
+                className="library-overflow-button"
+                type="button"
+                aria-label="更多记忆管理"
+                aria-expanded={memoryMenuOpen}
+                onClick={() => setMemoryMenuOpen((open) => !open)}
+              >
+                <DotsThreeVertical aria-hidden="true" />
+              </button>
+              {memoryMenuOpen && (
+                <div className="library-overflow-menu" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      if (scope === 'archived') onScopeChange('all')
+                      else onScopeChange('archived')
+                      setMemoryMenuOpen(false)
+                    }}
+                  >
+                    <Archive aria-hidden="true" />
+                    {scope === 'archived' ? '返回全部记忆' : '查看已归档'}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>
