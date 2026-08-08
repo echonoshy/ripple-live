@@ -546,11 +546,12 @@ function readySessionHarness({
 } = {}) {
   const sent: Array<Record<string, unknown>> = []
   const errors: string[] = []
+  const states: string[] = []
   const session = new RealtimeSession({
     server: '127.0.0.1:8700',
     accessToken: 'test-token',
     mode,
-    onState: () => {},
+    onState: (state) => states.push(state),
     onError: (message) => errors.push(message),
     onResponseFailed: () => {},
     onAssistantText: () => {},
@@ -587,6 +588,7 @@ function readySessionHarness({
       internals.handleText(JSON.stringify(event)),
     sent,
     errors,
+    states,
   }
 }
 
@@ -684,6 +686,110 @@ test('mode changes time out deterministically and late acknowledgements are iner
   await session.setMode('video')
 })
 
+test('a timed-out mode becomes unknown and a corrective request still waits for ack', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { session, receive, sent } = readySessionHarness({
+    modeChangeTimeoutMs: 5_000,
+  })
+  const opening = session.setMode('video')
+  t.mock.timers.tick(5_000)
+  await assert.rejects(opening, /超时|timed out/i)
+
+  const restoring = session.setMode('audio')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(
+    sent.filter((event) => event.type === 'session.mode.set'),
+    [
+      { type: 'session.mode.set', mode: 'video' },
+      { type: 'session.mode.set', mode: 'audio' },
+    ],
+  )
+  assert.equal(
+    await Promise.race([
+      restoring.then(() => 'resolved'),
+      new Promise((resolve) => setImmediate(() => resolve('waiting'))),
+    ]),
+    'waiting',
+  )
+  receive({ type: 'session.mode.changed', mode: 'audio' })
+  await restoring
+})
+
+test('old native messages and close callbacks cannot affect a replacement connection', async () => {
+  const { session, receive, states } = readySessionHarness()
+  const internals = session as unknown as {
+    connectionGeneration: number
+    handleTauriMessage(
+      message: { type: 'Text'; data: string } | { type: 'Close' },
+      generation: number,
+    ): void
+  }
+  internals.connectionGeneration = 2
+  const changed = session.setMode('video')
+
+  internals.handleTauriMessage(
+    {
+      type: 'Text',
+      data: JSON.stringify({ type: 'session.mode.changed', mode: 'video' }),
+    },
+    1,
+  )
+  internals.handleTauriMessage({ type: 'Close' }, 1)
+  assert.equal(
+    await Promise.race([
+      changed.then(() => 'resolved'),
+      new Promise((resolve) => setImmediate(() => resolve('waiting'))),
+    ]),
+    'waiting',
+  )
+  assert.deepEqual(states, [])
+
+  internals.handleTauriMessage(
+    {
+      type: 'Text',
+      data: JSON.stringify({ type: 'session.mode.changed', mode: 'video' }),
+    },
+    2,
+  )
+  await changed
+  receive({ type: 'session.mode.changed', mode: 'video' })
+})
+
+test('transport replacement rejects pending mode work and closes the old transport', async () => {
+  const { session } = readySessionHarness()
+  const pending = session.setMode('video')
+  let oldCloses = 0
+  const internals = session as unknown as {
+    transport: {
+      send(message: string): Promise<void>
+      close(): Promise<void>
+    }
+    connectionGeneration: number
+    replaceTransport(
+      transport: {
+        send(message: string): Promise<void>
+        close(): Promise<void>
+      },
+      generation: number,
+    ): void
+  }
+  internals.transport = {
+    send: async () => {},
+    close: async () => {
+      oldCloses += 1
+    },
+  }
+
+  internals.replaceTransport(
+    { send: async () => {}, close: async () => {} },
+    internals.connectionGeneration,
+  )
+
+  await assert.rejects(pending, /替换|replaced/i)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(oldCloses, 1)
+})
+
 test('close rejects a pending mode change and clears its timeout', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const { session, receive } = readySessionHarness({ modeChangeTimeoutMs: 5_000 })
@@ -707,6 +813,62 @@ test('a correlated server error rejects only the pending mode change', async () 
   })
 
   await assert.rejects(changed, /mode rejected/)
+})
+
+test('unsafe and inherited error fields neither escape nor reject mode work', async () => {
+  const { session } = readySessionHarness()
+  const pending = session.setMode('video')
+  const handleEvent = (event: unknown) =>
+    (session as unknown as { handleEvent(event: unknown): void }).handleEvent(event)
+
+  const accessorError = Object.create({
+    code: 'invalid_mode',
+    mode: 'video',
+    message: 'inherited rejection',
+  }) as Record<string, unknown>
+  Object.defineProperty(accessorError, 'type', {
+    value: 'error',
+    enumerable: true,
+  })
+  Object.defineProperty(accessorError, 'response_id', {
+    get() {
+      throw new Error('response getter')
+    },
+  })
+  Object.defineProperty(accessorError, 'message', {
+    get() {
+      throw new Error('message getter')
+    },
+  })
+  assert.doesNotThrow(() => handleEvent(accessorError))
+
+  const hostileError = new Proxy({}, {
+    getOwnPropertyDescriptor(_target, key) {
+      if (key === 'type') {
+        return {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: 'error',
+        }
+      }
+      throw new Error(`hostile ${String(key)}`)
+    },
+  })
+  assert.doesNotThrow(() => handleEvent(hostileError))
+  assert.equal(
+    await Promise.race([
+      pending.then(() => 'resolved', () => 'rejected'),
+      new Promise((resolve) => setImmediate(() => resolve('waiting'))),
+    ]),
+    'waiting',
+  )
+
+  handleEvent({
+    type: 'session.mode.changed',
+    mode: 'video',
+  })
+  await pending
 })
 
 test('frame request state brackets capture and queueing without reentrant flicker', async () => {

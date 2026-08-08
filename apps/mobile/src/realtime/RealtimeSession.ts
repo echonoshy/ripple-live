@@ -98,16 +98,27 @@ type PendingModeChange = {
   timer: ReturnType<typeof setTimeout>
 }
 
-function ownValue(value: unknown, key: string): unknown {
+type OwnDataRead =
+  | { kind: 'data'; value: unknown }
+  | { kind: 'absent' | 'unsafe' }
+
+function readOwnData(value: unknown, key: string): OwnDataRead {
   if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
-    return undefined
+    return { kind: 'absent' }
   }
   try {
     const descriptor = Object.getOwnPropertyDescriptor(value, key)
-    return descriptor && 'value' in descriptor ? descriptor.value : undefined
+    if (!descriptor) return { kind: 'absent' }
+    if (!('value' in descriptor)) return { kind: 'unsafe' }
+    return { kind: 'data', value: descriptor.value }
   } catch {
-    return undefined
+    return { kind: 'unsafe' }
   }
+}
+
+function ownValue(value: unknown, key: string): unknown {
+  const field = readOwnData(value, key)
+  return field.kind === 'data' ? field.value : undefined
 }
 
 function ownString(value: unknown, key: string): string | undefined {
@@ -118,6 +129,48 @@ function ownString(value: unknown, key: string): string | undefined {
 function ownMode(value: unknown): RealtimeMode | undefined {
   const mode = ownString(value, 'mode')
   return mode === 'audio' || mode === 'video' ? mode : undefined
+}
+
+function normalizeRealtimeEvent(value: unknown): RealtimeEvent | null {
+  const type = ownString(value, 'type')
+  if (!type) return null
+  const event: RealtimeEvent = { type }
+  const stringFields = [
+    'session_id',
+    'conversation_id',
+    'text',
+    'delta',
+    'audio',
+    'message',
+    'code',
+    'name',
+    'call_id',
+    'response_id',
+    'reason',
+    'turn_id',
+    'command',
+  ] as const
+  for (const key of stringFields) {
+    const field = ownString(value, key)
+    if (field !== undefined) event[key] = field
+  }
+  const sampleRate = ownValue(value, 'sample_rate')
+  if (typeof sampleRate === 'number') event.sample_rate = sampleRate
+  const result = readOwnData(value, 'result')
+  if (result.kind === 'data') event.result = result.value
+  const artifact = readOwnData(value, 'artifact')
+  if (artifact.kind === 'data' && artifact.value !== null && typeof artifact.value === 'object') {
+    event.artifact = artifact.value as ResponseArtifact
+  }
+  const needsFrame = ownValue(value, 'needs_frame')
+  if (typeof needsFrame === 'boolean') event.needs_frame = needsFrame
+  const decision = ownString(value, 'decision')
+  if (decision === 'complete' || decision === 'continue' || decision === 'uncertain') {
+    event.decision = decision
+  }
+  const mode = ownMode(value)
+  if (mode) event.mode = mode
+  return event
 }
 
 function float32ToBase64(samples: Float32Array) {
@@ -220,7 +273,7 @@ export class RealtimeSession {
   private pendingTurnId: string | null = null
   private endpointTimer: ReturnType<typeof setTimeout> | null = null
   private inputClearBarrier: Promise<void> | null = null
-  private currentMode: RealtimeMode
+  private currentMode: RealtimeMode | null
   private pendingModeChange: PendingModeChange | null = null
   private frameRequestsActive = 0
 
@@ -235,6 +288,8 @@ export class RealtimeSession {
   async connect() {
     if (this.closed) return
     const generation = ++this.connectionGeneration
+    this.ready = false
+    this.currentMode = null
     const params = new URLSearchParams({
       mode: this.options.mode,
       access_token: this.options.accessToken,
@@ -251,13 +306,13 @@ export class RealtimeSession {
       if (isTauri()) {
         const connection = await connectTauriWebSocket(
           url,
-          (message) => this.handleTauriMessage(message),
+          (message) => this.handleTauriMessage(message, generation),
         )
         if (!this.isActiveConnection(generation)) {
           await connection.transport.close().catch(() => {})
           return
         }
-        this.replaceTransport(connection.transport)
+        this.replaceTransport(connection.transport, generation)
         await this.startSession(generation)
         if (!this.isActiveConnection(generation)) return
         connection.activate()
@@ -277,7 +332,7 @@ export class RealtimeSession {
             void transport.close().then(resolve).catch(resolve)
             return
           }
-          this.replaceTransport(transport)
+          this.replaceTransport(transport, generation)
           void this.startSession(generation)
             .then(() => {
               if (!this.isActiveConnection(generation)) {
@@ -330,9 +385,15 @@ export class RealtimeSession {
     return !this.closed && generation === this.connectionGeneration
   }
 
-  private replaceTransport(transport: Transport) {
-    if (this.transport && this.transport !== transport) {
+  private replaceTransport(transport: Transport, generation: number) {
+    if (!this.isActiveConnection(generation)) {
+      void transport.close().catch(() => {})
+      return
+    }
+    const previous = this.transport
+    if (previous && previous !== transport) {
       this.rejectPendingModeChange(new Error('实时连接已被替换'))
+      void previous.close().catch(() => {})
     }
     this.transport = transport
   }
@@ -422,14 +483,15 @@ export class RealtimeSession {
     return new Promise<void>((resolve) => this.sendIdleWaiters.push(resolve))
   }
 
-  private handleTauriMessage(message: TauriMessage) {
-    if (this.closed) return
+  private handleTauriMessage(message: TauriMessage, generation: number) {
+    if (!this.isActiveConnection(generation)) return
     if (message.type === 'Text') {
       this.handleText(message.data)
     } else if (message.type === 'Close' && !this.closed) {
       this.clearEndpointState()
       this.rejectPendingModeChange(new Error('实时会话已关闭'))
       this.closed = true
+      this.connectionGeneration += 1
       this.ready = false
       this.options.onState('ended')
     }
@@ -448,11 +510,12 @@ export class RealtimeSession {
 
   private handleEvent(value: unknown) {
     if (this.closed) return
-    const type = ownString(value, 'type')
-    if (!type) return
+    const event = normalizeRealtimeEvent(value)
+    if (!event) return
+    const { type } = event
 
     if (type === 'session.mode.changed') {
-      const mode = ownMode(value)
+      const mode = event.mode
       if (!mode) return
       this.currentMode = mode
       const pending = this.pendingModeChange
@@ -472,8 +535,6 @@ export class RealtimeSession {
     if (type === 'error') {
       this.rejectModeChangeForServerError(value)
     }
-
-    const event = value as RealtimeEvent
 
     switch (type) {
       case 'session.created':
@@ -502,6 +563,7 @@ export class RealtimeSession {
           conversationId: event.session_id ?? this.conversationId,
         })
         this.ready = true
+        this.currentMode = event.mode ?? this.options.mode
         this.options.onState('listening')
         void this.options.onReady().catch((error: unknown) => {
           const message =
@@ -633,14 +695,41 @@ export class RealtimeSession {
   private rejectModeChangeForServerError(value: unknown) {
     const pending = this.pendingModeChange
     if (!pending) return
-    const responseId = ownString(value, 'response_id')
-    const mode = ownString(value, 'mode')
-    const code = ownString(value, 'code')
+    const responseField = readOwnData(value, 'response_id')
+    const modeField = readOwnData(value, 'mode')
+    const codeField = readOwnData(value, 'code')
+    const messageField = readOwnData(value, 'message')
+    if (
+      responseField.kind === 'unsafe' ||
+      modeField.kind === 'unsafe' ||
+      codeField.kind === 'unsafe' ||
+      messageField.kind === 'unsafe'
+    ) {
+      return
+    }
+    const responseId =
+      responseField.kind === 'data' && typeof responseField.value === 'string'
+        ? responseField.value
+        : undefined
+    const mode =
+      modeField.kind === 'data' && typeof modeField.value === 'string'
+        ? modeField.value
+        : undefined
+    const code =
+      codeField.kind === 'data' && typeof codeField.value === 'string'
+        ? codeField.value
+        : undefined
     const correlated = mode === pending.mode
     const modeError = code === 'invalid_mode' || code === 'unsupported_protocol'
-    const sessionError = responseId === undefined && mode === undefined
+    const hasSafeMessage =
+      messageField.kind === 'data' && typeof messageField.value === 'string'
+    const sessionError =
+      responseId === undefined && mode === undefined && hasSafeMessage
     if (!correlated && !(modeError && mode === undefined) && !sessionError) return
-    const message = ownString(value, 'message') ?? '服务端拒绝切换会话模式'
+    const message =
+      hasSafeMessage && typeof messageField.value === 'string'
+        ? messageField.value
+        : '服务端拒绝切换会话模式'
     this.rejectPendingModeChange(new Error(message))
   }
 
@@ -904,6 +993,7 @@ export class RealtimeSession {
     })
     const timeoutMs = this.options.modeChangeTimeoutMs ?? 5_000
     const timer = setTimeout(() => {
+      this.currentMode = null
       this.rejectPendingModeChange(new Error('切换会话模式超时'))
     }, timeoutMs)
     this.pendingModeChange = {
