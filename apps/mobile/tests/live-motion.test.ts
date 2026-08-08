@@ -1,11 +1,67 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  captionTextForState,
+  nextCaptionText,
+  scheduleCaptionClear,
+} from '../src/live/caption.ts'
+import {
   MOTION_TIMING,
   mapSessionState,
   nextQualityTier,
   smoothLevel,
 } from '../src/live/motion.ts'
+
+test('selects only the transcript for the active speaker state', () => {
+  assert.equal(captionTextForState('speaking', '你好吗', '很好'), '很好')
+  assert.equal(captionTextForState('listening', '你好吗', '旧回答'), '你好吗')
+  assert.equal(captionTextForState('thinking', '', '旧回答'), '')
+})
+
+test('schedules caption clearing for 1800ms and cancels stale clears', () => {
+  let callback: (() => void) | undefined
+  let delay = 0
+  let clearedTimer = 0
+  const cancel = scheduleCaptionClear(
+    () => { callback = undefined },
+    {
+      setTimeout(next, timeout) {
+        callback = next
+        delay = timeout
+        return 7
+      },
+      clearTimeout(timer) {
+        clearedTimer = timer
+        callback = undefined
+      },
+    },
+  )
+
+  assert.equal(delay, 1800)
+  assert.equal(typeof callback, 'function')
+  cancel()
+  assert.equal(clearedTimer, 7)
+  assert.equal(callback, undefined)
+})
+
+test('clears unchanged text when the active caption source switches', () => {
+  const previous = {
+    source: 'user' as const,
+    userText: '上一轮问题',
+    assistantText: '上一轮回答',
+  }
+
+  assert.equal(nextCaptionText(previous, {
+    source: 'assistant',
+    userText: '上一轮问题',
+    assistantText: '上一轮回答',
+  }), '')
+  assert.equal(nextCaptionText(previous, {
+    source: 'assistant',
+    userText: '上一轮问题',
+    assistantText: '新的回答',
+  }), '新的回答')
+})
 
 test('maps every transport state to one visual state', () => {
   assert.equal(mapSessionState('preparing'), 'connecting')

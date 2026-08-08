@@ -220,6 +220,25 @@ test('mobile live orb uses a single canvas renderer with a static fallback', () 
   assert.doesNotMatch(orbSource, /lottie|video/i)
 })
 
+test('mobile live call uses the immersive presentation contract', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const callSource = readFileSync(
+    path.join(appRoot, 'src/components/LiveCallScreen.tsx'),
+    'utf8',
+  )
+
+  assert.match(callSource, /<LiveOrb/)
+  assert.match(callSource, /<LiveCaption/)
+  assert.doesNotMatch(callSource, /HandPalm|打断回答/)
+  assert.match(callSource, /aria-label=\{muted \? '取消静音' : '静音'\}/)
+  assert.match(callSource, /aria-label="结束通话"/)
+  assert.match(callSource, /<small aria-hidden="true">\{formatDuration\(elapsed\)\}<\/small>/)
+  assert.match(
+    appSource,
+    /setUserText\(''\)\s*setAssistantText\(''\)\s*void session\.speechStarted\(\)/,
+  )
+})
+
 test('mobile libraries expose accessible shared management controls', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')

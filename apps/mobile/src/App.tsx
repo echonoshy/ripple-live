@@ -1,20 +1,16 @@
 import {
   ArrowCounterClockwise,
   ArrowLeft,
-  CameraRotate,
   ChatCircleDots,
   CheckCircle,
   ClockCounterClockwise,
   Circle,
   EnvelopeSimple,
   GearSix,
-  HandPalm,
   ImagesSquare,
   LockKey,
   ListChecks,
   Microphone,
-  MicrophoneSlash,
-  PhoneDisconnect,
   PushPin,
   SignOut,
   NotePencil,
@@ -54,6 +50,7 @@ import {
   type VisualMemory,
 } from './api'
 import { LibraryActions } from './components/LibraryActions'
+import { LiveCallScreen } from './components/LiveCallScreen'
 import { LibrarySection } from './components/LibrarySection'
 import { LibraryToolbar } from './components/LibraryToolbar'
 import { MarkdownContent } from './components/MarkdownContent'
@@ -128,24 +125,6 @@ function AuthenticatedImage({
   )
 }
 
-const stateLabels: Record<SessionState, string> = {
-  idle: '准备就绪',
-  connecting: '正在连接',
-  preparing: '正在准备模型',
-  listening: '正在聆听',
-  thinking: '正在思考',
-  using_tool: '正在使用工具',
-  speaking: '正在回答',
-  ended: '通话已结束',
-  error: '连接异常',
-}
-
-function formatDuration(seconds: number) {
-  const minutes = Math.floor(seconds / 60)
-  const rest = seconds % 60
-  return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
-}
-
 function formatHistoryTime(timestamp: number) {
   return new Intl.DateTimeFormat('zh-CN', {
     month: 'short',
@@ -183,7 +162,8 @@ export default function App() {
   const [userText, setUserText] = useState('')
   const [toolStatus, setToolStatus] = useState('')
   const [muted, setMuted] = useState(false)
-  const [_outputLevel, setOutputLevel] = useState(0)
+  const [inputLevel, setInputLevel] = useState(0)
+  const [outputLevel, setOutputLevel] = useState(0)
   const [elapsed, setElapsed] = useState(0)
   const [cameraFacing, setCameraFacing] = useState<'user' | 'environment'>(
     'environment',
@@ -242,7 +222,6 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sessionRef = useRef<RealtimeSession | null>(null)
   const mediaRef = useRef<LiveMedia | null>(null)
-  const visualizerRef = useRef<HTMLDivElement>(null)
   const longPressTimerRef = useRef<number | null>(null)
   const pointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
   const todoPointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
@@ -435,11 +414,15 @@ export default function App() {
     if (sessionState !== 'ended' && sessionState !== 'error') return
     mediaRef.current?.stop()
     mediaRef.current = null
+    setInputLevel(0)
+    setOutputLevel(0)
   }, [sessionState])
 
   const stopCall = useCallback(async () => {
     mediaRef.current?.stop()
     mediaRef.current = null
+    setInputLevel(0)
+    setOutputLevel(0)
     await sessionRef.current?.close()
     sessionRef.current = null
     setSessionState('ended')
@@ -464,6 +447,8 @@ export default function App() {
       setLiveArtifacts([])
       setElapsed(0)
       setMuted(false)
+      setInputLevel(0)
+      setOutputLevel(0)
       setSessionState('connecting')
 
       let session: RealtimeSession
@@ -483,6 +468,8 @@ export default function App() {
         mode: nextMode,
         onState: setSessionState,
         onError: (message) => {
+          setInputLevel(0)
+          setOutputLevel(0)
           setErrorMessage(message)
           setSessionState('error')
         },
@@ -509,11 +496,13 @@ export default function App() {
           await media.start((audio) => {
             void session.sendInput(audio)
           }, () => {
+            setUserText('')
+            setAssistantText('')
             void session.speechStarted()
           }, () => {
             void session.speechPaused()
           }, (level) => {
-            visualizerRef.current?.style.setProperty('--audio-level', String(level))
+            setInputLevel(level)
           })
         },
       })
@@ -525,6 +514,8 @@ export default function App() {
         await session.connect()
       } catch (error) {
         media.stop()
+        setInputLevel(0)
+        setOutputLevel(0)
         const message =
           error instanceof Error ? error.message : '无法连接实时服务'
         setErrorMessage(message)
@@ -923,18 +914,6 @@ export default function App() {
       setRenameBusy(false)
     }
   }
-
-  const statusClass = useMemo(
-    () =>
-      sessionState === 'error'
-        ? 'is-error'
-        : sessionState === 'speaking'
-          ? 'is-speaking'
-          : isActive
-            ? 'is-live'
-            : '',
-    [isActive, sessionState],
-  )
 
   if (!authChecked) {
     return (
@@ -1677,140 +1656,26 @@ export default function App() {
       )}
 
       {screen === 'call' && (
-        <section className={`call-screen ${mode === 'video' ? 'has-video' : ''}`}>
-          <video
-            ref={videoRef}
-            className="camera-preview"
-            autoPlay
-            muted
-            playsInline
-          />
-          <canvas ref={canvasRef} hidden />
-          <div className="camera-scrim" />
-
-          <header className="call-header">
-            <span className="call-mode">
-              {mode === 'video' ? '视频' : '语音'} · 智能响应
-            </span>
-            <div className={`call-status ${statusClass}`}>
-              <span aria-hidden="true" />
-              <strong>{stateLabels[sessionState]}</strong>
-              <small>{formatDuration(elapsed)}</small>
-            </div>
-            {mode === 'video' ? (
-              <button
-                className="icon-button call-icon"
-                type="button"
-                aria-label="切换摄像头"
-                onClick={() => void flipCamera()}
-              >
-                <CameraRotate />
-              </button>
-            ) : (
-              <span className="header-spacer" />
-            )}
-          </header>
-
-          <div className={`conversation ${statusClass}`}>
-            {mode === 'audio' && (
-              <div
-                ref={visualizerRef}
-                className={`voice-visualizer ${statusClass}`}
-                aria-hidden="true"
-              >
-                {[0.45, 0.7, 1, 0.62, 0.88, 0.56, 0.38].map((scale, index) => (
-                  <span
-                    key={index}
-                    style={{ height: `${24 + scale * 88}px` }}
-                  />
-                ))}
-              </div>
-            )}
-
-            <div className="transcript" aria-live="polite">
-              {userText && (
-                <div className="utterance user-utterance">
-                  <span>你</span>
-                  <p>{userText}</p>
-                </div>
-              )}
-              <div className="utterance assistant-utterance">
-                <span>Ripple</span>
-                <MarkdownContent>
-                  {assistantText ||
-                    (sessionState === 'listening'
-                      ? '我在听'
-                      : sessionState === 'thinking'
-                        ? '正在理解你的问题'
-                        : sessionState === 'using_tool'
-                          ? toolStatus || '正在使用工具'
-                      : sessionState === 'speaking'
-                        ? '正在回答'
-                        : '正在建立实时连接')}
-                </MarkdownContent>
-                {liveArtifacts.length > 0 && (
-                  <div className="live-artifacts">
-                    {liveArtifacts.map((artifact) => (
-                      <AuthenticatedImage
-                        key={artifact.id}
-                        server={server}
-                        token={accessToken}
-                        artifact={artifact}
-                        className="live-artifact"
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-              {errorMessage && (
-                <div className="error-message">
-                  <X weight="bold" />
-                  <span>{errorMessage}</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <footer className="call-controls">
-            <div className="control-item">
-              <button
-                className={`control-button ${muted ? 'is-active' : ''}`}
-                type="button"
-                aria-label={muted ? '取消静音' : '静音'}
-                onClick={toggleMute}
-              >
-                {muted ? <MicrophoneSlash /> : <Microphone />}
-              </button>
-              <span>{muted ? '取消静音' : '静音'}</span>
-            </div>
-            <div className="control-item">
-              <button
-                className="end-button"
-                type="button"
-                aria-label="结束通话"
-                onClick={() => void leaveCall()}
-              >
-                <PhoneDisconnect weight="fill" />
-              </button>
-              <span>结束</span>
-            </div>
-            <div className="control-item">
-              <button
-                className="control-button"
-                type="button"
-                aria-label="打断回答"
-                onClick={() => {
-                  if (sessionRef.current?.forceListen()) {
-                    mediaRef.current?.clearOutput()
-                  }
-                }}
-              >
-                <HandPalm weight="fill" />
-              </button>
-              <span>打断</span>
-            </div>
-          </footer>
-        </section>
+        <LiveCallScreen
+          mode={mode}
+          state={sessionState}
+          elapsed={elapsed}
+          muted={muted}
+          inputLevel={inputLevel}
+          outputLevel={outputLevel}
+          userText={userText}
+          assistantText={assistantText}
+          toolStatus={toolStatus}
+          errorMessage={errorMessage}
+          artifacts={liveArtifacts}
+          server={server}
+          accessToken={accessToken}
+          videoRef={videoRef}
+          captureCanvasRef={canvasRef}
+          onToggleMute={toggleMute}
+          onFlipCamera={flipCamera}
+          onLeave={leaveCall}
+        />
       )}
 
       {deleteRequest && (
