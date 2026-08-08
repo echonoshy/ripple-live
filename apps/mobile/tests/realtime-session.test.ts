@@ -16,6 +16,7 @@ type FakeSocket = {
   onerror: (() => void) | null
   onclose: (() => void) | null
   sent: string[]
+  sendResult: Promise<void> | null
   closes: number
   open(): void
   finishClose(): void
@@ -33,6 +34,7 @@ function installDeferredWebSockets(t: Parameters<typeof test>[1] extends (contex
     onerror: (() => void) | null = null
     onclose: (() => void) | null = null
     sent: string[] = []
+    sendResult: Promise<void> | null = null
     closes = 0
 
     constructor(_url: string) {
@@ -41,6 +43,7 @@ function installDeferredWebSockets(t: Parameters<typeof test>[1] extends (contex
 
     send(message: string) {
       this.sent.push(message)
+      return this.sendResult ?? undefined
     }
 
     close() {
@@ -164,6 +167,31 @@ test('a pending connect settles when its stale socket closes before opening', as
   ])
   assert.equal(settled, true)
   assert.deepEqual(states, ['connecting', 'ended'])
+})
+
+test('a rejected session start closes its transport and ignores late ready', async (t) => {
+  const sockets = installDeferredWebSockets(t)
+  const states: string[] = []
+  const ready = { count: 0 }
+  const session = connectingSession(states, ready)
+
+  const connecting = session.connect()
+  assert.equal(sockets.length, 1)
+  if (!sockets[0]) return
+  let rejectStart: ((error: Error) => void) | null = null
+  sockets[0].sendResult = new Promise((_, reject) => {
+    rejectStart = reject
+  })
+  sockets[0].open()
+  sockets[0].message({ type: 'session.ready' })
+  rejectStart?.(new Error('session start failed'))
+
+  await assert.rejects(connecting, /session start failed/)
+  sockets[0].message({ type: 'session.ready' })
+
+  assert.equal(sockets[0].closes, 1)
+  assert.deepEqual(states, ['connecting', 'preparing', 'ended'])
+  assert.equal(ready.count, 0)
 })
 
 test('session start declares protocol version and native build', () => {

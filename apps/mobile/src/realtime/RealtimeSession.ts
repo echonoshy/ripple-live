@@ -206,56 +206,78 @@ export class RealtimeSession {
     })
     this.options.onState('connecting')
 
-    if (isTauri()) {
-      const connection = await connectTauriWebSocket(
-        url,
-        (message) => this.handleTauriMessage(message),
-      )
-      if (!this.isActiveConnection(generation)) {
-        await connection.transport.close().catch(() => {})
-        return
-      }
-      this.transport = connection.transport
-      connection.activate()
-      await this.startSession(generation)
-      return
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const socket = new WebSocket(url)
-      socket.onopen = () => {
-        const transport: Transport = {
-          send: async (message) => socket.send(message),
-          close: async () => socket.close(1000, 'user_stop'),
-        }
+    try {
+      if (isTauri()) {
+        const connection = await connectTauriWebSocket(
+          url,
+          (message) => this.handleTauriMessage(message),
+        )
         if (!this.isActiveConnection(generation)) {
-          void transport.close().then(resolve).catch(resolve)
+          await connection.transport.close().catch(() => {})
           return
         }
-        this.transport = transport
-        void this.startSession(generation).then(resolve).catch(reject)
+        this.transport = connection.transport
+        await this.startSession(generation)
+        if (!this.isActiveConnection(generation)) return
+        connection.activate()
+        return
       }
-      socket.onmessage = (event) => {
-        if (this.isActiveConnection(generation)) {
-          this.handleText(String(event.data))
+
+      await new Promise<void>((resolve, reject) => {
+        const socket = new WebSocket(url)
+        const pendingMessages: string[] = []
+        let activated = false
+        socket.onopen = () => {
+          const transport: Transport = {
+            send: async (message) => socket.send(message),
+            close: async () => socket.close(1000, 'user_stop'),
+          }
+          if (!this.isActiveConnection(generation)) {
+            void transport.close().then(resolve).catch(resolve)
+            return
+          }
+          this.transport = transport
+          void this.startSession(generation)
+            .then(() => {
+              if (!this.isActiveConnection(generation)) {
+                resolve()
+                return
+              }
+              activated = true
+              pendingMessages.splice(0).forEach((message) => {
+                this.handleText(message)
+              })
+              resolve()
+            })
+            .catch(reject)
         }
-      }
-      socket.onerror = () => {
-        if (this.isActiveConnection(generation)) reject(new Error(`无法连接 ${url}`))
-        else resolve()
-      }
-      socket.onclose = () => {
-        if (this.isActiveConnection(generation)) {
-          this.clearEndpointState()
-          this.closed = true
-          this.connectionGeneration += 1
-          this.ready = false
-          this.options.onState('ended')
-        } else {
-          resolve()
+        socket.onmessage = (event) => {
+          if (this.isActiveConnection(generation)) {
+            const message = String(event.data)
+            if (activated) this.handleText(message)
+            else pendingMessages.push(message)
+          }
         }
-      }
-    })
+        socket.onerror = () => {
+          if (this.isActiveConnection(generation)) reject(new Error(`无法连接 ${url}`))
+          else resolve()
+        }
+        socket.onclose = () => {
+          if (this.isActiveConnection(generation)) {
+            this.clearEndpointState()
+            this.closed = true
+            this.connectionGeneration += 1
+            this.ready = false
+            this.options.onState('ended')
+          } else {
+            resolve()
+          }
+        }
+      })
+    } catch (error) {
+      if (this.isActiveConnection(generation)) await this.close()
+      throw error
+    }
   }
 
   private isActiveConnection(generation: number) {

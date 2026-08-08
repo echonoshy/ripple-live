@@ -50,8 +50,8 @@ All commands ran from `apps/mobile` after the review fixes:
 - Added connection-generation cancellation to `RealtimeSession`. Closing during a pending connection invalidates the attempt; a transport that opens or resolves late is closed without being assigned, activated, started, or allowed to emit callbacks. Text and transport callbacks also ignore closed sessions.
 - Guarded every `App` session callback capable of mutating UI, media, or playback state with active-session ownership. Unmount and leave clear ownership before asynchronous teardown, so an old session cannot affect a replacement session.
 - Preserved confirmed live results across `onResponseFailed`; only the response error message changes. Receipts still clear at the next user turn, call/leave boundary, fatal session error, or explicit dismissal.
-- Deduplicated search results by canonical URL while scanning for up to three unique results, preserving first-source order and stable URL keys.
-- Replaced raw search anchors with `@tauri-apps/plugin-opener` 2.5.4. The Rust plugin is initialized and its Tauri capability is scoped to `https://*` and `http://*` only. The browser/dev fallback uses a new `noopener,noreferrer` tab and never replaces the live call page; opener errors are contained as a no-op and do not touch playback.
+- Deduplicated search results by canonical URL within the original first-three source boundary, preserving first-source order and stable URL keys.
+- Replaced raw search anchors with `@tauri-apps/plugin-opener` 2.5.4. On supported targets, its Tauri capability is scoped to `https://*` and `http://*` only. The browser/dev fallback uses a new `noopener,noreferrer` tab and never replaces the live call page; opener errors are contained as a no-op and do not touch playback.
 - Updated both `package-lock.json` and `Cargo.lock` with the corresponding opener dependencies. No generated Apple/iOS file changed.
 
 ### Round 1 TDD and verification
@@ -61,3 +61,17 @@ All commands ran from `apps/mobile` after the review fixes:
 - Parser regression proves canonical duplicate URLs are skipped while the first three unique results are retained. A response-failure regression proves confirmed receipts are not cleared.
 - Final suites: mobile package 16/16 plus library 5/5; playback 5/5; media 6/6; live UI 23/23; realtime 29/29; tool results 36/36. `npm run lint` and `npm run build` passed; Vite emitted only its existing large-chunk advisory.
 - The initial online Cargo check stalled while updating the registry index and was bounded/terminated. With dependencies present and lockfile resolved, `cargo check --offline --quiet` and `cargo metadata --offline --no-deps` both passed. `git diff --check` passed.
+
+## Controller review round 2
+
+- Added a synchronous call-lifecycle generation guard with explicit opening, active, leaving, failed, and idle phases. Leave invalidates ownership and navigates home before awaiting transport close; both the scheduled auto-start and `startCall` claim the same owner. A delayed close cannot create replacement media or a second session, and a failed connect cannot enter an automatic retry loop.
+- App connect failure now invalidates the current owner, clears both owner refs, stops media, triggers/awaits `session.close()`, and presents the error without leaving the call eligible for auto-start.
+- `RealtimeSession.connect()` now treats connection/start rejection as terminal for that generation: it marks the session closed, closes an assigned transport, and ignores later transport/text callbacks. Browser messages and native queued messages are activated only after the initial session-start send succeeds, so a ready arriving while that send is pending cannot start media after failure. Existing close-before-connect-resolution behavior remains covered.
+- Search parsing validates only the original first three input rows, then deduplicates their canonical URLs. A proxied 10,000-row duplicate payload proves exactly four outer descriptor reads (length plus indices 0–2), independent of unique output count.
+- The Rust opener dependency is target-scoped with `cfg(not(target_os = "ios"))`, plugin registration has the same compile-time guard, and its capability applies only to Linux, macOS, Windows, and Android. The JavaScript opener checks for iOS before native detection, dynamically imports the plugin only on the supported native path, and performs no plugin or browser operation on iOS. No Apple/iOS source or generated file changed.
+
+### Round 2 TDD and verification
+
+- RED/GREEN regressions cover delayed leave with exactly one session/media owner, failed-connect generation invalidation without auto-retry, rejected/deferred session-start transport closure with ready suppression, bounded duplicate-heavy parser work, and side-effect-free iOS link handling.
+- Structural native tests cover the target-specific Cargo dependency, compile-time Rust registration guard, non-iOS capability platforms, and unchanged HTTP(S)-only scope.
+- Final verification after the hook-lint cleanup: mobile package 16/16 plus library 5/5; playback 5/5; media 6/6; live UI 23/23; realtime 30/30; tool results 40/40. `npm run lint` completed without diagnostics, `npm run build` passed with only the existing Vite large-chunk advisory, offline Cargo check/target metadata passed, `git diff --check` passed, and the diff contains no Apple/iOS paths.

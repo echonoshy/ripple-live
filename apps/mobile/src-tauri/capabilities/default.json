@@ -8,13 +8,6 @@
   "permissions": [
     "core:default",
     "notification:default",
-    {
-      "identifier": "opener:allow-open-url",
-      "allow": [
-        { "url": "https://*" },
-        { "url": "http://*" }
-      ]
-    },
     "websocket:default"
   ]
 }

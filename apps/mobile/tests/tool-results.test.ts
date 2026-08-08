@@ -4,7 +4,10 @@ import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import { LiveResultSheet } from '../src/components/LiveResultSheet.tsx'
-import { createSingleFlight } from '../src/live/callLifecycle.ts'
+import {
+  createCallLifecycleGuard,
+  createSingleFlight,
+} from '../src/live/callLifecycle.ts'
 import { createExternalUrlOpener } from '../src/live/externalLinks.ts'
 import { liveResultsReducer } from '../src/live/liveResults.ts'
 import { parseLiveResult } from '../src/realtime/toolResults.ts'
@@ -123,10 +126,57 @@ test('coalesces repeated leave requests until the active close finishes', async 
   await nextCall
 })
 
+test('a delayed leave cannot claim a replacement call before or after close', async () => {
+  const lifecycle = createCallLifecycleGuard()
+  let sessions = 0
+  let media = 0
+  const autoStart = () => {
+    const owner = lifecycle.claimStart()
+    if (owner === null) return null
+    sessions += 1
+    media += 1
+    return owner
+  }
+
+  assert.equal(lifecycle.requestOpen(), true)
+  const owner = autoStart()
+  assert.equal(typeof owner, 'number')
+
+  let releaseClose: (() => void) | null = null
+  const closing = new Promise<void>((resolve) => {
+    releaseClose = resolve
+  })
+  assert.equal(lifecycle.beginLeave(), true)
+  assert.equal(autoStart(), null)
+  releaseClose?.()
+  await closing
+  lifecycle.finishLeave()
+  assert.equal(autoStart(), null)
+
+  assert.equal(sessions, 1)
+  assert.equal(media, 1)
+})
+
+test('a failed connect invalidates ownership without enabling an automatic retry', () => {
+  const lifecycle = createCallLifecycleGuard()
+  assert.equal(lifecycle.requestOpen(), true)
+  const owner = lifecycle.claimStart()
+  assert.notEqual(owner, null)
+  if (owner === null) return
+
+  assert.equal(lifecycle.fail(owner), true)
+  assert.equal(lifecycle.owns(owner), false)
+  assert.equal(lifecycle.claimStart(), null)
+
+  assert.equal(lifecycle.requestOpen(), true)
+  assert.notEqual(lifecycle.claimStart(), null)
+})
+
 test('browser source opening uses a new isolated tab without replacing the call', async () => {
   const calls: Array<[string, string, string]> = []
   const popup = { opener: {} as unknown }
   const openExternal = createExternalUrlOpener({
+    isIOS: () => false,
     isNative: () => false,
     openNative: async () => {},
     openBrowser: (url, target, features) => {
@@ -145,6 +195,7 @@ test('browser source opening uses a new isolated tab without replacing the call'
 test('external source opening contains native failures as a no-op', async () => {
   let browserCalls = 0
   const openExternal = createExternalUrlOpener({
+    isIOS: () => false,
     isNative: () => true,
     openNative: async () => {
       throw new Error('native browser unavailable')
@@ -162,6 +213,7 @@ test('external source opening contains native failures as a no-op', async () => 
 test('external source opening refuses non-http URL schemes', async () => {
   let opens = 0
   const openExternal = createExternalUrlOpener({
+    isIOS: () => false,
     isNative: () => false,
     openNative: async () => {},
     openBrowser: () => {
@@ -172,6 +224,31 @@ test('external source opening refuses non-http URL schemes', async () => {
 
   assert.equal(await openExternal('javascript:alert(1)'), false)
   assert.equal(opens, 0)
+})
+
+test('external source opening is disabled without side effects on iOS', async () => {
+  let nativeChecks = 0
+  let nativeOpens = 0
+  let browserOpens = 0
+  const openExternal = createExternalUrlOpener({
+    isIOS: () => true,
+    isNative: () => {
+      nativeChecks += 1
+      return true
+    },
+    openNative: async () => {
+      nativeOpens += 1
+    },
+    openBrowser: () => {
+      browserOpens += 1
+      return null
+    },
+  })
+
+  assert.equal(await openExternal('https://example.com/source'), false)
+  assert.equal(nativeChecks, 0)
+  assert.equal(nativeOpens, 0)
+  assert.equal(browserOpens, 0)
 })
 
 test('creates a memory receipt only for a successful validated memory', () => {
@@ -280,7 +357,7 @@ test('bounds web search cards to three validated sources', () => {
   })
 })
 
-test('deduplicates canonical search URLs while retaining three unique sources', () => {
+test('deduplicates canonical search URLs within the first three sources', () => {
   const result = parseLiveResult({
     callId: 'call-unique-search',
     name: 'web_search',
@@ -304,10 +381,34 @@ test('deduplicates canonical search URLs while retaining three unique sources', 
     items: [
       { title: 'One', url: 'https://one.example/', snippet: 'First' },
       { title: 'Two', url: 'https://two.example/', snippet: 'Second' },
-      { title: 'Three', url: 'https://three.example/', snippet: 'Third' },
     ],
     status: 'success',
   })
+})
+
+test('search parsing performs bounded descriptor reads for duplicate-heavy input', () => {
+  const duplicate = {
+    title: 'Same',
+    url: 'https://same.example',
+    snippet: 'Duplicate',
+  }
+  let descriptorReads = 0
+  const results = new Proxy(Array.from({ length: 10_000 }, () => duplicate), {
+    getOwnPropertyDescriptor(target, key) {
+      descriptorReads += 1
+      return Reflect.getOwnPropertyDescriptor(target, key)
+    },
+  })
+
+  const result = parseLiveResult({
+    callId: 'call-bounded-search',
+    name: 'web_search',
+    result: { ok: true, data: { results } },
+  })
+
+  assert.equal(result.kind, 'search')
+  if (result.kind === 'search') assert.equal(result.items.length, 1)
+  assert.equal(descriptorReads, 4)
 })
 
 test('creates a weather card from a validated external payload', () => {

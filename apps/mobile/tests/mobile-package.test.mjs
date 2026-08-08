@@ -317,13 +317,41 @@ test('mobile opens live search sources through the native external-browser capab
   const capability = JSON.parse(
     readFileSync(path.join(appRoot, 'src-tauri/capabilities/default.json'), 'utf8'),
   )
+  const openerCapabilityPath = path.join(
+    appRoot,
+    'src-tauri/capabilities/external-http-opener.json',
+  )
   const externalLinkPath = path.join(appRoot, 'src/live/externalLinks.ts')
 
   assert.equal(existsSync(externalLinkPath), true, 'externalLinks.ts should exist')
   assert.equal(typeof packageJson.dependencies['@tauri-apps/plugin-opener'], 'string')
-  assert.match(cargo, /tauri-plugin-opener/)
-  assert.match(rust, /tauri_plugin_opener::init\(\)/)
-  const openerPermission = capability.permissions.find(
+  assert.match(
+    cargo,
+    /\[target\.'cfg\(not\(target_os = "ios"\)\)'\.dependencies\][\s\S]*tauri-plugin-opener/,
+  )
+  assert.match(
+    rust,
+    /#\[cfg\(not\(target_os = "ios"\)\)\][\s\S]*tauri_plugin_opener::init\(\)/,
+  )
+  assert.equal(
+    capability.permissions.some((permission) =>
+      typeof permission === 'object'
+        ? permission.identifier === 'opener:allow-open-url'
+        : permission === 'opener:allow-open-url',
+    ),
+    false,
+  )
+  assert.equal(existsSync(openerCapabilityPath), true)
+  const openerCapability = JSON.parse(
+    readFileSync(openerCapabilityPath, 'utf8'),
+  )
+  assert.deepEqual(openerCapability.platforms, [
+    'linux',
+    'macOS',
+    'windows',
+    'android',
+  ])
+  const openerPermission = openerCapability.permissions.find(
     (permission) =>
       typeof permission === 'object' &&
       permission.identifier === 'opener:allow-open-url',

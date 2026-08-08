@@ -62,7 +62,10 @@ import {
   type LibraryView,
 } from './library'
 import { cameraErrorAfterSwitch, visibleCallError } from './live/callErrors'
-import { createSingleFlight } from './live/callLifecycle'
+import {
+  createCallLifecycleGuard,
+  createSingleFlight,
+} from './live/callLifecycle'
 import { liveResultsReducer } from './live/liveResults'
 import { LiveMedia } from './media/LiveMedia'
 import { notifyDueTodos } from './reminders'
@@ -243,6 +246,7 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sessionRef = useRef<RealtimeSession | null>(null)
   const mediaRef = useRef<LiveMedia | null>(null)
+  const callLifecycleRef = useRef(createCallLifecycleGuard())
   const longPressTimerRef = useRef<number | null>(null)
   const pointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
   const todoPointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
@@ -450,23 +454,29 @@ export default function App() {
     sessionRef.current = null
     dispatchLiveResults({ type: 'clear' })
     await session?.close()
-    setSessionState('ended')
   }, [])
 
   const leaveCall = useMemo(
     () =>
       createSingleFlight(async () => {
-        await stopCall()
+        if (!callLifecycleRef.current.beginLeave()) return
         setScreen('home')
-        setSessionState('idle')
+        try {
+          await stopCall()
+        } finally {
+          callLifecycleRef.current.finishLeave()
+          setSessionState('idle')
+        }
       }),
     [stopCall],
   )
 
   useEffect(() => {
+    const callLifecycle = callLifecycleRef.current
     return () => {
       const media = mediaRef.current
       const session = sessionRef.current
+      callLifecycle.invalidate()
       mediaRef.current = null
       sessionRef.current = null
       media?.stop()
@@ -475,8 +485,16 @@ export default function App() {
   }, [])
 
   const startCall = useCallback(
-    async (nextMode: RealtimeMode) => {
-      if (!videoRef.current || !canvasRef.current) return
+    async (nextMode: RealtimeMode, owner: number) => {
+      if (
+        !callLifecycleRef.current.owns(owner) ||
+        sessionRef.current ||
+        !videoRef.current ||
+        !canvasRef.current
+      ) {
+        callLifecycleRef.current.fail(owner)
+        return
+      }
 
       setMode(nextMode)
       setErrorMessage('')
@@ -493,7 +511,9 @@ export default function App() {
       setSessionState('connecting')
 
       let session: RealtimeSession
-      const ownsSession = () => sessionRef.current === session
+      const ownsSession = () =>
+        callLifecycleRef.current.owns(owner) &&
+        sessionRef.current === session
       const media = new LiveMedia({
         video: videoRef.current,
         canvas: canvasRef.current,
@@ -588,8 +608,16 @@ export default function App() {
       try {
         await session.connect()
       } catch (error) {
-        if (sessionRef.current !== session) return
+        if (
+          sessionRef.current !== session ||
+          !callLifecycleRef.current.fail(owner)
+        ) {
+          return
+        }
+        sessionRef.current = null
+        mediaRef.current = null
         media.stop()
+        const closing = session.close()
         setInputLevel(0)
         setOutputLevel(0)
         const message =
@@ -597,18 +625,29 @@ export default function App() {
         setErrorMessage(message)
         dispatchLiveResults({ type: 'clear' })
         setSessionState('error')
+        await closing
       }
     },
     [accessToken, cameraFacing, server],
   )
 
   useEffect(() => {
-    if (screen !== 'call' || sessionRef.current) return
-    const frame = window.requestAnimationFrame(() => void startCall(mode))
+    if (
+      screen !== 'call' ||
+      sessionRef.current ||
+      !callLifecycleRef.current.canAutoStart()
+    ) {
+      return
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const owner = callLifecycleRef.current.claimStart()
+      if (owner !== null) void startCall(mode, owner)
+    })
     return () => window.cancelAnimationFrame(frame)
   }, [mode, screen, startCall])
 
   const openCall = (nextMode: RealtimeMode) => {
+    if (!callLifecycleRef.current.requestOpen()) return
     setMode(nextMode)
     setSessionState('idle')
     dispatchLiveResults({ type: 'clear' })

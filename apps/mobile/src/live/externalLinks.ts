@@ -1,7 +1,7 @@
 import { isTauri } from '@tauri-apps/api/core'
-import { openUrl } from '@tauri-apps/plugin-opener'
 
 export type ExternalUrlRuntime = {
+  isIOS(): boolean
   isNative(): boolean
   openNative(url: string): Promise<void>
   openBrowser(
@@ -27,7 +27,7 @@ function isExternalHttpUrl(url: string) {
 
 export function createExternalUrlOpener(runtime: ExternalUrlRuntime) {
   return async (url: string) => {
-    if (!isExternalHttpUrl(url)) return false
+    if (runtime.isIOS() || !isExternalHttpUrl(url)) return false
 
     try {
       if (runtime.isNative()) {
@@ -48,9 +48,21 @@ export function createExternalUrlOpener(runtime: ExternalUrlRuntime) {
   }
 }
 
+function isIOSWebView() {
+  if (typeof navigator === 'undefined') return false
+  return (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  )
+}
+
 export const openExternalUrl = createExternalUrlOpener({
+  isIOS: isIOSWebView,
   isNative: isTauri,
-  openNative: (url) => openUrl(url),
+  openNative: async (url) => {
+    const { openUrl } = await import('@tauri-apps/plugin-opener')
+    await openUrl(url)
+  },
   openBrowser: (url, target, features) =>
     typeof window === 'undefined' ? null : window.open(url, target, features),
 })

@@ -349,39 +349,36 @@ function parseSearch(callId: string, result: Record<string, unknown>): LiveResul
   if (data.kind !== 'data' || !isRecord(data.value)) return null
   const searchResults = ownValue(data.value, 'results')
   if (searchResults.kind !== 'data' || !isArray(searchResults.value)) return null
-  const length = ownValue(searchResults.value, 'length')
-  if (
-    length.kind !== 'data' ||
-    typeof length.value !== 'number' ||
-    !Number.isSafeInteger(length.value) ||
-    length.value < 0
-  ) {
-    return null
-  }
+  const validated = validatedRows(
+    searchResults.value,
+    MAX_SEARCH_ROWS,
+    (source) => {
+      if (!isRecord(source)) return null
+      const titleField = ownValue(source, 'title')
+      const urlField = ownValue(source, 'url')
+      const snippetField = ownValue(source, 'snippet')
+      if (
+        titleField.kind !== 'data' ||
+        urlField.kind !== 'data' ||
+        snippetField.kind !== 'data'
+      ) {
+        return null
+      }
+      const title = displayText(titleField.value)
+      const url = sourceUrl(urlField.value)
+      const snippet = displayText(snippetField.value, MAX_SNIPPET_LENGTH)
+      if (!title || !url || !snippet) return null
+      return { title, url, snippet }
+    },
+  )
+  if (!validated) return null
 
-  const items: Array<{ title: string; url: string; snippet: string }> = []
   const urls = new Set<string>()
-  for (
-    let index = 0;
-    index < length.value && items.length < MAX_SEARCH_ROWS;
-    index += 1
-  ) {
-    const sourceField = ownValue(searchResults.value, index)
-    if (sourceField.kind !== 'data') return null
-    const source = sourceField.value
-    if (!isRecord(source)) return null
-    const titleField = ownValue(source, 'title')
-    const urlField = ownValue(source, 'url')
-    const snippetField = ownValue(source, 'snippet')
-    if (titleField.kind !== 'data' || urlField.kind !== 'data' || snippetField.kind !== 'data') return null
-    const title = displayText(titleField.value)
-    const url = sourceUrl(urlField.value)
-    const snippet = displayText(snippetField.value, MAX_SNIPPET_LENGTH)
-    if (!title || !url || !snippet) return null
-    if (urls.has(url)) continue
+  const items = validated.filter(({ url }) => {
+    if (urls.has(url)) return false
     urls.add(url)
-    items.push({ title, url, snippet })
-  }
+    return true
+  })
   if (items.length === 0) return null
   return { kind: 'search', callId, items, status: 'success' }
 }
