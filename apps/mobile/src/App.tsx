@@ -83,7 +83,13 @@ import {
 } from './live/callLifecycle'
 import { liveResultsReducer } from './live/liveResults'
 import { createMinimumVisibleSignal } from './live/frameRequestVisibility'
-import { createRippleSignal, type RippleSignal } from './live/ripple'
+import {
+  consumeRippleSignalsThrough,
+  createRippleSignal,
+  enqueueRippleSignal,
+  type RippleSignal,
+  type RippleSignalId,
+} from './live/ripple'
 import { LiveMedia } from './media/LiveMedia'
 import { notifyDueTodos } from './reminders'
 import {
@@ -263,7 +269,7 @@ export default function App() {
   const [renameError, setRenameError] = useState('')
   const [liveArtifacts, setLiveArtifacts] = useState<ResponseArtifact[]>([])
   const [liveResults, dispatchLiveResults] = useReducer(liveResultsReducer, [])
-  const [rippleSignal, setRippleSignal] = useState<RippleSignal | null>(null)
+  const [rippleSignals, setRippleSignals] = useState<readonly RippleSignal[]>([])
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -295,6 +301,10 @@ export default function App() {
     const owner = navigationGuardRef.current.begin()
     setScreen(nextScreen)
     return owner
+  }, [])
+
+  const onRippleSignalsConsumed = useCallback((signalId: RippleSignalId) => {
+    setRippleSignals((current) => consumeRippleSignalsThrough(current, signalId))
   }, [])
 
   useEffect(() => {
@@ -592,6 +602,7 @@ export default function App() {
     setCameraErrorMessage('')
     setInputLevel(0)
     setOutputLevel(0)
+    setRippleSignals([])
     const session = sessionRef.current
     sessionRef.current = null
     dispatchLiveResults({ type: 'clear' })
@@ -704,7 +715,7 @@ export default function App() {
       setToolStatus('')
       setLiveArtifacts([])
       dispatchLiveResults({ type: 'clear' })
-      setRippleSignal(null)
+      setRippleSignals([])
       setElapsed(0)
       setMuted(false)
       setInputLevel(0)
@@ -804,7 +815,8 @@ export default function App() {
         onToolResult: (event) => {
           if (!ownsSession()) return
           dispatchLiveResults({ type: 'add', result: parseLiveResult(event) })
-          setRippleSignal(createRippleSignal('tool'))
+          const signal = createRippleSignal('tool')
+          setRippleSignals((current) => enqueueRippleSignal(current, signal))
         },
         onAudio: (audio) => {
           if (ownsSession()) media.enqueueOutput(audio)
@@ -815,7 +827,8 @@ export default function App() {
         onInterrupted: () => {
           if (!ownsSession()) return
           media.clearOutput()
-          setRippleSignal(createRippleSignal('interrupt'))
+          const signal = createRippleSignal('interrupt')
+          setRippleSignals((current) => enqueueRippleSignal(current, signal))
         },
         onFrameRequested: () =>
           ownsSession() ? media.captureFrame() : null,
@@ -841,7 +854,8 @@ export default function App() {
             if (!ownsSession()) return
             setUserText('')
             setAssistantText('')
-            setRippleSignal(createRippleSignal('speech'))
+            const signal = createRippleSignal('speech')
+            setRippleSignals((current) => enqueueRippleSignal(current, signal))
             void session.speechStarted()
           }, () => {
             if (ownsSession()) void session.speechPaused()
@@ -983,7 +997,7 @@ export default function App() {
     setCameraErrorMessage('')
     setSessionState('idle')
     dispatchLiveResults({ type: 'clear' })
-    setRippleSignal(null)
+    setRippleSignals([])
     navigateTo('call')
   }
 
@@ -2200,7 +2214,8 @@ export default function App() {
           muted={muted}
           inputLevel={inputLevel}
           outputLevel={outputLevel}
-          rippleSignal={rippleSignal}
+          rippleSignals={rippleSignals}
+          onRippleSignalsConsumed={onRippleSignalsConsumed}
           userText={userText}
           assistantText={assistantText}
           toolStatus={toolStatus}

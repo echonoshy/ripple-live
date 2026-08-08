@@ -2,9 +2,10 @@ import type { OrbRenderer } from './orbRenderer'
 import type { QualityTier, VisualState } from './motion'
 import { nextQualityTier } from './motion'
 import {
-  advanceRipple,
+  advanceRippleSignals,
   createRippleState,
   type RippleSignal,
+  type RippleSignalId,
 } from './ripple'
 
 export type OrbLifecycleState = {
@@ -14,7 +15,9 @@ export type OrbLifecycleState = {
     outputLevel: number
     reducedMotion: boolean
     qualityTier: QualityTier
-    rippleSignal: RippleSignal | null
+    rippleSignal?: RippleSignal | null
+    rippleSignals?: readonly RippleSignal[]
+    onRippleSignalsConsumed?(signalId: RippleSignalId): void
   }
 }
 
@@ -221,8 +224,13 @@ export function startOrbLifecycle(
       }
 
       if (resumed || shouldRender(nowMs)) {
-        const ripple = advanceRipple(rippleState, {
-          signal: latestProps.current.rippleSignal,
+        const priorConsumedSignalId = rippleState.lastConsumedSignalId
+        const pendingSignals = latestProps.current.rippleSignals
+          ?? (latestProps.current.rippleSignal
+            ? [latestProps.current.rippleSignal]
+            : [])
+        const ripple = advanceRippleSignals(rippleState, {
+          signals: pendingSignals,
           visualState: latestProps.current.state,
           outputLevel: latestProps.current.outputLevel,
           reducedMotion: latestProps.current.reducedMotion,
@@ -235,6 +243,14 @@ export function startOrbLifecycle(
           rippleAlpha: ripple.frame.alpha,
           haloPulse: ripple.frame.haloPulse,
         })
+        if (
+          ripple.state.lastConsumedSignalId !== null
+          && ripple.state.lastConsumedSignalId !== priorConsumedSignalId
+        ) {
+          latestProps.current.onRippleSignalsConsumed?.(
+            ripple.state.lastConsumedSignalId,
+          )
+        }
       }
       frame = requestAnimationFrame(draw)
     } catch {

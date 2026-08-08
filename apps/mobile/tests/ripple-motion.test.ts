@@ -31,6 +31,54 @@ test('consumes dense events but starts only one ring inside the cooldown', () =>
   assert.equal(next.frame.kind, 'tool')
 })
 
+test('consumes a batched speech and interruption in order without stacking rings', () => {
+  const enqueueSignal = Reflect.get(rippleModule, 'enqueueRippleSignal') as
+    | undefined
+    | ((signals: readonly ReturnType<typeof createRippleSignal>[], signal: ReturnType<typeof createRippleSignal>) => readonly ReturnType<typeof createRippleSignal>[])
+  const advanceSignals = Reflect.get(rippleModule, 'advanceRippleSignals') as
+    | undefined
+    | ((state: ReturnType<typeof createRippleState>, input: {
+        signals: readonly ReturnType<typeof createRippleSignal>[]
+        visualState: 'listening'
+        outputLevel: number
+        reducedMotion: boolean
+      }, nowMs: number) => ReturnType<typeof advanceRipple>)
+  const consumeSignals = Reflect.get(rippleModule, 'consumeRippleSignalsThrough') as
+    | undefined
+    | ((signals: readonly ReturnType<typeof createRippleSignal>[], signalId: ReturnType<typeof createRippleSignal>['id']) => readonly ReturnType<typeof createRippleSignal>[])
+
+  assert.equal(typeof enqueueSignal, 'function')
+  assert.equal(typeof advanceSignals, 'function')
+  assert.equal(typeof consumeSignals, 'function')
+  if (!enqueueSignal || !advanceSignals || !consumeSignals) return
+
+  const speech = createRippleSignal('speech')
+  const interrupt = createRippleSignal('interrupt')
+  let signals: readonly ReturnType<typeof createRippleSignal>[] = []
+  signals = enqueueSignal(signals, speech)
+  signals = enqueueSignal(signals, interrupt)
+
+  assert.deepEqual(signals.map((signal) => signal.kind), ['speech', 'interrupt'])
+  const next = advanceSignals(createRippleState(), {
+    signals,
+    visualState: 'listening',
+    outputLevel: 0,
+    reducedMotion: false,
+  }, 1000)
+  assert.equal(next.state.lastConsumedSignalId, interrupt.id)
+  assert.equal(next.frame.kind, 'speech')
+  assert.equal(next.frame.progress, 0)
+  assert.equal(next.frame.haloPulse, 1)
+
+  const interruptOnly = consumeSignals(signals, speech.id)
+  assert.deepEqual(interruptOnly, [interrupt])
+  assert.equal(
+    consumeSignals(interruptOnly, speech.id),
+    interruptOnly,
+    'a stale acknowledgement should preserve queue identity for React bail-out',
+  )
+})
+
 test('assistant output crosses the emphasis threshold once per speaking phrase', () => {
   let state = createRippleState()
   let next = advanceRipple(state, { signal: null, visualState: 'speaking', outputLevel: 0.31, reducedMotion: false }, 2000)

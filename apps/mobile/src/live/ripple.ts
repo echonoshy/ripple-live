@@ -10,6 +10,9 @@ export type RippleInput = {
   outputLevel: number
   reducedMotion: boolean
 }
+export type RippleSignalsInput = Omit<RippleInput, 'signal'> & {
+  signals: readonly RippleSignal[]
+}
 export type RippleFrame = {
   kind: RippleKind | null
   progress: number | null
@@ -39,6 +42,21 @@ export function nextRippleSignalId(lastId: number): number {
 export function createRippleSignal(kind: RippleKind): RippleSignal {
   latestRippleSignalId = nextRippleSignalId(latestRippleSignalId)
   return { id: latestRippleSignalId as RippleSignalId, kind }
+}
+
+export function enqueueRippleSignal(
+  signals: readonly RippleSignal[],
+  signal: RippleSignal,
+): readonly RippleSignal[] {
+  return [...signals, signal]
+}
+
+export function consumeRippleSignalsThrough(
+  signals: readonly RippleSignal[],
+  signalId: RippleSignalId,
+): readonly RippleSignal[] {
+  const remaining = signals.filter((signal) => signal.id > signalId)
+  return remaining.length === signals.length ? signals : remaining
 }
 
 export type RippleState = {
@@ -140,4 +158,28 @@ export function advanceRipple(
       haloPulse: haloPulseAt(next.haloPulseStartedAtMs, nowMs),
     },
   }
+}
+
+export function advanceRippleSignals(
+  state: RippleState,
+  input: RippleSignalsInput,
+  nowMs: number,
+): { state: RippleState; frame: RippleFrame } {
+  if (input.signals.length === 0) {
+    return advanceRipple(state, { ...input, signal: null }, nowMs)
+  }
+
+  let next = state
+  let frame: RippleFrame = {
+    kind: null,
+    progress: null,
+    alpha: 0,
+    haloPulse: 0,
+  }
+  for (const signal of input.signals) {
+    const advanced = advanceRipple(next, { ...input, signal }, nowMs)
+    next = advanced.state
+    frame = advanced.frame
+  }
+  return { state: next, frame }
 }

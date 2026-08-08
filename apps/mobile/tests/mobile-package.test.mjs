@@ -122,7 +122,7 @@ test('mobile uses protocol v5 semantic endpointing and mode changes', () => {
   assert.match(realtimeSource, /onInterrupted: \(\) => void/)
   assert.match(
     appSource,
-    /onInterrupted: \(\) => \{\s*if \(!ownsSession\(\)\) return\s*media\.clearOutput\(\)\s*setRippleSignal\(createRippleSignal\('interrupt'\)\)/,
+    /onInterrupted: \(\) => \{\s*if \(!ownsSession\(\)\) return\s*media\.clearOutput\(\)\s*const signal = createRippleSignal\('interrupt'\)\s*setRippleSignals\(\(current\) => enqueueRippleSignal\(current, signal\)\)/,
   )
   assert.match(protocolSource, /REALTIME_PROTOCOL_VERSION = 5/)
   assert.match(protocolSource, /type: 'session\.mode\.set'/)
@@ -287,6 +287,10 @@ test('live call owns camera transitions explicitly and renders truthful camera s
     'utf8',
   )
   const callCssSource = readFileSync(path.join(appRoot, 'src/live/LiveCall.css'), 'utf8')
+  const presentationSource = readFileSync(
+    path.join(appRoot, 'src/live/callPresentation.ts'),
+    'utf8',
+  )
 
   assert.match(appSource, /createCameraOrchestrator/)
   assert.match(appSource, /initialCameraRequestRef\.current = nextMode === 'video'/)
@@ -306,17 +310,19 @@ test('live call owns camera transitions explicitly and renders truthful camera s
   assert.doesNotMatch(mediaSource, /withVideo/)
   assert.match(callSource, /cameraPhase === 'opening'/)
   assert.match(callSource, /frameRequestActive && cameraPhase === 'on'/)
-  const cameraStatusStart = callSource.indexOf('const cameraStatus =')
-  const cameraStatusEnd = callSource.indexOf('\n  const orbStyle =', cameraStatusStart)
-  const cameraStatusSource = callSource.slice(cameraStatusStart, cameraStatusEnd)
-  assert.ok(cameraStatusStart >= 0 && cameraStatusEnd > cameraStatusStart)
-  assert.match(cameraStatusSource, /cameraPhase === 'opening'\s*\? '正在开启镜头'/)
-  assert.match(cameraStatusSource, /cameraPhase === 'on'\s*\? '镜头已开启'/)
-  assert.doesNotMatch(cameraStatusSource, /frameRequestActive|closing|error|正在识别/)
+  assert.match(callSource, /liveCallLabels\(state, cameraPhase, toolStatus\)/)
+  assert.match(callSource, /className="live-state-label"[\s\S]*\{labels\.primary\}/)
+  assert.match(callSource, /className="live-camera-label"[\s\S]*\{labels\.camera\}/)
+  assert.match(presentationSource, /cameraPhase === 'opening'[\s\S]*'正在开启镜头'/)
+  assert.match(presentationSource, /cameraPhase === 'on'[\s\S]*'镜头已开启'/)
+  assert.doesNotMatch(presentationSource, /frameRequestActive|正在识别/)
   assert.match(callSource, /disabled=\{!cameraControlReady \|\| cameraBusy\}/)
-  assert.match(callSource, /cameraPhase === 'closing'[\s\S]*'正在关闭镜头'/)
-  assert.match(callSource, /cameraPhase === 'error'[\s\S]*'重试镜头'/)
-  assert.match(callSource, /aria-label=.*切换摄像头/s)
+  assert.match(presentationSource, /case 'closing':[\s\S]*'正在关闭镜头'/)
+  assert.match(presentationSource, /case 'error':[\s\S]*'重试镜头'/)
+  assert.match(callSource, /cameraHeaderAction\(/)
+  assert.match(callSource, /aria-label=\{headerAction\.label\}/)
+  assert.match(callSource, /headerAction\.kind === 'flip'/)
+  assert.doesNotMatch(callSource, /<span className="header-spacer"/)
   assert.match(callCssSource, /opacity 420ms/)
   assert.match(callCssSource, /prefers-reduced-motion: reduce/)
 })
@@ -420,22 +426,26 @@ test('mobile live call uses the immersive presentation contract', () => {
     path.join(appRoot, 'src/live/LiveCall.css'),
     'utf8',
   )
+  const presentationSource = readFileSync(
+    path.join(appRoot, 'src/live/callPresentation.ts'),
+    'utf8',
+  )
 
   assert.match(callSource, /<LiveOrb/)
   assert.match(callSource, /<LiveCaption/)
   assert.doesNotMatch(callSource, /HandPalm|打断回答/)
   assert.doesNotMatch(callSource, /PhoneDisconnect/)
   assert.doesNotMatch(callSource, /className="call-status"|className="call-mode"/)
-  assert.doesNotMatch(callSource, /正在回答|正在聆听|正在思考|连接异常/)
-  assert.match(callSource, /listening: '我在听'/)
-  assert.match(callSource, /thinking: '想一想'/)
-  assert.match(callSource, /speaking: ''/)
-  assert.match(callSource, /error: '连接断开'/)
+  assert.doesNotMatch(presentationSource, /正在回答|正在聆听|正在思考|连接异常/)
+  assert.match(presentationSource, /listening: '我在听'/)
+  assert.match(presentationSource, /thinking: '想一想'/)
+  assert.match(presentationSource, /speaking: ''/)
+  assert.match(presentationSource, /error: '连接断开'/)
   assert.match(callSource, /aria-label="收起通话"/)
   assert.match(callSource, /<CaretDown[^>]*\/>/)
   assert.match(callSource, /<strong>Ripple<\/strong>/)
   assert.match(callSource, /\{formatDuration\(elapsed\)\}/)
-  assert.match(callSource, /aria-label="切换摄像头"/)
+  assert.match(callSource, /aria-label=\{headerAction\.label\}/)
   assert.match(callSource, /aria-label=\{muted \? '取消静音' : '静音'\}/)
   assert.match(callSource, /aria-label="结束通话"/)
   const controlsStart = callSource.indexOf('<footer className="call-controls">')
@@ -456,7 +466,7 @@ test('mobile live call uses the immersive presentation contract', () => {
   assert.match(callCssSource, /\.live-call-screen \.control-button,\s*\.live-call-screen \.end-button\s*\{[^}]*width:\s*50px;[^}]*height:\s*50px;/)
   assert.match(
     appSource,
-    /setUserText\(''\)\s*setAssistantText\(''\)\s*setRippleSignal\(createRippleSignal\('speech'\)\)\s*void session\.speechStarted\(\)/,
+    /setUserText\(''\)\s*setAssistantText\(''\)\s*const signal = createRippleSignal\('speech'\)\s*setRippleSignals\(\(current\) => enqueueRippleSignal\(current, signal\)\)\s*void session\.speechStarted\(\)/,
   )
 })
 
@@ -467,18 +477,23 @@ test('mobile emits Ripple signals only from confirmed live events', () => {
     'utf8',
   )
 
-  assert.match(appSource, /createRippleSignal,\s*type RippleSignal/)
+  assert.match(appSource, /createRippleSignal,[\s\S]*enqueueRippleSignal/)
   assert.match(
     appSource,
-    /const \[rippleSignal, setRippleSignal\] = useState<RippleSignal \| null>\(null\)/,
+    /const \[rippleSignals, setRippleSignals\] = useState<readonly RippleSignal\[\]>\(\[\]\)/,
   )
   assert.equal((appSource.match(/createRippleSignal\(/g) ?? []).length, 3)
+  assert.equal((appSource.match(/enqueueRippleSignal\(/g) ?? []).length, 3)
   const toolStart = appSource.indexOf('onToolResult: (event) => {')
   const toolEnd = appSource.indexOf('\n        onAudio:', toolStart)
   const toolCallback = appSource.slice(toolStart, toolEnd)
   assert.ok(toolStart >= 0 && toolEnd > toolStart)
   assert.match(toolCallback, /if \(!ownsSession\(\)\) return/)
-  assert.match(toolCallback, /setRippleSignal\(createRippleSignal\('tool'\)\)/)
+  assert.match(toolCallback, /const signal = createRippleSignal\('tool'\)/)
+  assert.match(
+    toolCallback,
+    /setRippleSignals\(\(current\) => enqueueRippleSignal\(current, signal\)\)/,
+  )
 
   const interruptedStart = appSource.indexOf('onInterrupted: () => {')
   const interruptedEnd = appSource.indexOf('\n        onFrameRequested:', interruptedStart)
@@ -494,22 +509,33 @@ test('mobile emits Ripple signals only from confirmed live events', () => {
   )
   assert.match(
     appSource,
-    /setUserText\(''\)\s*setAssistantText\(''\)\s*setRippleSignal\(createRippleSignal\('speech'\)\)\s*void session\.speechStarted\(\)/,
+    /setUserText\(''\)\s*setAssistantText\(''\)\s*const signal = createRippleSignal\('speech'\)\s*setRippleSignals\(\(current\) => enqueueRippleSignal\(current, signal\)\)\s*void session\.speechStarted\(\)/,
   )
   assert.doesNotMatch(appSource, /rippleSignalIdRef|nextRippleSignalId/)
   const openCallStart = appSource.indexOf('const openCall = (')
   const openCallEnd = appSource.indexOf('\n  const openConversationMemory', openCallStart)
   const openCallSource = appSource.slice(openCallStart, openCallEnd)
   assert.ok(openCallStart >= 0 && openCallEnd > openCallStart)
-  const signalReset = openCallSource.indexOf('setRippleSignal(null)')
+  const signalReset = openCallSource.indexOf('setRippleSignals([])')
   assert.notEqual(signalReset, -1, 'a new call should clear the previous signal')
   assert.ok(
     signalReset < openCallSource.indexOf("navigateTo('call')"),
     'a new call must clear the previous opaque signal before mounting the orb',
   )
-  assert.match(appSource, /rippleSignal=\{rippleSignal\}/)
-  assert.match(callSource, /rippleSignal: RippleSignal \| null/)
-  assert.match(callSource, /rippleSignal=\{rippleSignal\}/)
+  const stopCallStart = appSource.indexOf('const stopCall = useCallback')
+  const stopCallEnd = appSource.indexOf('\n\n  const leaveCall', stopCallStart)
+  const stopCallSource = appSource.slice(stopCallStart, stopCallEnd)
+  assert.ok(stopCallStart >= 0 && stopCallEnd > stopCallStart)
+  assert.match(
+    stopCallSource,
+    /setRippleSignals\(\[\]\)/,
+    'leaving or unmounting a call should clear queued Ripple signals',
+  )
+  assert.match(appSource, /consumeRippleSignalsThrough\(current, signalId\)/)
+  assert.match(appSource, /rippleSignals=\{rippleSignals\}/)
+  assert.match(appSource, /onRippleSignalsConsumed=\{onRippleSignalsConsumed\}/)
+  assert.match(callSource, /rippleSignals: readonly RippleSignal\[\]/)
+  assert.match(callSource, /rippleSignals=\{rippleSignals\}/)
 })
 
 test('mobile live call renders typed result receipts without unsafe HTML', () => {
@@ -637,6 +663,8 @@ test('mobile live orb releases an interrupted response within 160ms', () => {
     orbSource,
     /isInterruptionRelease\(previousState, props\.state\)/,
   )
+  assert.match(orbSource, /createInterruptionReleaseLatch/)
+  assert.match(orbSource, /interruptionReleaseHeld/)
   assert.match(orbSource, /is-interruption-release/)
   assert.match(cssSource, /\.is-interruption-release\s*\{[^}]*transition-duration:\s*160ms;/s)
   assert.doesNotMatch(

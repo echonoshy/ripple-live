@@ -148,6 +148,39 @@ test('dense speech signals start only the first outward ripple', () => {
   }
 })
 
+test('a batched barge-in is consumed once without losing speech or looping acks', () => {
+  const browser = installBrowserFakes(false, { captureFrames: true })
+  const harness = createHarness()
+  const updates: Parameters<OrbRenderer['update']>[0][] = []
+  const consumed: number[] = []
+  harness.renderer.update = (frame) => updates.push(frame)
+  const signal = (id: number, kind: RippleSignal['kind']): RippleSignal => (
+    { id, kind } as RippleSignal
+  )
+  Object.assign(harness.latestProps.current, {
+    rippleSignals: [signal(1, 'speech'), signal(2, 'interrupt')],
+    onRippleSignalsConsumed: (id: number) => consumed.push(id),
+  })
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    runNextFrame(browser, 1000)
+    runNextFrame(browser, 1020)
+
+    assert.equal(updates[0]?.rippleProgress, 0)
+    assert.equal(updates[0]?.haloPulse, 1)
+    assert.deepEqual(consumed, [2])
+    cleanup()
+  } finally {
+    browser.restore()
+  }
+})
+
 function runNextFrame(
   browser: ReturnType<typeof installBrowserFakes>,
   nowMs: number,

@@ -1,4 +1,5 @@
 import {
+  ArrowClockwise,
   CameraRotate,
   CaretDown,
   Microphone,
@@ -11,7 +12,8 @@ import { useEffect, useState, type CSSProperties, type RefObject } from 'react'
 import { assetBlob } from '../api'
 import { mapSessionState } from '../live/motion'
 import type { CameraPhase } from '../live/cameraOrchestration'
-import type { RippleSignal } from '../live/ripple'
+import { cameraHeaderAction, liveCallLabels } from '../live/callPresentation'
+import type { RippleSignal, RippleSignalId } from '../live/ripple'
 import type {
   RealtimeMode,
   ResponseArtifact,
@@ -22,18 +24,6 @@ import '../live/LiveCall.css'
 import { LiveCaption } from './LiveCaption'
 import { LiveOrb } from './LiveOrb'
 import { LiveResultSheet } from './LiveResultSheet'
-
-const stateLabels: Record<SessionState, string> = {
-  idle: '准备就绪',
-  connecting: '正在连接',
-  preparing: '准备中',
-  listening: '我在听',
-  thinking: '想一想',
-  using_tool: '处理中',
-  speaking: '',
-  ended: '通话已结束',
-  error: '连接断开',
-}
 
 function formatDuration(seconds: number) {
   const minutes = Math.floor(seconds / 60)
@@ -93,7 +83,8 @@ export type LiveCallScreenProps = {
   muted: boolean
   inputLevel: number
   outputLevel: number
-  rippleSignal: RippleSignal | null
+  rippleSignals: readonly RippleSignal[]
+  onRippleSignalsConsumed(signalId: RippleSignalId): void
   userText: string
   assistantText: string
   toolStatus: string
@@ -122,7 +113,8 @@ export function LiveCallScreen({
   muted,
   inputLevel,
   outputLevel,
-  rippleSignal,
+  rippleSignals,
+  onRippleSignalsConsumed,
   userText,
   assistantText,
   toolStatus,
@@ -141,14 +133,12 @@ export function LiveCallScreen({
 }: LiveCallScreenProps) {
   const videoMode = cameraPreviewVisible
   const cameraBusy = cameraPhase === 'opening' || cameraPhase === 'closing'
-  const stateDetail = state === 'using_tool' && toolStatus
-    ? toolStatus
-    : stateLabels[state]
-  const cameraStatus = cameraPhase === 'opening'
-      ? '正在开启镜头'
-      : cameraPhase === 'on'
-        ? '镜头已开启'
-        : stateDetail
+  const labels = liveCallLabels(state, cameraPhase, toolStatus)
+  const headerAction = cameraHeaderAction(
+    cameraPhase,
+    cameraPreviewVisible,
+    cameraControlReady,
+  )
   const orbStyle = {
     '--live-input-scale': 0.98 + clampLevel(inputLevel) * 0.065,
     '--live-output-scale': 0.96 + clampLevel(outputLevel) * 0.115,
@@ -189,16 +179,26 @@ export function LiveCallScreen({
             {formatDuration(elapsed)}
           </span>
         </div>
-        {cameraPhase === 'on' ? (
-          <button
-            className="icon-button call-icon"
-            type="button"
-            aria-label="切换摄像头"
-            onClick={() => { void onFlipCamera().catch(() => {}) }}
-          >
-            <CameraRotate aria-hidden="true" />
-          </button>
-        ) : <span className="header-spacer" />}
+        <button
+          className="icon-button call-icon"
+          type="button"
+          aria-label={headerAction.label}
+          disabled={headerAction.disabled}
+          onClick={() => {
+            const action = headerAction.kind === 'flip'
+              ? onFlipCamera
+              : onToggleCamera
+            void action().catch(() => {})
+          }}
+        >
+          {headerAction.kind === 'flip'
+            ? <CameraRotate aria-hidden="true" />
+            : cameraPhase === 'error'
+              ? <ArrowClockwise aria-hidden="true" />
+              : videoMode
+                ? <VideoCameraSlash aria-hidden="true" />
+                : <VideoCamera aria-hidden="true" />}
+        </button>
       </header>
 
       <div className="live-stage">
@@ -207,16 +207,20 @@ export function LiveCallScreen({
             state={mapSessionState(state)}
             inputLevel={inputLevel}
             outputLevel={outputLevel}
-            rippleSignal={rippleSignal}
+            rippleSignals={rippleSignals}
+            onRippleSignalsConsumed={onRippleSignalsConsumed}
           />
         </div>
 
         <div className="live-feedback">
-          {cameraStatus && (
-            <span className="live-state-label" role="status">
-              {cameraStatus}
-            </span>
-          )}
+          <div className="live-status" role="status" aria-live="polite">
+            {labels.primary && (
+              <span className="live-state-label">{labels.primary}</span>
+            )}
+            {labels.camera && (
+              <span className="live-camera-label">{labels.camera}</span>
+            )}
+          </div>
           <LiveCaption
             userText={userText}
             assistantText={assistantText}

@@ -47,6 +47,51 @@ export function isInterruptionRelease(
   return previous === 'speaking' && next === 'listening'
 }
 
+type InterruptionReleaseTimers = {
+  setTimeout(callback: () => void, delayMs: number): unknown
+  clearTimeout(handle: unknown): void
+}
+
+const interruptionReleaseTimers: InterruptionReleaseTimers = {
+  setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimeout: (handle) => {
+    globalThis.clearTimeout(handle as ReturnType<typeof globalThis.setTimeout>)
+  },
+}
+
+export function createInterruptionReleaseLatch(
+  onActive: (active: boolean) => void,
+  timers: InterruptionReleaseTimers = interruptionReleaseTimers,
+) {
+  let active = false
+  let timer: unknown = null
+
+  const update = (previous: VisualState | null, next: VisualState) => {
+    if (!isInterruptionRelease(previous, next)) return
+    if (timer !== null) timers.clearTimeout(timer)
+    if (!active) {
+      active = true
+      onActive(true)
+    }
+    timer = timers.setTimeout(() => {
+      timer = null
+      if (!active) return
+      active = false
+      onActive(false)
+    }, MOTION_TIMING.interruptMs)
+  }
+
+  return {
+    current: () => active,
+    dispose() {
+      if (timer !== null) timers.clearTimeout(timer)
+      timer = null
+      active = false
+    },
+    update,
+  }
+}
+
 export function smoothLevel(previous: number, input: number, alpha: number) {
   const target = Math.min(1, Math.max(0, Number.isFinite(input) ? input : 0))
   return previous + (target - previous) * Math.min(1, Math.max(0, alpha))

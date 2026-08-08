@@ -334,6 +334,18 @@
   letter-spacing: 0.02em;
 }
 
+.live-status {
+  min-height: 16px;
+}
+
+.live-camera-label {
+  display: block;
+  margin-top: 3px;
+  color: rgb(238 237 232 / 42%);
+  font-size: 10px;
+  font-weight: 560;
+}
+
 .live-caption {
   min-height: 26px;
   margin: 7px 0 0;
@@ -679,6 +691,11 @@
 }
 
 .live-call-screen .control-button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.live-call-screen .call-icon:disabled {
   cursor: wait;
   opacity: 0.58;
 }
