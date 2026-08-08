@@ -16,7 +16,7 @@ import {
   Ticket,
   X,
 } from '@phosphor-icons/react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
 import './components/AppNavigation.css'
 import appIcon from '../src-tauri/icons/icon.png'
@@ -62,6 +62,8 @@ import {
   type LibraryView,
 } from './library'
 import { cameraErrorAfterSwitch, visibleCallError } from './live/callErrors'
+import { createSingleFlight } from './live/callLifecycle'
+import { liveResultsReducer } from './live/liveResults'
 import { LiveMedia } from './media/LiveMedia'
 import { notifyDueTodos } from './reminders'
 import {
@@ -70,6 +72,7 @@ import {
   type RealtimeMode,
   type SessionState,
 } from './realtime/RealtimeSession'
+import { parseLiveResult } from './realtime/toolResults'
 
 const DEFAULT_SERVER = '140.143.229.103:8700'
 const DEFAULT_VIEWPORT = 'width=device-width, initial-scale=1.0'
@@ -234,6 +237,7 @@ export default function App() {
   const [renameBusy, setRenameBusy] = useState(false)
   const [renameError, setRenameError] = useState('')
   const [liveArtifacts, setLiveArtifacts] = useState<ResponseArtifact[]>([])
+  const [liveResults, dispatchLiveResults] = useReducer(liveResultsReducer, [])
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -442,10 +446,22 @@ export default function App() {
     setCameraErrorMessage('')
     setInputLevel(0)
     setOutputLevel(0)
-    await sessionRef.current?.close()
+    const session = sessionRef.current
     sessionRef.current = null
+    dispatchLiveResults({ type: 'clear' })
+    await session?.close()
     setSessionState('ended')
   }, [])
+
+  const leaveCall = useMemo(
+    () =>
+      createSingleFlight(async () => {
+        await stopCall()
+        setScreen('home')
+        setSessionState('idle')
+      }),
+    [stopCall],
+  )
 
   useEffect(() => {
     return () => {
@@ -465,6 +481,7 @@ export default function App() {
       setUserText('')
       setToolStatus('')
       setLiveArtifacts([])
+      dispatchLiveResults({ type: 'clear' })
       setElapsed(0)
       setMuted(false)
       setInputLevel(0)
@@ -486,26 +503,40 @@ export default function App() {
         server,
         accessToken,
         mode: nextMode,
-        onState: setSessionState,
+        onState: (state) => {
+          if (sessionRef.current === session) setSessionState(state)
+        },
         onError: (message) => {
+          if (sessionRef.current !== session) return
           setInputLevel(0)
           setOutputLevel(0)
           setErrorMessage(message)
+          dispatchLiveResults({ type: 'clear' })
           setSessionState('error')
         },
-        onResponseFailed: setErrorMessage,
+        onResponseFailed: (message) => {
+          if (sessionRef.current !== session) return
+          setErrorMessage(message)
+          dispatchLiveResults({ type: 'clear' })
+        },
         onAssistantText: setAssistantText,
         onUserText: (text) => {
+          if (sessionRef.current !== session) return
           setUserText(text)
           setLiveArtifacts([])
+          dispatchLiveResults({ type: 'clear' })
         },
         onTool: setToolStatus,
-        onToolResult: () => {},
+        onToolResult: (event) => {
+          if (sessionRef.current !== session) return
+          dispatchLiveResults({ type: 'add', result: parseLiveResult(event) })
+        },
         onAudio: (audio) => media.enqueueOutput(audio),
         onAudioDone: () => media.finishOutput(),
         onInterrupted: () => media.clearOutput(),
         onFrameRequested: () => media.captureFrame(),
         onArtifact: (artifact) => {
+          if (sessionRef.current !== session) return
           setLiveArtifacts((items) =>
             items.some((item) => item.id === artifact.id)
               ? items
@@ -534,12 +565,14 @@ export default function App() {
       try {
         await session.connect()
       } catch (error) {
+        if (sessionRef.current !== session) return
         media.stop()
         setInputLevel(0)
         setOutputLevel(0)
         const message =
           error instanceof Error ? error.message : '无法连接实时服务'
         setErrorMessage(message)
+        dispatchLiveResults({ type: 'clear' })
         setSessionState('error')
       }
     },
@@ -555,6 +588,7 @@ export default function App() {
   const openCall = (nextMode: RealtimeMode) => {
     setMode(nextMode)
     setSessionState('idle')
+    dispatchLiveResults({ type: 'clear' })
     setScreen('call')
   }
 
@@ -573,12 +607,6 @@ export default function App() {
         setScreen('settings')
         break
     }
-  }
-
-  const leaveCall = async () => {
-    await stopCall()
-    setScreen('home')
-    setSessionState('idle')
   }
 
   const toggleMute = () => {
@@ -1653,12 +1681,16 @@ export default function App() {
           toolStatus={toolStatus}
           errorMessage={visibleCallError(errorMessage, cameraErrorMessage)}
           artifacts={liveArtifacts}
+          results={liveResults}
           server={server}
           accessToken={accessToken}
           videoRef={videoRef}
           captureCanvasRef={canvasRef}
           onToggleMute={toggleMute}
           onFlipCamera={flipCamera}
+          onDismissResult={(callId) =>
+            dispatchLiveResults({ type: 'dismiss', callId })
+          }
           onLeave={leaveCall}
         />
       )}

@@ -13,9 +13,11 @@ import type {
   ResponseArtifact,
   SessionState,
 } from '../realtime/RealtimeSession'
+import type { LiveResult } from '../realtime/toolResults'
 import '../live/LiveCall.css'
 import { LiveCaption } from './LiveCaption'
 import { LiveOrb } from './LiveOrb'
+import { LiveResultSheet } from './LiveResultSheet'
 
 const stateLabels: Record<SessionState, string> = {
   idle: '准备就绪',
@@ -83,12 +85,14 @@ export type LiveCallScreenProps = {
   toolStatus: string
   errorMessage: string
   artifacts: ResponseArtifact[]
+  results: LiveResult[]
   server: string
   accessToken: string
   videoRef: RefObject<HTMLVideoElement | null>
   captureCanvasRef: RefObject<HTMLCanvasElement | null>
   onToggleMute(): void
   onFlipCamera(): Promise<void>
+  onDismissResult(callId: string): void
   onLeave(): Promise<void>
 }
 
@@ -104,12 +108,14 @@ export function LiveCallScreen({
   toolStatus,
   errorMessage,
   artifacts,
+  results,
   server,
   accessToken,
   videoRef,
   captureCanvasRef,
   onToggleMute,
   onFlipCamera,
+  onDismissResult,
   onLeave,
 }: LiveCallScreenProps) {
   const videoMode = mode === 'video'
@@ -125,7 +131,9 @@ export function LiveCallScreen({
     : stateLabels[state]
 
   return (
-    <section className={`call-screen live-call-screen ${videoMode ? 'has-video' : 'has-audio'}`}>
+    <section
+      className={`call-screen live-call-screen ${videoMode ? 'has-video' : 'has-audio'} ${results.length > 0 ? 'has-results' : ''}`}
+    >
       <video
         ref={videoRef}
         className="camera-preview"
@@ -182,19 +190,24 @@ export function LiveCallScreen({
         </div>
       </div>
 
-      {artifacts.length > 0 && (
-        <aside className="live-artifact-sheet" aria-label="实时生成的画面">
-          <div className="live-artifact-strip">
-            {artifacts.map((artifact) => (
-              <AuthenticatedArtifact
-                key={artifact.id}
-                artifact={artifact}
-                server={server}
-                accessToken={accessToken}
-              />
-            ))}
-          </div>
-        </aside>
+      {(results.length > 0 || artifacts.length > 0) && (
+        <div className="live-output-tray">
+          <LiveResultSheet results={results} onDismiss={onDismissResult} />
+          {artifacts.length > 0 && (
+            <aside className="live-artifact-sheet" aria-label="实时生成的画面">
+              <div className="live-artifact-strip">
+                {artifacts.map((artifact) => (
+                  <AuthenticatedArtifact
+                    key={artifact.id}
+                    artifact={artifact}
+                    server={server}
+                    accessToken={accessToken}
+                  />
+                ))}
+              </div>
+            </aside>
+          )}
+        </div>
       )}
 
       <footer className="call-controls">

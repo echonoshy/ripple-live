@@ -249,6 +249,29 @@ test('mobile live call uses the immersive presentation contract', () => {
   )
 })
 
+test('mobile live call renders typed result receipts without unsafe HTML', () => {
+  const resultPath = path.join(
+    appRoot,
+    'src/components/LiveResultSheet.tsx',
+  )
+  assert.equal(existsSync(resultPath), true, 'LiveResultSheet.tsx should exist')
+
+  const resultSource = readFileSync(resultPath, 'utf8')
+  const callSource = readFileSync(
+    path.join(appRoot, 'src/components/LiveCallScreen.tsx'),
+    'utf8',
+  )
+
+  assert.match(resultSource, /memory_receipt/)
+  assert.match(resultSource, /todo_receipt/)
+  assert.match(resultSource, /weather/)
+  assert.match(resultSource, /search/)
+  assert.match(resultSource, /target="_blank"/)
+  assert.match(resultSource, /rel="noopener noreferrer"/)
+  assert.doesNotMatch(resultSource, /dangerouslySetInnerHTML/)
+  assert.match(callSource, /<LiveResultSheet/)
+})
+
 test('mobile live call controls retain scoped focus and size contracts', () => {
   const cssSource = readFileSync(
     path.join(appRoot, 'src/live/LiveCall.css'),

@@ -1,7 +1,126 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import * as React from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 
+import { LiveResultSheet } from '../src/components/LiveResultSheet.tsx'
+import { createSingleFlight } from '../src/live/callLifecycle.ts'
+import { liveResultsReducer } from '../src/live/liveResults.ts'
 import { parseLiveResult } from '../src/realtime/toolResults.ts'
+import type { LiveResult } from '../src/realtime/toolResults.ts'
+
+;(globalThis as typeof globalThis & { React: typeof React }).React = React
+
+function genericResult(
+  callId: string,
+  label = callId,
+  status: 'success' | 'error' = 'success',
+): LiveResult {
+  return { kind: 'generic', callId, label, status }
+}
+
+test('keeps the latest three unique tool results in completion order', () => {
+  const results = ['call-1', 'call-2', 'call-3', 'call-4'].reduce(
+    (state, callId) =>
+      liveResultsReducer(state, { type: 'add', result: genericResult(callId) }),
+    [] as LiveResult[],
+  )
+
+  assert.deepEqual(results.map((result) => result.callId), [
+    'call-2',
+    'call-3',
+    'call-4',
+  ])
+})
+
+test('replaces a duplicate call result in place without adding or reordering it', () => {
+  const initial = [genericResult('call-1'), genericResult('call-2')]
+
+  const results = liveResultsReducer(initial, {
+    type: 'add',
+    result: genericResult('call-1', 'updated', 'error'),
+  })
+
+  assert.deepEqual(results, [
+    genericResult('call-1', 'updated', 'error'),
+    genericResult('call-2'),
+  ])
+})
+
+test('dismisses result cards independently in any sequence', () => {
+  const initial = [
+    genericResult('call-1'),
+    genericResult('call-2'),
+    genericResult('call-3'),
+  ]
+
+  const withoutMiddle = liveResultsReducer(initial, {
+    type: 'dismiss',
+    callId: 'call-2',
+  })
+  const withoutLast = liveResultsReducer(withoutMiddle, {
+    type: 'dismiss',
+    callId: 'call-3',
+  })
+
+  assert.deepEqual(withoutMiddle.map((result) => result.callId), [
+    'call-1',
+    'call-3',
+  ])
+  assert.deepEqual(withoutLast.map((result) => result.callId), ['call-1'])
+})
+
+test('clears all results for a new live turn or call lifecycle', () => {
+  const results = liveResultsReducer([genericResult('call-1')], {
+    type: 'clear',
+  })
+
+  assert.deepEqual(results, [])
+})
+
+test('renders an out-of-range finite todo due time without crashing the result sheet', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(LiveResultSheet, {
+      results: [
+        {
+          kind: 'todo_receipt',
+          callId: 'call-invalid-date',
+          todoId: 'todo-invalid-date',
+          title: '仍然显示待办',
+          dueAt: 9e15,
+          status: 'success',
+        },
+      ],
+      onDismiss: () => {},
+    }),
+  )
+
+  assert.match(html, /仍然显示待办/)
+})
+
+test('coalesces repeated leave requests until the active close finishes', async () => {
+  const releases: Array<() => void> = []
+  let closes = 0
+  const leave = createSingleFlight(async () => {
+    closes += 1
+    await new Promise<void>((resolve) => releases.push(resolve))
+  })
+
+  const first = leave()
+  const repeated = leave()
+
+  assert.strictEqual(repeated, first)
+  assert.equal(closes, 1)
+
+  releases[0]?.()
+  await first
+
+  const nextCall = leave()
+  assert.notStrictEqual(nextCall, first)
+  assert.equal(closes, 2)
+  releases[1]?.()
+  await nextCall
+})
 
 test('creates a memory receipt only for a successful validated memory', () => {
   const result = parseLiveResult({
