@@ -3,25 +3,22 @@ import {
   ArrowLeft,
   ChatCircleDots,
   CheckCircle,
-  ClockCounterClockwise,
   Circle,
   EnvelopeSimple,
-  GearSix,
   ImagesSquare,
   LockKey,
   ListChecks,
-  Microphone,
   PushPin,
   SignOut,
   NotePencil,
   Plus,
   Trash,
   Ticket,
-  VideoCamera,
   X,
 } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
+import './components/AppNavigation.css'
 import appIcon from '../src-tauri/icons/icon.png'
 import {
   assetBlob,
@@ -50,6 +47,8 @@ import {
   type VisualMemory,
 } from './api'
 import { LibraryActions } from './components/LibraryActions'
+import { BottomNav, type AppTab } from './components/BottomNav'
+import { ConversationHome } from './components/ConversationHome'
 import { LiveCallScreen } from './components/LiveCallScreen'
 import { LibrarySection } from './components/LibrarySection'
 import { LibraryToolbar } from './components/LibraryToolbar'
@@ -84,6 +83,22 @@ type Screen =
   | 'conversation'
   | 'memories'
   | 'todos'
+
+function tabForScreen(screen: Screen): AppTab {
+  switch (screen) {
+    case 'home':
+    case 'call':
+    case 'history':
+    case 'conversation':
+      return 'chat'
+    case 'memories':
+      return 'memories'
+    case 'todos':
+      return 'todos'
+    case 'settings':
+      return 'profile'
+  }
+}
 
 function AuthenticatedImage({
   server,
@@ -540,6 +555,23 @@ export default function App() {
     setMode(nextMode)
     setSessionState('idle')
     setScreen('call')
+  }
+
+  const selectTab = (tab: AppTab) => {
+    switch (tab) {
+      case 'chat':
+        setScreen('home')
+        break
+      case 'memories':
+        setScreen('memories')
+        break
+      case 'todos':
+        setScreen('todos')
+        break
+      case 'profile':
+        setScreen('settings')
+        break
+    }
   }
 
   const leaveCall = async () => {
@@ -1053,88 +1085,13 @@ export default function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${screen !== 'call' ? 'with-bottom-nav' : ''}`}>
       {screen === 'home' && (
-        <section className="home-screen">
-          <header className="home-header">
-            <div className="brand-lockup">
-              <img src={appIcon} alt="" />
-              <div>
-                <strong>Ripple Live</strong>
-                <span>私人实时 Agent</span>
-              </div>
-            </div>
-            <div className="header-actions">
-              <button
-                className="icon-button"
-                type="button"
-                aria-label="待办"
-                onClick={() => setScreen('todos')}
-              >
-                <ListChecks />
-              </button>
-              <button
-                className="icon-button"
-                type="button"
-                aria-label="视觉记忆"
-                onClick={() => setScreen('memories')}
-              >
-                <ImagesSquare />
-              </button>
-              <button
-                className="icon-button"
-                type="button"
-                aria-label="聊天历史"
-                onClick={() => setScreen('history')}
-              >
-                <ClockCounterClockwise />
-              </button>
-              <button
-                className="icon-button"
-                type="button"
-                aria-label="打开设置"
-                onClick={() => setScreen('settings')}
-              >
-                <GearSix />
-              </button>
-            </div>
-          </header>
-
-          <div className="ready-state">
-            <div className="ready-mark" aria-hidden="true">
-              <img src={appIcon} alt="" />
-            </div>
-            <p><span aria-hidden="true" /> 准备就绪</p>
-            <h1>打开镜头，开始聊聊</h1>
-            <span>让我看见现场，实时听懂并回应你。</span>
-          </div>
-
-          <div className="launch-actions">
-            <button
-              className="launch-button call-entry is-video"
-              type="button"
-              onClick={() => openCall('video')}
-            >
-              <span className="call-entry-icon" aria-hidden="true">
-                <VideoCamera weight="fill" />
-              </span>
-              <span className="call-entry-copy">
-                <strong>开始视频通话</strong>
-                <small>让我看见现场</small>
-              </span>
-            </button>
-            <button
-              className="launch-button call-entry is-voice"
-              type="button"
-              aria-label="开始语音通话"
-              onClick={() => openCall('audio')}
-            >
-              <span className="call-entry-icon" aria-hidden="true">
-                <Microphone weight="fill" />
-              </span>
-            </button>
-          </div>
-        </section>
+        <ConversationHome
+          onStartAudio={() => openCall('audio')}
+          onStartVideo={() => openCall('video')}
+          onOpenHistory={() => setScreen('history')}
+        />
       )}
 
       {screen === 'history' && (
@@ -1703,6 +1660,10 @@ export default function App() {
           onFlipCamera={flipCamera}
           onLeave={leaveCall}
         />
+      )}
+
+      {screen !== 'call' && (
+        <BottomNav active={tabForScreen(screen)} onSelect={selectTab} />
       )}
 
       {deleteRequest && (

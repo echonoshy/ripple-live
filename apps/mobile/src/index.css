@@ -1,5 +1,5 @@
 html {
-  background: #100e14;
+  background: #020406;
   font-family:
     "Noto Sans SC",
     "PingFang SC",
@@ -28,6 +28,6 @@ button {
 
 @media (prefers-color-scheme: dark) {
   html {
-    background: #100e14;
+    background: #020406;
   }
 }

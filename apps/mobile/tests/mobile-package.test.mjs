@@ -161,42 +161,52 @@ test('mobile todos retain completed items in a dedicated view', () => {
   assert.match(cssSource, /\.todo-view-switch/)
 })
 
-test('mobile home presents video as the primary call entry', () => {
+test('mobile home presents voice as the primary call entry with explicit camera access', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const homePath = path.join(appRoot, 'src/components/ConversationHome.tsx')
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
 
-  assert.match(appSource, /<h1>打开镜头，开始聊聊<\/h1>/)
-  assert.match(appSource, /<strong>开始视频通话<\/strong>/)
-  assert.match(appSource, /<small>让我看见现场<\/small>/)
-  assert.match(appSource, /aria-label="开始语音通话"/)
-  assert.equal(
-    (appSource.match(/className="launch-button call-entry"/g) ?? []).length,
-    0,
-  )
-  assert.match(appSource, /className="launch-button call-entry is-video"/)
-  assert.match(appSource, /className="launch-button call-entry is-voice"/)
-  assert.match(
-    cssSource,
-    /\.launch-actions\s*{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 68px/s,
-  )
-  assert.match(cssSource, /animation:\s*ripple-ready-pulse 3\.5s/)
-  assert.match(cssSource, /@media \(prefers-reduced-motion: reduce\)/)
-  for (const color of [
-    '#0f0d12',
-    '#19161d',
-    '#24202a',
-    '#302b36',
-    '#f5f2f7',
-    '#9046ff',
-  ]) {
-    assert.match(cssSource, new RegExp(color))
+  assert.equal(existsSync(homePath), true, 'ConversationHome.tsx should exist')
+  const homeSource = readFileSync(homePath, 'utf8')
+  assert.match(appSource, /<ConversationHome/)
+  assert.match(homeSource, /想聊点什么？/)
+  assert.match(homeSource, /开始说话/)
+  assert.match(homeSource, /打开镜头/)
+  assert.match(homeSource, /onClick=\{onStartAudio\}/)
+  assert.match(homeSource, /onClick=\{onStartVideo\}/)
+  assert.match(homeSource, /onClick=\{onOpenHistory\}/)
+  assert.match(appSource, /onStartAudio=\{\(\) => openCall\('audio'\)\}/)
+  assert.match(appSource, /onStartVideo=\{\(\) => openCall\('video'\)\}/)
+  assert.doesNotMatch(appSource, /打开镜头，开始聊聊/)
+  assert.doesNotMatch(homeSource, /统计|最近对话|自动保存/)
+  assert.match(cssSource, /--canvas:\s*#020406/)
+  assert.doesNotMatch(cssSource, /#9046ff|--ripple-violet|--voice-accent:\s*#b98aff/)
+})
+
+test('mobile navigation exposes four tabs with screen-derived selection', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const navPath = path.join(appRoot, 'src/components/BottomNav.tsx')
+  const navCssPath = path.join(appRoot, 'src/components/AppNavigation.css')
+
+  assert.equal(existsSync(navPath), true, 'BottomNav.tsx should exist')
+  assert.equal(existsSync(navCssPath), true, 'AppNavigation.css should exist')
+  const navSource = readFileSync(navPath, 'utf8')
+  const navCssSource = readFileSync(navCssPath, 'utf8')
+  for (const label of ['对话', '记忆', '待办', '我的']) {
+    assert.match(navSource, new RegExp(label))
   }
-  assert.match(cssSource, /@media \(max-width: 359px\)/)
-  assert.match(cssSource, /\.launch-button\s*{[^}]*min-width:\s*44px/s)
-  assert.match(cssSource, /--voice-accent:\s*#b98aff/)
-  assert.match(cssSource, /--video-accent:\s*#e8ddff/)
-  assert.match(cssSource, /\.call-entry\.is-voice/)
-  assert.match(cssSource, /\.call-entry\.is-video/)
+  assert.match(navSource, /export type AppTab = 'chat' \| 'memories' \| 'todos' \| 'profile'/)
+  assert.match(navSource, /aria-label="主导航"/)
+  assert.match(navSource, /aria-current=\{active === tab \? 'page' : undefined\}/)
+  assert.match(appSource, /case 'history':\s*case 'conversation':\s*return 'chat'/)
+  assert.match(appSource, /case 'memories':\s*return 'memories'/)
+  assert.match(appSource, /case 'todos':\s*return 'todos'/)
+  assert.match(appSource, /case 'settings':\s*return 'profile'/)
+  assert.match(appSource, /<BottomNav active=\{tabForScreen\(screen\)\}/)
+  assert.match(appSource, /\{screen !== 'call' && \(\s*<BottomNav/s)
+  assert.equal((appSource.match(/<BottomNav /g) ?? []).length, 1)
+  assert.match(navCssSource, /min-height:\s*44px/)
+  assert.match(navCssSource, /env\(safe-area-inset-bottom\)/)
 })
 
 test('mobile live orb uses a single canvas renderer with a static fallback', () => {
