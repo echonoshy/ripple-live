@@ -7,6 +7,7 @@ type LiveMediaOptions = {
   facingMode: 'user' | 'environment'
   onPlaybackStarted: (bufferedMs: number) => void
   onPlaybackEnded: () => void
+  onOutputLevel: (level: number) => void
 }
 
 type AudioChunkMessage = {
@@ -21,7 +22,12 @@ type AudioLevelMessage = {
 }
 
 type PlaybackStateMessage = {
-  type: 'playback-started' | 'playback-ended' | 'playback-underrun'
+  type:
+    | 'playback-started'
+    | 'playback-ended'
+    | 'playback-underrun'
+    | 'audio-level'
+  level?: number
   bufferedMs?: number
   count?: number
 }
@@ -259,6 +265,7 @@ export class LiveMedia {
 
   clearOutput() {
     this.playbackNode?.port.postMessage({ type: 'clear' })
+    this.options.onOutputLevel(0)
   }
 
   stop() {
@@ -273,6 +280,7 @@ export class LiveMedia {
     this.vad = null
     void vad?.destroy().catch(() => {})
     this.clearOutput()
+    this.options.onOutputLevel(0)
     this.captureNode?.disconnect()
     this.playbackNode?.disconnect()
     this.sourceNode?.disconnect()
@@ -312,6 +320,11 @@ export class LiveMedia {
     this.playbackNode.port.onmessage = (
       event: MessageEvent<PlaybackStateMessage>,
     ) => {
+      if (event.data.type === 'audio-level') {
+        event.data.level = Math.min(1, Math.max(0, event.data.level ?? 0))
+        this.options.onOutputLevel(event.data.level)
+        return
+      }
       if (event.data.type === 'playback-underrun') {
         console.warn('[Ripple Live] playback buffer underrun', {
           count: event.data.count,

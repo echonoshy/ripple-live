@@ -95,6 +95,10 @@ test('mobile uses protocol v4 semantic endpointing', () => {
     path.join(appRoot, 'src/media/LiveMedia.ts'),
     'utf8',
   )
+  const playbackSource = readFileSync(
+    path.join(appRoot, 'public/playback-processor.js'),
+    'utf8',
+  )
   const realtimeSource = readFileSync(
     path.join(appRoot, 'src/realtime/RealtimeSession.ts'),
     'utf8',
@@ -124,6 +128,9 @@ test('mobile uses protocol v4 semantic endpointing', () => {
   assert.match(mediaSource, /width: \{ ideal: 1280 \}/)
   assert.match(mediaSource, /height: \{ ideal: 720 \}/)
   assert.doesNotMatch(mediaSource, /lowPower/)
+  assert.match(playbackSource, /type: 'audio-level'/)
+  assert.match(mediaSource, /onOutputLevel: \(level: number\) => void/)
+  assert.match(mediaSource, /this\.options\.onOutputLevel\(event\.data\.level\)/)
 })
 
 test('mobile todo reminders are enabled for Android and iOS', () => {

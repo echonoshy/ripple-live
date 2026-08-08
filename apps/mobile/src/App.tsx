@@ -183,6 +183,7 @@ export default function App() {
   const [userText, setUserText] = useState('')
   const [toolStatus, setToolStatus] = useState('')
   const [muted, setMuted] = useState(false)
+  const [_outputLevel, setOutputLevel] = useState(0)
   const [elapsed, setElapsed] = useState(0)
   const [cameraFacing, setCameraFacing] = useState<'user' | 'environment'>(
     'environment',
@@ -474,6 +475,7 @@ export default function App() {
         onPlaybackStarted: (bufferedMs) =>
           session.outputPlaybackStarted(bufferedMs),
         onPlaybackEnded: () => session.outputPlaybackEnded(),
+        onOutputLevel: setOutputLevel,
       })
       session = new RealtimeSession({
         server,

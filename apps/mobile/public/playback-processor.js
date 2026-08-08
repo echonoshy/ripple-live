@@ -16,6 +16,8 @@ class StreamPlaybackProcessor extends AudioWorkletProcessor {
     this.ending = false
     this.playbackEnded = false
     this.underruns = 0
+    this.levelSquareSum = 0
+    this.levelSampleCount = 0
 
     this.port.onmessage = (event) => {
       if (event.data?.type === 'enqueue') {
@@ -36,6 +38,9 @@ class StreamPlaybackProcessor extends AudioWorkletProcessor {
         this.playing = false
         this.ending = false
         this.playbackEnded = false
+        this.levelSquareSum = 0
+        this.levelSampleCount = 0
+        this.port.postMessage({ type: 'audio-level', level: 0 })
       }
     }
   }
@@ -77,11 +82,28 @@ class StreamPlaybackProcessor extends AudioWorkletProcessor {
       }
     }
 
+    for (const sample of output) this.levelSquareSum += sample * sample
+    this.levelSampleCount += output.length
+    if (this.levelSampleCount >= sampleRate / 20) {
+      this.port.postMessage({
+        type: 'audio-level',
+        level: Math.min(
+          1,
+          Math.sqrt(this.levelSquareSum / this.levelSampleCount) * 6,
+        ),
+      })
+      this.levelSquareSum = 0
+      this.levelSampleCount = 0
+    }
+
     if (outputOffset < output.length) {
       this.playing = false
       if (this.ending && !this.playbackEnded) {
         this.playbackEnded = true
         this.port.postMessage({ type: 'playback-ended' })
+        this.levelSquareSum = 0
+        this.levelSampleCount = 0
+        this.port.postMessage({ type: 'audio-level', level: 0 })
       } else if (!this.ending) {
         this.underruns += 1
         this.port.postMessage({
@@ -94,6 +116,9 @@ class StreamPlaybackProcessor extends AudioWorkletProcessor {
       this.playbackEnded = true
       this.playing = false
       this.port.postMessage({ type: 'playback-ended' })
+      this.levelSquareSum = 0
+      this.levelSampleCount = 0
+      this.port.postMessage({ type: 'audio-level', level: 0 })
     }
     return true
   }
