@@ -49,7 +49,28 @@ class FakeVideo extends EventTarget {
   pause() { this.pauseCalls += 1 }
 }
 
-function createHarness() {
+function createFakeTimers() {
+  const entries: Array<{ active: boolean; callback: () => void; timeoutMs: number }> = []
+  return {
+    entries,
+    setTimeout(callback: () => void, timeoutMs: number) {
+      entries.push({ active: true, callback, timeoutMs })
+      return entries.length - 1
+    },
+    clearTimeout(handle: unknown) {
+      const entry = entries[handle as number]
+      if (entry) entry.active = false
+    },
+    run(handle: number) {
+      const entry = entries[handle]
+      if (!entry?.active) return
+      entry.active = false
+      entry.callback()
+    },
+  }
+}
+
+function createHarness(timers = createFakeTimers()) {
   const requests: Array<{
     constraints: MediaStreamConstraints
     result: ReturnType<typeof deferred<MediaStream>>
@@ -69,8 +90,9 @@ function createHarness() {
       return result.promise
     },
     onInterrupted: () => interruptions.push('interrupted'),
+    interruptionTimers: timers,
   })
-  return { controller, frameWaits, interruptions, requests, video }
+  return { controller, frameWaits, interruptions, requests, timers, video }
 }
 
 test('camera is not requested before explicit enable', () => {
@@ -239,8 +261,8 @@ test('ended camera track disables only video and reports interruption', async ()
   assert.deepEqual(interruptions, ['interrupted'])
 })
 
-test('muted camera track reports an interruption without touching audio', async () => {
-  const { controller, frameWaits, interruptions, requests } = createHarness()
+test('a transient mute that unmutes inside the grace period keeps the camera', async () => {
+  const { controller, frameWaits, interruptions, requests, timers, video } = createHarness()
   const camera = fakeStream('camera', true)
   const opening = controller.enable('environment')
   requests[0].result.resolve(camera.stream)
@@ -248,11 +270,124 @@ test('muted camera track reports an interruption without touching audio', async 
   frameWaits[0].resolve()
   await opening
   camera.videoTrack.dispatchEvent(new Event('mute'))
+  assert.equal(timers.entries[0].timeoutMs, 1000)
+  camera.videoTrack.dispatchEvent(new Event('unmute'))
+  timers.run(0)
+
+  assert.equal(controller.enabled, true)
+  assert.equal(video.srcObject, camera.stream)
+  assert.equal(camera.audioTrack?.stops, 0)
+  assert.deepEqual(interruptions, [])
+})
+
+test('a sustained mute reports one interruption after the grace period', async () => {
+  const { controller, frameWaits, interruptions, requests, timers, video } = createHarness()
+  const camera = fakeStream('camera', true)
+  const opening = controller.enable('environment')
+  requests[0].result.resolve(camera.stream)
+  await Promise.resolve()
+  frameWaits[0].resolve()
+  await opening
+  camera.videoTrack.dispatchEvent(new Event('mute'))
+  timers.run(0)
+  camera.videoTrack.dispatchEvent(new Event('ended'))
 
   assert.equal(controller.enabled, false)
+  assert.equal(video.srcObject, null)
   assert.equal(camera.audioTrack?.stops, 0)
   assert.deepEqual(interruptions, ['interrupted'])
 })
+
+test('disable during mute grace cancels interruption reporting', async () => {
+  const { controller, frameWaits, interruptions, requests, timers } = createHarness()
+  const camera = fakeStream('camera')
+  const opening = controller.enable('environment')
+  requests[0].result.resolve(camera.stream)
+  await Promise.resolve()
+  frameWaits[0].resolve()
+  await opening
+  camera.videoTrack.dispatchEvent(new Event('mute'))
+  controller.disable()
+  timers.run(0)
+  assert.deepEqual(interruptions, [])
+})
+
+test('starting a camera switch cancels the old track mute grace timer', async () => {
+  const { controller, frameWaits, interruptions, requests, timers, video } = createHarness()
+  const old = fakeStream('old')
+  const current = fakeStream('current')
+  const opening = controller.enable('environment')
+  requests[0].result.resolve(old.stream)
+  await Promise.resolve()
+  frameWaits[0].resolve()
+  await opening
+  old.videoTrack.dispatchEvent(new Event('mute'))
+
+  const flipping = controller.enable('user')
+  timers.run(0)
+  requests[1].result.resolve(current.stream)
+  await Promise.resolve()
+  frameWaits[1].resolve()
+  await flipping
+
+  assert.equal(controller.enabled, true)
+  assert.equal(video.srcObject, current.stream)
+  assert.deepEqual(interruptions, [])
+})
+
+test('mute from a replaced old track cannot interrupt the current camera', async () => {
+  const { controller, frameWaits, interruptions, requests, timers, video } = createHarness()
+  const old = fakeStream('old')
+  const current = fakeStream('current')
+  const opening = controller.enable('environment')
+  requests[0].result.resolve(old.stream)
+  await Promise.resolve()
+  frameWaits[0].resolve()
+  await opening
+  const flipping = controller.enable('user')
+  requests[1].result.resolve(current.stream)
+  await Promise.resolve()
+  frameWaits[1].resolve()
+  await flipping
+  old.videoTrack.dispatchEvent(new Event('mute'))
+  for (let index = 0; index < timers.entries.length; index += 1) timers.run(index)
+
+  assert.equal(controller.enabled, true)
+  assert.equal(video.srcObject, current.stream)
+  assert.deepEqual(interruptions, [])
+})
+
+for (const lateFrame of ['resolve', 'reject', 'timeout'] as const) {
+  test(`current track ending during a pending flip survives late ${lateFrame} without ghost preview`, async () => {
+    const { controller, frameWaits, interruptions, requests, video } = createHarness()
+    const current = fakeStream('current')
+    const pending = fakeStream('pending')
+    const opening = controller.enable('environment')
+    requests[0].result.resolve(current.stream)
+    await Promise.resolve()
+    frameWaits[0].resolve()
+    await opening
+
+    const flipping = controller.enable('user')
+    const outcome = flipping.then(
+      (result) => result,
+      (error: unknown) => `rejected:${String(error)}`,
+    )
+    requests[1].result.resolve(pending.stream)
+    await Promise.resolve()
+    assert.equal(video.srcObject, pending.stream)
+    current.videoTrack.dispatchEvent(new Event('ended'))
+    if (lateFrame === 'resolve') frameWaits[1].resolve()
+    else frameWaits[1].reject(new Error(lateFrame))
+
+    assert.equal(await outcome, 'stale')
+    assert.equal(controller.enabled, false)
+    assert.equal(video.srcObject, null)
+    assert.equal(current.videoTrack.stops, 1)
+    assert.equal(pending.videoTrack.stops, 1)
+    assert.deepEqual(interruptions, ['interrupted'])
+  })
+}
 
 test('first-frame waiter resolves immediately for an already playable video', async () => {
   const video = new FakeVideo()

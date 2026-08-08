@@ -27,7 +27,7 @@
 
 ## Verification
 
-- `npm run test:live-media`: 19 passed.
+- `npm run test:live-media`: 26 passed after the independent-review follow-up.
 - `npm run test:media`: 3 passed.
 - `npm run test:mobile`: 17 package, 6 conversation-action, and 5 library tests passed.
 - `npm run test:realtime`: 52 passed.
@@ -37,3 +37,12 @@
 - `npm run lint`: passed.
 - `npm run build`: passed; only the pre-existing Vite chunk-size advisory remains.
 - `git diff --check`: passed.
+
+## Independent-review follow-up
+
+Two P1 lifecycle findings were reproduced with failing tests and fixed:
+
+- A track `mute` event is no longer treated as an immediate terminal `ended` event. Mute now starts an injected, deterministic one-second grace timer; `unmute`, disable, a camera switch, an ended event, or listener replacement cancels it. Only a sustained mute interrupts once, and events from replaced tracks are inert.
+- If the current track ends while a replacement is waiting for its first frame, one generation-safe interruption transaction now invalidates the operation, aborts the waiter, disposes every pending/current video stream, clears the preview, and reports once. Late first-frame resolution, rejection, or timeout resolves stale and cannot restore the ended stream or produce an unhandled rejection.
+
+The focused suite now contains 26 passing tests, including transient/sustained mute, disable/switch during grace, old-track events, and all three late pending-frame outcomes.

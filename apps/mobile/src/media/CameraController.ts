@@ -15,6 +15,8 @@ export type CameraDependencies = {
   ): Promise<void>
   onInterrupted?: () => void
   videoConstraints?: Pick<MediaTrackConstraints, 'width' | 'height'>
+  interruptionTimers?: TimerDependencies
+  muteGraceMs?: number
 }
 
 const browserTimers: TimerDependencies = {
@@ -99,6 +101,9 @@ export class CameraController {
   private readonly disposedStreams = new WeakSet<MediaStream>()
   private removeTrackListeners: (() => void) | null = null
   private firstFrameAbort: AbortController | null = null
+  private muteGrace:
+    | { stream: MediaStream; track: MediaStreamTrack; handle: unknown }
+    | null = null
 
   constructor(
     video: HTMLVideoElement,
@@ -114,6 +119,7 @@ export class CameraController {
 
   async enable(facingMode: CameraFacingMode): Promise<CameraEnableResult> {
     if (this.pending?.facingMode === facingMode) return this.pending.promise
+    this.clearMuteGrace()
     if (this.stream && this.facingMode === facingMode) {
       if (this.pending) {
         this.operation += 1
@@ -143,6 +149,7 @@ export class CameraController {
     this.operation += 1
     this.pending = null
     this.abortFirstFrameWait()
+    this.clearMuteGrace()
     for (const stream of this.pendingStreams) this.dispose(stream)
     this.pendingStreams.clear()
     this.disposeCurrent()
@@ -222,25 +229,79 @@ export class CameraController {
 
   private bindTrackInterruptions(stream: MediaStream) {
     const tracks = videoTracks(stream)
-    const onEnded = () => {
-      if (this.stream !== stream) return
-      this.operation += 1
-      this.disposeCurrent()
-      if (this.video.srcObject === stream) {
-        this.video.pause()
-        this.video.srcObject = null
-      }
-      this.deps.onInterrupted?.()
-    }
+    const listeners: Array<{
+      track: MediaStreamTrack
+      ended: () => void
+      mute: () => void
+      unmute: () => void
+    }> = []
     for (const track of tracks) {
-      track.addEventListener('ended', onEnded)
-      track.addEventListener('mute', onEnded)
+      const ended = () => this.interrupt(stream)
+      const mute = () => this.scheduleMuteInterruption(stream, track)
+      const unmute = () => this.clearMuteGrace(stream, track)
+      track.addEventListener('ended', ended)
+      track.addEventListener('mute', mute)
+      track.addEventListener('unmute', unmute)
+      listeners.push({ track, ended, mute, unmute })
     }
     this.removeTrackListeners = () => {
-      for (const track of tracks) {
-        track.removeEventListener('ended', onEnded)
-        track.removeEventListener('mute', onEnded)
+      this.clearMuteGrace(stream)
+      for (const { track, ended, mute, unmute } of listeners) {
+        track.removeEventListener('ended', ended)
+        track.removeEventListener('mute', mute)
+        track.removeEventListener('unmute', unmute)
       }
+    }
+  }
+
+  private scheduleMuteInterruption(
+    stream: MediaStream,
+    track: MediaStreamTrack,
+  ) {
+    if (this.stream !== stream) return
+    this.clearMuteGrace()
+    const timers = this.deps.interruptionTimers ?? browserTimers
+    const handle = timers.setTimeout(
+      () => {
+        if (
+          this.muteGrace?.stream !== stream ||
+          this.muteGrace.track !== track
+        ) return
+        this.muteGrace = null
+        this.interrupt(stream)
+      },
+      this.deps.muteGraceMs ?? 1000,
+    )
+    this.muteGrace = { stream, track, handle }
+  }
+
+  private clearMuteGrace(
+    stream?: MediaStream,
+    track?: MediaStreamTrack,
+  ) {
+    if (!this.muteGrace) return
+    if (stream && this.muteGrace.stream !== stream) return
+    if (track && this.muteGrace.track !== track) return
+    const timers = this.deps.interruptionTimers ?? browserTimers
+    timers.clearTimeout(this.muteGrace.handle)
+    this.muteGrace = null
+  }
+
+  private interrupt(stream: MediaStream) {
+    if (this.stream !== stream) return
+    this.operation += 1
+    this.pending = null
+    this.abortFirstFrameWait()
+    this.clearMuteGrace()
+    for (const pending of this.pendingStreams) this.dispose(pending)
+    this.pendingStreams.clear()
+    this.disposeCurrent()
+    this.video.pause()
+    this.video.srcObject = null
+    try {
+      this.deps.onInterrupted?.()
+    } catch {
+      // Consumer feedback must not escape a browser media-track event.
     }
   }
 
