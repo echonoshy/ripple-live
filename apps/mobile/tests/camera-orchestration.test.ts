@@ -17,6 +17,7 @@ function deferred<T>() {
 
 function createHarness() {
   const events: string[] = []
+  const errors: string[] = []
   const snapshots: CameraSnapshot[] = []
   const modeRequests: Array<{
     mode: 'audio' | 'video'
@@ -46,10 +47,12 @@ function createHarness() {
       return request.promise
     },
     onSnapshot: (snapshot) => snapshots.push(snapshot),
+    onError: (message) => errors.push(message),
   })
   return {
     cameraRequests,
     events,
+    errors,
     modeRequests,
     orchestrator,
     snapshots,
@@ -184,6 +187,9 @@ test('camera permission failure returns to the orb with an explicit open retry',
     serverMode: 'audio',
   })
   assert.deepEqual(harness.events, ['camera:enable', 'camera:disable'])
+  assert.deepEqual(harness.errors, [
+    '无法开启镜头，请在系统设置中允许相机权限后重试',
+  ])
 
   const retry = harness.orchestrator.retry('user')
   harness.cameraRequests[1].resolve('enabled')

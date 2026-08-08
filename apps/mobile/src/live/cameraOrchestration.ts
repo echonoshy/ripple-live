@@ -33,6 +33,16 @@ function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback
 }
 
+function cameraOpenErrorMessage(error: unknown) {
+  const message = errorMessage(
+    error,
+    '无法开启镜头，请在系统设置中允许相机权限后重试',
+  )
+  return /permission|notallowed|denied/i.test(message)
+    ? '无法开启镜头，请在系统设置中允许相机权限后重试'
+    : message
+}
+
 /**
  * Owns camera/server-mode transactions for one live call. Invalidation is the
  * generation boundary used by leave, logout and session replacement.
@@ -73,9 +83,7 @@ export function createCameraOrchestrator(
       } catch (error) {
         if (!owns(owner)) return 'stale'
         dependencies.disableCamera()
-        dependencies.onError?.(
-          errorMessage(error, '无法开启镜头，请检查摄像头权限后重试'),
-        )
+        dependencies.onError?.(cameraOpenErrorMessage(error))
         publish({
           phase: 'error',
           previewVisible: false,

@@ -901,6 +901,11 @@ test('history and conversation detail use a compact voice-first hierarchy', () =
   )
   assert.match(
     cssSource,
+    /\.history-list \.library-item-surface\s*{[^}]*background:\s*var\(--surface-raised\);/s,
+    'history rows must cover their off-canvas actions until the row is revealed',
+  )
+  assert.match(
+    cssSource,
     /\.library-row-preview\s*{[^}]*color:\s*var\(--text-secondary\);[^}]*-webkit-line-clamp:\s*1;/s,
   )
   assert.match(appSource, /className="history-voice-fab"/)

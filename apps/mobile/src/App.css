@@ -1613,6 +1613,10 @@ button {
   background: var(--surface-raised);
 }
 
+.history-list .library-item-surface {
+  background: var(--surface-raised);
+}
+
 .selection-check {
   display: block;
   width: 21px;
