@@ -60,6 +60,39 @@ struct PendingTurn {
     transcript: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ModeChangePlan {
+    Unchanged,
+    ChangeOnly,
+    ReleasePendingAudioTurn,
+}
+
+fn plan_mode_change(
+    current: SessionMode,
+    requested: SessionMode,
+    pending: Option<&PendingTurn>,
+) -> ModeChangePlan {
+    if current == requested {
+        return ModeChangePlan::Unchanged;
+    }
+    if current == SessionMode::Video && requested == SessionMode::Audio && pending.is_some() {
+        return ModeChangePlan::ReleasePendingAudioTurn;
+    }
+    ModeChangePlan::ChangeOnly
+}
+
+fn mode_snapshot_after_change(
+    snapshot: SessionMode,
+    current: SessionMode,
+    requested: SessionMode,
+) -> SessionMode {
+    if current != requested && requested == SessionMode::Audio {
+        SessionMode::Audio
+    } else {
+        snapshot
+    }
+}
+
 impl PendingTurn {
     fn matches_response(&self, response_id: Option<&str>) -> bool {
         response_id.is_some_and(|response_id| response_id == self.response_id)
@@ -179,6 +212,7 @@ struct PendingTranscription {
     turn_id: String,
     generation: u64,
     response_id: String,
+    mode: SessionMode,
     handle: JoinHandle<()>,
 }
 
@@ -193,6 +227,7 @@ struct PendingGate {
     turn_id: String,
     generation: u64,
     response_id: String,
+    mode: SessionMode,
     handle: JoinHandle<()>,
 }
 
@@ -232,6 +267,7 @@ fn spawn_transcription_task<F>(
     turn_id: String,
     generation: u64,
     response_id: String,
+    mode: SessionMode,
     results: mpsc::Sender<TranscriptionTaskResult>,
     transcription: F,
 ) -> PendingTranscription
@@ -255,6 +291,7 @@ where
         turn_id,
         generation,
         response_id,
+        mode,
         handle,
     }
 }
@@ -265,11 +302,17 @@ fn spawn_final_transcription(
     turn_id: String,
     generation: u64,
     response_id: String,
+    mode: SessionMode,
     results: mpsc::Sender<TranscriptionTaskResult>,
 ) -> PendingTranscription {
-    spawn_transcription_task(turn_id, generation, response_id, results, async move {
-        orchestrator.transcribe_candidate(&audio).await
-    })
+    spawn_transcription_task(
+        turn_id,
+        generation,
+        response_id,
+        mode,
+        results,
+        async move { orchestrator.transcribe_candidate(&audio).await },
+    )
 }
 
 fn cancel_transcription(pending: &mut Option<PendingTranscription>) {
@@ -283,6 +326,7 @@ fn spawn_gate_task<F>(
     generation: u64,
     response_id: String,
     transcript: String,
+    mode: SessionMode,
     results: mpsc::Sender<GateTaskResult>,
     gate: F,
 ) -> PendingGate
@@ -307,6 +351,7 @@ where
         turn_id,
         generation,
         response_id,
+        mode,
         handle,
     }
 }
@@ -318,6 +363,7 @@ fn spawn_voice_gate(
     generation: u64,
     response_id: String,
     transcript: String,
+    mode: SessionMode,
     results: mpsc::Sender<GateTaskResult>,
 ) -> PendingGate {
     let gate_transcript = transcript.clone();
@@ -326,7 +372,15 @@ fn spawn_voice_gate(
             .gate_transcript(&session_id, &gate_transcript)
             .await
     };
-    spawn_gate_task(turn_id, generation, response_id, transcript, results, gate)
+    spawn_gate_task(
+        turn_id,
+        generation,
+        response_id,
+        transcript,
+        mode,
+        results,
+        gate,
+    )
 }
 
 fn cancel_gate(pending: &mut Option<PendingGate>) {
@@ -413,6 +467,38 @@ fn unsupported_mode_change_event(
             "message": "当前会话协议不支持切换模式",
             "response_id": event.response_id,
             "mode": event.extra.get("mode").and_then(Value::as_str)
+        })
+    })
+}
+
+fn validate_mode_set(
+    negotiated_protocol_version: u32,
+    event: &ClientEvent,
+) -> Result<SessionMode, Value> {
+    if let Some(error) = unsupported_mode_change_event(negotiated_protocol_version, event) {
+        return Err(error);
+    }
+    let requested_mode = event.extra.get("mode").and_then(Value::as_str);
+    SessionMode::parse(requested_mode).map_err(|_| {
+        json!({
+            "type": "error",
+            "code": "invalid_mode",
+            "message": "会话模式只支持 audio 或 video",
+            "response_id": event.response_id,
+            "mode": requested_mode
+        })
+    })
+}
+
+fn turn_needs_frame(mode: SessionMode) -> bool {
+    mode == SessionMode::Video
+}
+
+fn requested_frame_event(mode: SessionMode, response_id: &str) -> Option<Value> {
+    turn_needs_frame(mode).then(|| {
+        json!({
+            "type": "input.frame.requested",
+            "response_id": response_id
         })
     })
 }
@@ -1609,7 +1695,10 @@ async fn handle_socket(
                     );
                     continue;
                 }
-                pending_transcription.take();
+                let accepted_mode = pending_transcription
+                    .take()
+                    .expect("current transcription has matching pending state")
+                    .mode;
                 let TranscriptionTaskResult {
                     turn_id,
                     generation: _,
@@ -1625,7 +1714,7 @@ async fn handle_socket(
                             &mut active_response,
                             activation_mode,
                             &mut awake_until,
-                            session_mode,
+                            accepted_mode,
                             &mut frames,
                             &mut pending_turn,
                             &turn_id,
@@ -1671,7 +1760,10 @@ async fn handle_socket(
                     );
                     continue;
                 }
-                pending_gate.take();
+                let accepted_mode = pending_gate
+                    .take()
+                    .expect("current gate result has matching pending state")
+                    .mode;
                 let GateTaskResult {
                     turn_id: _,
                     generation: _,
@@ -1705,7 +1797,7 @@ async fn handle_socket(
                     "gate_respond",
                 )
                 .await;
-                if session_mode == SessionMode::Video {
+                if let Some(frame_request) = requested_frame_event(accepted_mode, &response_id) {
                     if let Some(superseded) = pending_turn.take() {
                         record_event_best_effort(
                             &state.context,
@@ -1732,11 +1824,7 @@ async fn handle_socket(
                         response_id: response_id.clone(),
                         transcript,
                     });
-                    send_event(
-                        &event_sender,
-                        json!({"type": "input.frame.requested", "response_id": response_id}),
-                    )
-                    .await?;
+                    send_event(&event_sender, frame_request).await?;
                 } else {
                     active_response = Some(spawn_turn(
                         state.orchestrator.clone(),
@@ -1904,38 +1992,56 @@ async fn handle_socket(
             "session.mode.set" => {
                 let negotiated_protocol_version = negotiated_protocol_version
                     .expect("a ready session always has a negotiated protocol version");
-                if let Some(error) =
-                    unsupported_mode_change_event(negotiated_protocol_version, &event)
-                {
-                    send_event(&event_sender, error).await
-                } else {
-                    let requested_mode = event.extra.get("mode").and_then(Value::as_str);
-                    match SessionMode::parse(requested_mode) {
-                        Ok(accepted_mode) => {
-                            session_mode = accepted_mode;
-                            send_event(
-                                &event_sender,
-                                json!({
-                                    "type": "session.mode.changed",
-                                    "mode": session_mode.as_str()
-                                }),
-                            )
-                            .await
+                match validate_mode_set(negotiated_protocol_version, &event) {
+                    Ok(accepted_mode) => {
+                        let plan =
+                            plan_mode_change(session_mode, accepted_mode, pending_turn.as_ref());
+                        if let Some(pending) = pending_transcription.as_mut() {
+                            pending.mode = mode_snapshot_after_change(
+                                pending.mode,
+                                session_mode,
+                                accepted_mode,
+                            );
                         }
-                        Err(_) => {
-                            send_event(
-                                &event_sender,
-                                json!({
-                                    "type": "error",
-                                    "code": "invalid_mode",
-                                    "message": "会话模式只支持 audio 或 video",
-                                    "response_id": event.response_id,
-                                    "mode": requested_mode
-                                }),
-                            )
-                            .await
+                        if let Some(pending) = pending_gate.as_mut() {
+                            pending.mode = mode_snapshot_after_change(
+                                pending.mode,
+                                session_mode,
+                                accepted_mode,
+                            );
                         }
+                        let released_turn = if plan == ModeChangePlan::ReleasePendingAudioTurn {
+                            take_pending_video_turn(&mut pending_turn, &mut frames)
+                        } else {
+                            None
+                        };
+                        if accepted_mode == SessionMode::Audio {
+                            frames.clear();
+                        }
+                        session_mode = accepted_mode;
+                        if let Some(pending) = released_turn {
+                            active_response = Some(spawn_turn(
+                                state.orchestrator.clone(),
+                                state.context.clone(),
+                                user_id.clone(),
+                                session_id.clone(),
+                                event_sender.clone(),
+                                Vec::new(),
+                                Vec::new(),
+                                Some(pending.transcript),
+                                pending.response_id,
+                            ));
+                        }
+                        send_event(
+                            &event_sender,
+                            json!({
+                                "type": "session.mode.changed",
+                                "mode": session_mode.as_str()
+                            }),
+                        )
+                        .await
                     }
+                    Err(error) => send_event(&event_sender, error).await,
                 }
             }
             "input.audio.append" => {
@@ -2184,6 +2290,7 @@ async fn handle_socket(
                         turn_id.to_owned(),
                         generation,
                         response_id,
+                        session_mode,
                         results,
                     ));
                 }
@@ -2480,7 +2587,7 @@ async fn queue_voice_transcript(
                 "response_id": response_id,
                 "text": transcript,
                 "reason": decision.reason,
-                "needs_frame": session_mode == SessionMode::Video
+                "needs_frame": turn_needs_frame(session_mode)
             }),
         )
         .await?;
@@ -2494,6 +2601,7 @@ async fn queue_voice_transcript(
         *gate_generation,
         response_id,
         transcript,
+        session_mode,
         gate_results.clone(),
     ));
     Ok(())
@@ -2561,6 +2669,7 @@ mod tests {
             "turn-2".to_owned(),
             7,
             "response-7".to_owned(),
+            SessionMode::Audio,
             transcription_sender,
             std::future::pending::<anyhow::Result<String>>(),
         ));
@@ -2593,6 +2702,7 @@ mod tests {
             9,
             "response-gate".to_owned(),
             "请继续".to_owned(),
+            SessionMode::Audio,
             gate_sender,
             std::future::pending(),
         ));
@@ -2627,6 +2737,7 @@ mod tests {
             turn_id: "turn-speaking".to_owned(),
             generation: 4,
             response_id: "response-speaking".to_owned(),
+            mode: SessionMode::Audio,
             handle: fallback_handle,
         });
         let mut pending_endpoint = None;
@@ -2636,6 +2747,7 @@ mod tests {
             turn_id: "turn-speaking".to_owned(),
             generation: 5,
             response_id: "response-speaking".to_owned(),
+            mode: SessionMode::Audio,
             handle: gate_handle,
         });
         let mut frames = VecDeque::from([VideoFrame {
@@ -2969,6 +3081,69 @@ mod tests {
         assert_eq!(error["response_id"], "mode-request-4");
         assert_eq!(error["mode"], "video");
         assert!(unsupported_mode_change_event(5, &event).is_none());
+
+        let recoverable = validate_mode_set(4, &event).unwrap_err();
+        assert_eq!(recoverable["code"], "unsupported_protocol");
+        assert_eq!(recoverable["response_id"], "mode-request-4");
+    }
+
+    #[test]
+    fn invalid_v5_mode_is_a_correlated_recoverable_error() {
+        let event: ClientEvent = serde_json::from_value(json!({
+            "type": "session.mode.set",
+            "response_id": "mode-request-invalid",
+            "mode": "continuous_video"
+        }))
+        .unwrap();
+
+        let error = validate_mode_set(5, &event).unwrap_err();
+        assert_eq!(error["code"], "invalid_mode");
+        assert_eq!(error["response_id"], "mode-request-invalid");
+        assert_eq!(error["mode"], "continuous_video");
+    }
+
+    #[test]
+    fn switching_video_to_audio_releases_pending_turn_without_frames() {
+        let pending = PendingTurn {
+            response_id: "response-1".to_owned(),
+            transcript: "继续回答".to_owned(),
+        };
+        let decision = plan_mode_change(SessionMode::Video, SessionMode::Audio, Some(&pending));
+        assert_eq!(decision, ModeChangePlan::ReleasePendingAudioTurn);
+    }
+
+    #[test]
+    fn switching_audio_to_video_only_changes_future_turns() {
+        assert_eq!(
+            plan_mode_change(SessionMode::Audio, SessionMode::Video, None),
+            ModeChangePlan::ChangeOnly,
+        );
+        assert_eq!(
+            plan_mode_change(SessionMode::Audio, SessionMode::Audio, None),
+            ModeChangePlan::Unchanged,
+        );
+    }
+
+    #[test]
+    fn in_flight_turns_never_gain_a_camera_requirement_after_mode_change() {
+        let old_audio_turn =
+            mode_snapshot_after_change(SessionMode::Audio, SessionMode::Audio, SessionMode::Video);
+        let old_video_turn =
+            mode_snapshot_after_change(SessionMode::Video, SessionMode::Video, SessionMode::Audio);
+
+        assert_eq!(old_audio_turn, SessionMode::Audio);
+        assert_eq!(old_video_turn, SessionMode::Audio);
+        assert!(!turn_needs_frame(old_audio_turn));
+        assert!(!turn_needs_frame(old_video_turn));
+        assert!(turn_needs_frame(SessionMode::Video));
+        assert!(requested_frame_event(old_audio_turn, "response-old").is_none());
+        assert_eq!(
+            requested_frame_event(SessionMode::Video, "response-new").unwrap(),
+            json!({
+                "type": "input.frame.requested",
+                "response_id": "response-new"
+            })
+        );
     }
 
     #[test]
