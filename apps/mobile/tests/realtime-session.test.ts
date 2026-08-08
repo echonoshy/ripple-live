@@ -1097,6 +1097,76 @@ test('frame request state is restored when capture or callbacks throw', () => {
   assert.equal(sent.some((event) => event.type === 'input.video.commit'), false)
 })
 
+test('a superseded pending frame send is contained and leaves the new lane healthy', async () => {
+  const frameStates: boolean[] = []
+  const { session, receive } = readySessionHarness({
+    onFrameRequestState: (active) => frameStates.push(active),
+    onFrameRequested: () => 'jpeg-data',
+  })
+  const never = new Promise<void>(() => {})
+  const oldTransport = {
+    send: async () => never,
+    close: async () => {},
+  }
+  const newSent: Array<Record<string, unknown>> = []
+  const newTransport = {
+    send: async (message: string) => newSent.push(JSON.parse(message)),
+    close: async () => {},
+  }
+  const internals = session as unknown as {
+    transport: typeof oldTransport
+    connectionGeneration: number
+    replaceTransport(transport: typeof newTransport, generation: number): void
+  }
+  internals.transport = oldTransport
+
+  receive({ type: 'input.frame.requested', response_id: 'response-old' })
+  await new Promise((resolve) => setImmediate(resolve))
+  internals.replaceTransport(newTransport, internals.connectionGeneration)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(frameStates, [true, false])
+  const changed = session.setMode('video')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(newSent, [{ type: 'session.mode.set', mode: 'video' }])
+  receive({ type: 'session.mode.changed', mode: 'video' })
+  await changed
+  await session.close()
+  assert.equal(newSent.at(-1)?.type, 'session.close')
+})
+
+test('a current frame send failure closes the session after restoring request state', async () => {
+  const frameStates: boolean[] = []
+  const { session, receive, errors } = readySessionHarness({
+    onFrameRequestState: (active) => frameStates.push(active),
+    onFrameRequested: () => 'jpeg-data',
+  })
+  let closeCalls = 0
+  const internals = session as unknown as {
+    transport: {
+      send(message: string): Promise<void>
+      close(): Promise<void>
+    }
+  }
+  internals.transport = {
+    send: async () => {
+      throw new Error('frame send failed')
+    },
+    close: async () => {
+      closeCalls += 1
+    },
+  }
+
+  receive({ type: 'input.frame.requested', response_id: 'response-current' })
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(frameStates, [true, false])
+  assert.deepEqual(errors, ['frame send failed'])
+  assert.equal(closeCalls, 1)
+  await assert.rejects(session.setMode('video'), /尚未就绪|已关闭/)
+})
+
 test('continue decision waits exactly 1.5 seconds before committing', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const { session, receive, sent } = readySessionHarness()

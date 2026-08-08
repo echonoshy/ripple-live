@@ -575,7 +575,14 @@ export class RealtimeSession {
   }
 
   private observeSendFailure(send: Promise<void>) {
-    void send.catch((error: unknown) => this.handleSendFailure(error))
+    void send
+      .catch(async (error: unknown) => {
+        if (error instanceof SupersededSendError) return
+        await this.handleSendFailure(error)
+      })
+      .catch(() => {
+        // Consumer error reporting must not create an unhandled rejection.
+      })
   }
 
   private handleTauriMessage(message: TauriMessage, generation: number) {
