@@ -276,7 +276,7 @@ UNION ALL SELECT 'meeting_transcript_segments', COUNT(*) FROM meeting_transcript
 UNION ALL SELECT 'meeting_todos', COUNT(*) FROM meeting_todos
 UNION ALL SELECT 'meeting_processing_jobs', COUNT(*) FROM meeting_processing_jobs;
 SELECT state, COUNT(*), COALESCE(SUM(duration_ms), 0) FROM meetings GROUP BY state ORDER BY state;
-SELECT job_type, state, COUNT(*) FROM meeting_processing_jobs GROUP BY job_type, state ORDER BY job_type, state;
+SELECT stage, status, COUNT(*) FROM meeting_processing_jobs GROUP BY stage, status ORDER BY stage, status;
 "
 ```
 
