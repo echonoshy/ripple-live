@@ -336,9 +336,11 @@ Expected: the Gateway is inactive and nothing listens on TCP port 8700.
 
 ```bash
 sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);"
-DRY_RUN_OUTPUT="$(sqlite3 -separator '|' "$DB" "
+DRY_RUN_OUTPUT="$(sqlite3 -separator '|' "$DB" <<SQL
+.output /dev/null
 PRAGMA foreign_keys=ON;
 PRAGMA secure_delete=ON;
+.output stdout
 BEGIN IMMEDIATE;
 DROP TABLE IF EXISTS meeting_audio_tickets;
 DROP TABLE IF EXISTS meeting_processing_jobs;
@@ -349,7 +351,8 @@ DROP TABLE IF EXISTS meetings;
 $COUNT_SQL
 PRAGMA integrity_check;
 ROLLBACK;
-")"
+SQL
+)"
 DRY_COUNTS="$(printf '%s\n' "$DRY_RUN_OUTPUT" | sed '$d')"
 DRY_INTEGRITY="$(printf '%s\n' "$DRY_RUN_OUTPUT" | tail -n 1)"
 test "$DRY_COUNTS" = "$BEFORE_COUNTS"
