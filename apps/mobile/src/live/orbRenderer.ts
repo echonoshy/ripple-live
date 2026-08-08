@@ -25,6 +25,8 @@ precision highp float;
 uniform float uTime;
 uniform float uInput;
 uniform float uOutput;
+uniform float uEnergy;
+uniform float uGeometryEnergy;
 uniform vec2 uResolution;
 uniform int uState;
 uniform int uQuality;
@@ -35,23 +37,13 @@ float ball(vec2 p, vec2 c, float r) {
   return r * r / max(dot(p - c, p - c), 0.002);
 }
 
-float stateEnergy() {
-  if (uState == 0) return 0.08;
-  if (uState == 1) return 0.18;
-  if (uState == 2) return 0.08 + uInput * 0.92;
-  if (uState == 3) return 0.24;
-  if (uState == 4) return 0.14;
-  if (uState == 5) return 0.08 + uOutput * 0.92;
-  if (uState == 6) return 0.04;
-  return 0.12;
-}
-
 void main() {
   vec2 p = (gl_FragCoord.xy * 2.0 - uResolution) / uResolution.y;
-  float energy = stateEnergy();
+  float energy = uEnergy;
   float motion = uReducedMotion == 1 ? 0.0 : 1.0;
-  float t = uTime * (0.42 + energy * 1.2) * motion;
-  float field = ball(p, vec2(0.0), 0.48 + energy * 0.05);
+  float geometryEnergy = uReducedMotion == 1 ? 0.0 : uGeometryEnergy;
+  float t = uTime * (0.42 + geometryEnergy * 1.2) * motion;
+  float field = ball(p, vec2(0.0), 0.48 + geometryEnergy * 0.05);
   field += ball(p, vec2(cos(t), sin(t)) * 0.22, 0.25);
   field += ball(p, vec2(cos(t + 2.1), sin(t + 2.1)) * 0.20, 0.23);
   field += ball(p, vec2(cos(t + 4.2), sin(t + 4.2)) * 0.21, 0.24);
@@ -90,6 +82,19 @@ export type OrbRenderer = {
 function clamp(value: number, minimum: number, maximum: number) {
   if (!Number.isFinite(value)) return minimum
   return Math.min(maximum, Math.max(minimum, value))
+}
+
+function frameEnergy(frame: OrbFrame) {
+  switch (frame.state) {
+    case 'idle': return 0.08
+    case 'connecting': return 0.18
+    case 'listening': return 0.08 + clamp(frame.inputLevel, 0, 1) * 0.92
+    case 'thinking': return 0.24
+    case 'tool': return 0.14
+    case 'speaking': return 0.08 + clamp(frame.outputLevel, 0, 1) * 0.92
+    case 'ended': return 0.04
+    case 'error': return 0.12
+  }
 }
 
 export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
@@ -135,6 +140,8 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
       time: gl.getUniformLocation(program, 'uTime'),
       input: gl.getUniformLocation(program, 'uInput'),
       output: gl.getUniformLocation(program, 'uOutput'),
+      energy: gl.getUniformLocation(program, 'uEnergy'),
+      geometryEnergy: gl.getUniformLocation(program, 'uGeometryEnergy'),
       state: gl.getUniformLocation(program, 'uState'),
       quality: gl.getUniformLocation(program, 'uQuality'),
       reducedMotion: gl.getUniformLocation(program, 'uReducedMotion'),
@@ -166,9 +173,17 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
 
     const update = (frame: OrbFrame) => {
       if (disposed) return
-      gl.uniform1f(uniforms.time, clamp(frame.nowMs, 0, Number.MAX_SAFE_INTEGER) / 1000)
+      const energy = frameEnergy(frame)
+      gl.uniform1f(
+        uniforms.time,
+        frame.reducedMotion
+          ? 0
+          : clamp(frame.nowMs, 0, Number.MAX_SAFE_INTEGER) / 1000,
+      )
       gl.uniform1f(uniforms.input, clamp(frame.inputLevel, 0, 1))
       gl.uniform1f(uniforms.output, clamp(frame.outputLevel, 0, 1))
+      gl.uniform1f(uniforms.energy, energy)
+      gl.uniform1f(uniforms.geometryEnergy, frame.reducedMotion ? 0 : energy)
       gl.uniform1i(uniforms.state, STATE_INDEX[frame.state])
       gl.uniform1i(uniforms.quality, frame.qualityTier === 'high' ? 1 : 0)
       gl.uniform1i(uniforms.reducedMotion, frame.reducedMotion ? 1 : 0)
