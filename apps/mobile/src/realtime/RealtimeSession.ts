@@ -61,12 +61,20 @@ type SendPriority = 'normal' | 'high'
 
 type QueuedSend = {
   messages: string[]
-  transport: Transport
-  generation: number
   superseded: boolean
   resolve: () => void
   reject: (error: unknown) => void
   onFailure?: (error: unknown) => void
+}
+
+type SendLane = {
+  transport: Transport
+  generation: number
+  normalSends: QueuedSend[]
+  highPrioritySends: QueuedSend[]
+  sending: boolean
+  activeSend: QueuedSend | null
+  retired: boolean
 }
 
 class SupersededSendError extends Error {
@@ -275,11 +283,7 @@ export class RealtimeSession {
   private completedToolCallIds = new Set<string>()
   private playbackActive = false
   private playbackStartedReported = false
-  private normalSends: QueuedSend[] = []
-  private highPrioritySends: QueuedSend[] = []
-  private sending = false
-  private activeSend: QueuedSend | null = null
-  private sendIdleWaiters: Array<() => void> = []
+  private sendLane: SendLane | null = null
   private currentTurnId: string | null = null
   private pendingTurnId: string | null = null
   private endpointTimer: ReturnType<typeof setTimeout> | null = null
@@ -377,6 +381,10 @@ export class RealtimeSession {
           if (this.isActiveConnection(generation)) {
             this.clearEndpointState()
             this.rejectPendingModeChange(new Error('实时会话已关闭'))
+            const lane = this.sendLane
+            this.sendLane = null
+            if (lane) this.retireSendLane(lane)
+            this.transport = null
             this.closed = true
             this.connectionGeneration += 1
             this.ready = false
@@ -402,12 +410,38 @@ export class RealtimeSession {
       return
     }
     const previous = this.transport
+    const previousLane = this.sendLane
+    if (
+      previousLane &&
+      (previousLane.transport !== transport || previousLane.generation !== generation)
+    ) {
+      this.retireSendLane(previousLane)
+    }
     if (previous && previous !== transport) {
       this.rejectPendingModeChange(new Error('实时连接已被替换'))
-      this.supersedeTransportSends(previous)
       void previous.close().catch(() => {})
     }
     this.transport = transport
+    if (
+      !this.sendLane ||
+      this.sendLane.transport !== transport ||
+      this.sendLane.generation !== generation ||
+      this.sendLane.retired
+    ) {
+      this.sendLane = this.createSendLane(transport, generation)
+    }
+  }
+
+  private createSendLane(transport: Transport, generation: number): SendLane {
+    return {
+      transport,
+      generation,
+      normalSends: [],
+      highPrioritySends: [],
+      sending: false,
+      activeSend: null,
+      retired: false,
+    }
   }
 
   private async startSession(generation: number) {
@@ -434,99 +468,114 @@ export class RealtimeSession {
     const transport = this.transport
     if (!transport || this.closed) return Promise.resolve()
     const generation = this.connectionGeneration
+    let lane = this.sendLane
+    if (
+      !lane ||
+      lane.transport !== transport ||
+      lane.generation !== generation ||
+      lane.retired
+    ) {
+      if (lane) this.retireSendLane(lane)
+      lane = this.createSendLane(transport, generation)
+      this.sendLane = lane
+    }
     return new Promise<void>((resolve, reject) => {
-      const queue = priority === 'high' ? this.highPrioritySends : this.normalSends
+      const queue =
+        priority === 'high' ? lane.highPrioritySends : lane.normalSends
       queue.push({
         messages: events.map((event) => JSON.stringify(event)),
-        transport,
-        generation,
         superseded: false,
         resolve,
         reject,
         onFailure,
       })
-      void this.drainSendQueue()
+      void this.drainSendLane(lane)
     })
   }
 
-  private async drainSendQueue() {
-    if (this.sending) return
-    this.sending = true
+  private async drainSendLane(lane: SendLane) {
+    if (lane.sending || lane.retired) return
+    lane.sending = true
     try {
-      while (this.highPrioritySends.length || this.normalSends.length) {
-        const item = this.highPrioritySends.shift() ?? this.normalSends.shift()
+      while (
+        !lane.retired &&
+        (lane.highPrioritySends.length || lane.normalSends.length)
+      ) {
+        const item =
+          lane.highPrioritySends.shift() ?? lane.normalSends.shift()
         if (!item) continue
-        this.activeSend = item
+        lane.activeSend = item
         try {
-          if (!this.isSendBindingActive(item)) throw new SupersededSendError()
+          if (!this.isSendBindingActive(lane, item)) {
+            throw new SupersededSendError()
+          }
           for (const message of item.messages) {
-            await item.transport.send(message)
-            if (!this.isSendBindingActive(item)) {
+            await lane.transport.send(message)
+            if (!this.isSendBindingActive(lane, item)) {
               throw new SupersededSendError()
             }
           }
           item.resolve()
         } catch (error) {
-          const stale = !this.isSendBindingActive(item)
+          const stale = !this.isSendBindingActive(lane, item)
           const failure = stale ? new SupersededSendError() : error
           if (!stale) item.onFailure?.(failure)
           item.reject(failure)
-          if (!stale && item.onFailure) {
-            this.rejectQueuedSends(error)
+          if (!stale) {
+            this.rejectQueuedSends(lane, error)
             return
           }
         } finally {
-          if (this.activeSend === item) this.activeSend = null
+          if (lane.activeSend === item) lane.activeSend = null
         }
       }
     } finally {
-      this.sending = false
-      if (!this.highPrioritySends.length && !this.normalSends.length) {
-        this.sendIdleWaiters.splice(0).forEach((resolve) => resolve())
-      } else {
-        void this.drainSendQueue()
+      lane.sending = false
+      if (
+        !lane.retired &&
+        (lane.highPrioritySends.length || lane.normalSends.length)
+      ) {
+        void this.drainSendLane(lane)
       }
     }
   }
 
-  private isSendBindingActive(item: QueuedSend) {
+  private isSendBindingActive(lane: SendLane, item: QueuedSend) {
     return (
       !item.superseded &&
-      !this.closed &&
-      item.generation === this.connectionGeneration &&
-      item.transport === this.transport
+      !lane.retired &&
+      lane === this.sendLane &&
+      lane.generation === this.connectionGeneration &&
+      lane.transport === this.transport
     )
   }
 
-  private supersedeTransportSends(transport: Transport) {
-    if (this.activeSend?.transport === transport) {
-      this.activeSend.superseded = true
+  private retireSendLane(lane: SendLane) {
+    if (lane.retired) return
+    lane.retired = true
+    const error = new SupersededSendError()
+    if (lane.activeSend) {
+      lane.activeSend.superseded = true
+      lane.activeSend.reject(error)
     }
-    for (const item of [...this.highPrioritySends, ...this.normalSends]) {
-      if (item.transport === transport) item.superseded = true
+    const queued = [...lane.highPrioritySends, ...lane.normalSends]
+    lane.highPrioritySends = []
+    lane.normalSends = []
+    for (const item of queued) {
+      item.superseded = true
+      item.reject(error)
     }
   }
 
-  private rejectQueuedSends(error: unknown) {
-    const queued = [...this.highPrioritySends, ...this.normalSends]
-    this.highPrioritySends = []
-    this.normalSends = []
+  private rejectQueuedSends(lane: SendLane, error: unknown) {
+    const queued = [...lane.highPrioritySends, ...lane.normalSends]
+    lane.highPrioritySends = []
+    lane.normalSends = []
     queued.forEach((item) => item.reject(error))
   }
 
   private observeSendFailure(send: Promise<void>) {
     void send.catch((error: unknown) => this.handleSendFailure(error))
-  }
-
-  private waitForSendIdle() {
-    if (
-      !this.sending &&
-      !this.highPrioritySends.length &&
-      !this.normalSends.length
-    ) {
-      return Promise.resolve()
-    }
-    return new Promise<void>((resolve) => this.sendIdleWaiters.push(resolve))
   }
 
   private handleTauriMessage(message: TauriMessage, generation: number) {
@@ -536,6 +585,10 @@ export class RealtimeSession {
     } else if (message.type === 'Close' && !this.closed) {
       this.clearEndpointState()
       this.rejectPendingModeChange(new Error('实时会话已关闭'))
+      const lane = this.sendLane
+      this.sendLane = null
+      if (lane) this.retireSendLane(lane)
+      this.transport = null
       this.closed = true
       this.connectionGeneration += 1
       this.ready = false
@@ -897,11 +950,16 @@ export class RealtimeSession {
     )
     this.ready = false
     this.closed = true
+    const transport = this.transport
+    const lane = this.sendLane
+    this.transport = null
+    this.sendLane = null
+    if (lane) this.retireSendLane(lane)
     this.options.onError(
       error instanceof Error ? error.message : '实时音视频发送失败',
     )
     try {
-      await this.transport?.close()
+      await transport?.close()
     } catch {
       // The socket may already be gone.
     }
@@ -1071,10 +1129,12 @@ export class RealtimeSession {
     if (this.closed) return
     this.closed = true
     const transport = this.transport
+    const lane = this.sendLane
     this.transport = null
+    this.sendLane = null
+    if (lane) this.retireSendLane(lane)
     if (transport) {
       try {
-        await this.waitForSendIdle()
         await transport.send(JSON.stringify({ type: 'session.close' }))
       } catch {
         // A disconnected socket still counts as closed.

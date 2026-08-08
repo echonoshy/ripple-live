@@ -899,6 +899,67 @@ test('an old successful send cannot settle or absorb a new transport queue item'
   assert.deepEqual(newSent, [{ type: 'test.new' }])
 })
 
+test('a never-settling retired send lane cannot block replacement startup or close', async () => {
+  const { session } = readySessionHarness()
+  const never = new Promise<void>(() => {})
+  const oldTransport = {
+    send: async () => never,
+    close: async () => {},
+  }
+  const newSent: Array<Record<string, unknown>> = []
+  const newTransport = {
+    send: async (message: string) => newSent.push(JSON.parse(message)),
+    close: async () => {},
+  }
+  const internals = session as unknown as {
+    transport: typeof oldTransport
+    connectionGeneration: number
+    replaceTransport(transport: typeof newTransport, generation: number): void
+    sendEvent(event: Record<string, unknown>): Promise<void>
+    sendEvents(events: Record<string, unknown>[]): Promise<void>
+    startSession(generation: number): Promise<void>
+  }
+  internals.transport = oldTransport
+  const oldSend = internals.sendEvent({ type: 'test.never' })
+  const oldRejected = assert.rejects(oldSend, /替换|旧连接|superseded/i)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  internals.replaceTransport(newTransport, internals.connectionGeneration)
+  assert.equal(
+    await Promise.race([
+      oldRejected.then(() => 'rejected'),
+      new Promise((resolve) => setImmediate(() => resolve('blocked'))),
+    ]),
+    'rejected',
+  )
+  const startup = internals.startSession(internals.connectionGeneration)
+  const batch = internals.sendEvents([
+    { type: 'test.new.first' },
+    { type: 'test.new.second' },
+  ])
+  assert.equal(
+    await Promise.race([
+      Promise.all([startup, batch]).then(() => 'sent'),
+      new Promise((resolve) => setImmediate(() => resolve('blocked'))),
+    ]),
+    'sent',
+  )
+  assert.deepEqual(newSent.slice(0, 3).map((event) => event.type), [
+    'session.start',
+    'test.new.first',
+    'test.new.second',
+  ])
+
+  assert.equal(
+    await Promise.race([
+      session.close().then(() => 'closed'),
+      new Promise((resolve) => setImmediate(() => resolve('blocked'))),
+    ]),
+    'closed',
+  )
+  assert.equal(newSent.at(-1)?.type, 'session.close')
+})
+
 test('close rejects a pending mode change and clears its timeout', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const { session, receive } = readySessionHarness({ modeChangeTimeoutMs: 5_000 })
