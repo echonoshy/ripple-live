@@ -787,7 +787,9 @@ fn app(state: AppState) -> Router {
         .route("/v1/conversations/batch", post(batch_conversations))
         .route(
             "/v1/conversations/{conversation_id}",
-            axum::routing::patch(update_conversation).delete(delete_conversation),
+            get(get_conversation)
+                .patch(update_conversation)
+                .delete(delete_conversation),
         )
         .route(
             "/v1/conversations/{conversation_id}/messages",
@@ -997,6 +999,26 @@ async fn list_conversations(
         .await
     {
         Ok(conversations) => Json(json!({"data": conversations})).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn get_conversation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .conversation_summary(&user.id, &conversation_id)
+        .await
+    {
+        Ok(Some(conversation)) => Json(json!({"data": conversation})).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "对话不存在"),
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
 }
@@ -3477,6 +3499,72 @@ mod tests {
     async fn json_body(response: Response) -> Value {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn exact_conversation_route_authenticates_and_does_not_leak() {
+        let (_directory, state, token, conversation, foreign) = test_state().await;
+
+        let unauthorized = app(state.clone())
+            .oneshot(
+                Request::get(format!("/v1/conversations/{conversation}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let listed = app(state.clone())
+            .oneshot(authenticated_request(
+                "GET",
+                "/v1/conversations?scope=all",
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed = json_body(listed).await["data"][0].clone();
+
+        let exact = app(state.clone())
+            .oneshot(authenticated_request(
+                "GET",
+                &format!("/v1/conversations/{conversation}"),
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(exact.status(), StatusCode::OK);
+        assert_eq!(json_body(exact).await["data"], listed);
+
+        for inaccessible in [foreign, "missing-conversation".to_owned()] {
+            let response = app(state.clone())
+                .oneshot(authenticated_request(
+                    "GET",
+                    &format!("/v1/conversations/{inaccessible}"),
+                    &token,
+                    "",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(json_body(response).await["error"]["message"], "对话不存在");
+        }
+
+        let malformed = app(state)
+            .oneshot(authenticated_request(
+                "GET",
+                "/v1/conversations/%FF",
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert!(malformed.status().is_client_error());
+        let malformed_body = to_bytes(malformed.into_body(), usize::MAX).await.unwrap();
+        assert!(!String::from_utf8_lossy(&malformed_body).contains(&conversation));
     }
 
     #[tokio::test]
