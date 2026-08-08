@@ -27,6 +27,14 @@ export type ConversationMessage = {
   content: string
   created_at: number
   attachments: MemoryArtifact[]
+  actions: ConversationAction[]
+}
+
+export type ConversationAction = {
+  kind: 'memory' | 'todo' | string
+  target_id: string
+  label: string
+  due_at: number | null
 }
 
 export type MemoryArtifact = {
@@ -262,18 +270,49 @@ export function batchConversations(
   return batchMutation(server, token, '/v1/conversations/batch', ids, action)
 }
 
+type ConversationMessagePayload = Omit<ConversationMessage, 'actions'> & {
+  actions?: unknown
+}
+
+export function normalizeConversationMessages(
+  messages: ConversationMessagePayload[],
+): ConversationMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    actions: Array.isArray(message.actions)
+      ? message.actions.flatMap((candidate): ConversationAction[] => {
+          if (!candidate || typeof candidate !== 'object') return []
+          const record = candidate as Record<string, unknown>
+          if (
+            typeof record.kind !== 'string' ||
+            typeof record.target_id !== 'string' ||
+            typeof record.label !== 'string'
+          ) return []
+          return [{
+            kind: record.kind,
+            target_id: record.target_id,
+            label: record.label,
+            due_at: typeof record.due_at === 'number' && Number.isFinite(record.due_at)
+              ? record.due_at
+              : null,
+          }]
+        })
+      : [],
+  }))
+}
+
 export async function conversationMessages(
   server: string,
   token: string,
   conversationId: string,
 ) {
-  const payload = await request<{ data: ConversationMessage[] }>(
+  const payload = await request<{ data: ConversationMessagePayload[] }>(
     server,
     `/v1/conversations/${encodeURIComponent(conversationId)}/messages?limit=500`,
     {},
     token,
   )
-  return payload.data
+  return normalizeConversationMessages(payload.data)
 }
 
 export async function memories(
@@ -288,6 +327,20 @@ export async function memories(
   const payload = await request<{ data: VisualMemory[] }>(
     server,
     `/v1/memories?${librarySearchParams(options)}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function memory(
+  server: string,
+  token: string,
+  memoryId: string,
+) {
+  const payload = await request<{ data: VisualMemory }>(
+    server,
+    `/v1/memories/${encodeURIComponent(memoryId)}`,
     {},
     token,
   )

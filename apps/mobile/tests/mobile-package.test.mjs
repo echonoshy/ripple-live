@@ -197,6 +197,23 @@ test('mobile todos retain completed items in a dedicated view', () => {
   assert.match(cssSource, /\.todo-view-switch/)
 })
 
+test('conversation history exposes persisted memory and todo actions safely', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const apiSource = readFileSync(path.join(appRoot, 'src/api.ts'), 'utf8')
+  const actionPath = path.join(appRoot, 'src/components/ConversationActions.tsx')
+  const actionBehaviorPath = path.join(appRoot, 'src/conversationActions.ts')
+
+  assert.equal(existsSync(actionPath), true)
+  assert.equal(existsSync(actionBehaviorPath), true)
+  const actionSource = readFileSync(actionPath, 'utf8')
+  const actionBehaviorSource = readFileSync(actionBehaviorPath, 'utf8')
+  assert.match(apiSource, /actions: ConversationAction\[\]/)
+  assert.match(appSource, /<ConversationActions/)
+  assert.match(actionBehaviorSource, /kind === 'memory'/)
+  assert.match(actionBehaviorSource, /kind !== 'todo'/)
+  assert.doesNotMatch(actionSource, /dangerouslySetInnerHTML/)
+})
+
 test('mobile home presents voice as the primary call entry with explicit camera access', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const apiSource = readFileSync(path.join(appRoot, 'src/api.ts'), 'utf8')

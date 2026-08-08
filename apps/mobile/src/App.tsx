@@ -34,6 +34,7 @@ import {
   login,
   logout as logoutApi,
   memories,
+  memory,
   memoryMutation,
   renameConversation,
   register,
@@ -41,6 +42,7 @@ import {
   todos,
   updateTodo,
   type AuthUser,
+  type ConversationAction,
   type ConversationMessage,
   type ConversationSummary,
   type MemoryArtifact,
@@ -50,6 +52,10 @@ import {
 import { LibraryActions } from './components/LibraryActions'
 import { BottomNav, type AppTab } from './components/BottomNav'
 import { ConversationHome } from './components/ConversationHome'
+import {
+  activateConversationAction,
+} from './conversationActions'
+import { ConversationActions } from './components/ConversationActions'
 import { LiveCallScreen } from './components/LiveCallScreen'
 import { LibrarySection } from './components/LibrarySection'
 import { LibraryToolbar } from './components/LibraryToolbar'
@@ -259,6 +265,9 @@ export default function App() {
   const pointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
   const todoPointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
   const suppressClickRef = useRef(false)
+  const actionMemoryTargetRef = useRef<string | null>(null)
+  const actionTodoTargetRef = useRef<string | null>(null)
+  const todoScrollTargetRef = useRef<string | null>(null)
 
   const navigateTo = useCallback((nextScreen: Screen) => {
     const owner = navigationGuardRef.current.begin()
@@ -394,7 +403,16 @@ export default function App() {
       libraryOptionsForView(memoryScope, debouncedMemoryQuery, 100),
     )
       .then((items) => {
-        if (active) setMemoryItems(items)
+        if (!active) return
+        const targetId = actionMemoryTargetRef.current
+        setMemoryItems((current) => {
+          const focused = targetId
+            ? current.find((item) => item.id === targetId)
+            : null
+          return focused && !items.some((item) => item.id === focused.id)
+            ? [focused, ...items]
+            : items
+        })
       })
       .catch((error: unknown) => {
         if (active) {
@@ -415,9 +433,31 @@ export default function App() {
     setTodoBusy(true)
     setTodoError('')
     setTodoItems([])
-    void todos(server, accessToken, todoView === 'completed')
+    const targetId = actionTodoTargetRef.current
+    const load = async () => {
+      if (!targetId) return todos(server, accessToken, todoView === 'completed')
+      const activeItems = await todos(server, accessToken, false)
+      if (activeItems.some((item) => item.id === targetId)) {
+        return activeItems
+      }
+      const completedItems = await todos(server, accessToken, true)
+      if (completedItems.some((item) => item.id === targetId)) {
+        if (active) setTodoView('completed')
+        return completedItems
+      }
+      if (active) setTodoError('该待办已不存在或无法打开')
+      return activeItems
+    }
+    void load()
       .then((items) => {
-        if (active) setTodoItems(items)
+        if (!active) return
+        if (targetId) {
+          actionTodoTargetRef.current = null
+          if (items.some((item) => item.id === targetId)) {
+            todoScrollTargetRef.current = targetId
+          }
+        }
+        setTodoItems(items)
       })
       .catch((error: unknown) => {
         if (active) setTodoError(error instanceof Error ? error.message : '无法加载待办')
@@ -429,6 +469,20 @@ export default function App() {
       active = false
     }
   }, [accessToken, screen, server, todoView])
+
+  useEffect(() => {
+    const targetId = todoScrollTargetRef.current
+    if (screen !== 'todos' || !targetId) return
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById(`todo-action-${encodeURIComponent(targetId)}`)
+      if (!target) return
+      todoScrollTargetRef.current = null
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      target.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'center' })
+      target.focus({ preventScroll: true })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [screen, todoItems])
 
   useEffect(() => {
     if (!accessToken) return
@@ -750,15 +804,58 @@ export default function App() {
     navigateTo('call')
   }
 
+  const openConversationMemory = async (targetId: string) => {
+    const routeOwner = navigateTo('memories')
+    actionMemoryTargetRef.current = targetId
+    setMemoryScope('all')
+    setMemoryQuery('')
+    setSelectedMemoryId(null)
+    setMemoryBusy(true)
+    setMemoryError('')
+    try {
+      const target = await memory(server, accessToken, targetId)
+      if (!navigationGuardRef.current.owns(routeOwner)) return
+      setMemoryItems((items) => [
+        target,
+        ...items.filter((item) => item.id !== target.id),
+      ])
+      setSelectedMemoryId(target.id)
+    } catch (error) {
+      if (!navigationGuardRef.current.owns(routeOwner)) return
+      actionMemoryTargetRef.current = null
+      setMemoryError(
+        error instanceof Error ? error.message : '该记忆已不存在或无法打开',
+      )
+    } finally {
+      if (navigationGuardRef.current.owns(routeOwner)) setMemoryBusy(false)
+    }
+  }
+
+  const openConversationTodo = (targetId: string) => {
+    actionTodoTargetRef.current = targetId
+    setTodoView('active')
+    setTodoQuery('')
+    setRevealedTodo(null)
+    navigateTo('todos')
+  }
+
+  const openConversationAction = (action: ConversationAction) =>
+    activateConversationAction(action, {
+      openMemory: openConversationMemory,
+      openTodo: openConversationTodo,
+    })
+
   const selectTab = (tab: AppTab) => {
     switch (tab) {
       case 'chat':
         navigateTo('home')
         break
       case 'memories':
+        actionMemoryTargetRef.current = null
         navigateTo('memories')
         break
       case 'todos':
+        actionTodoTargetRef.current = null
         navigateTo('todos')
         break
       case 'profile':
@@ -1508,6 +1605,8 @@ export default function App() {
             <div className="todo-list">
               {visibleTodos.map((todo) => (
                 <article
+                  id={`todo-action-${encodeURIComponent(todo.id)}`}
+                  tabIndex={-1}
                   className={`todo-swipe-shell ${revealedTodo === todo.id ? 'is-revealed' : ''}`}
                   key={todo.id}
                   onPointerDown={(event) => beginTodoGesture(event, todo.id)}
@@ -1801,6 +1900,10 @@ export default function App() {
                     <time>{formatHistoryTime(message.created_at)}</time>
                   </div>
                   <MarkdownContent>{message.content}</MarkdownContent>
+                  <ConversationActions
+                    actions={message.actions}
+                    onActivate={openConversationAction}
+                  />
                   {message.attachments.length > 0 && (
                     <div className="message-attachments">
                       {message.attachments.map((artifact) => (

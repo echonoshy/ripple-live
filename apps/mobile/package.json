@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test:library": "tsc src/library.ts --outDir .test-dist --module nodenext --moduleResolution nodenext --target es2022 --ignoreConfig && node --test tests/library.test.mjs; task_status=$?; rm -f .test-dist/library.js; rmdir .test-dist 2>/dev/null || true; exit $task_status",
-    "test:mobile": "node --test tests/mobile-package.test.mjs && npm run test:library",
+    "test:mobile": "node --test tests/mobile-package.test.mjs && tsx --test tests/conversation-actions.test.tsx && npm run test:library",
     "test:playback": "tsx --test tests/playback-telemetry.test.ts",
     "test:media": "tsx --test tests/live-media-lifecycle.test.ts",
     "test:live-ui": "tsx --test tests/live-motion.test.ts tests/orb-lifecycle.test.ts tests/orb-renderer.test.ts",
