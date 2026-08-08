@@ -6,6 +6,7 @@ import {
   createTurnId,
 } from './protocol'
 import type { RealtimeMode } from './protocol'
+import type { ToolCompletion } from './toolResults'
 
 export type { RealtimeMode } from './protocol'
 export type SessionState =
@@ -30,6 +31,7 @@ type RealtimeEvent = {
   message?: string
   code?: string
   name?: string
+  call_id?: string
   result?: unknown
   response_id?: string
   artifact?: ResponseArtifact
@@ -62,7 +64,7 @@ type QueuedSend = {
   onFailure?: (error: unknown) => void
 }
 
-type SessionOptions = {
+export type SessionOptions = {
   server: string
   accessToken: string
   conversationId?: string
@@ -73,6 +75,7 @@ type SessionOptions = {
   onAssistantText: (text: string) => void
   onUserText: (text: string) => void
   onTool: (label: string) => void
+  onToolResult: (event: ToolCompletion) => void
   onAudio: (audio: Float32Array) => void
   onAudioDone: () => void
   onInterrupted: () => void
@@ -166,6 +169,7 @@ export class RealtimeSession {
   private assistantText = ''
   private interruptPending = false
   private currentResponseId: string | null = null
+  private completedToolCallIds = new Set<string>()
   private playbackActive = false
   private playbackStartedReported = false
   private normalSends: QueuedSend[] = []
@@ -382,6 +386,7 @@ export class RealtimeSession {
         break
       case 'response.created':
         this.currentResponseId = event.response_id ?? null
+        this.completedToolCallIds.clear()
         this.playbackStartedReported = false
         this.assistantText = ''
         this.interruptPending = false
@@ -395,6 +400,7 @@ export class RealtimeSession {
         break
       case 'response.tool.completed':
         if (!this.isCurrentResponse(event)) return
+        if (!this.emitToolResult(event)) return
         this.options.onTool(event.name ? `${event.name} 已完成` : '工具调用已完成')
         this.options.onState('thinking')
         break
@@ -444,6 +450,32 @@ export class RealtimeSession {
 
   private isCurrentResponse(event: RealtimeEvent) {
     return !event.response_id || event.response_id === this.currentResponseId
+  }
+
+  private emitToolResult(event: RealtimeEvent) {
+    if (
+      !this.currentResponseId ||
+      event.response_id !== this.currentResponseId ||
+      typeof event.call_id !== 'string' ||
+      !event.call_id.trim() ||
+      typeof event.name !== 'string' ||
+      !event.name.trim() ||
+      this.completedToolCallIds.has(event.call_id)
+    ) {
+      return false
+    }
+
+    this.completedToolCallIds.add(event.call_id)
+    try {
+      this.options.onToolResult({
+        callId: event.call_id,
+        name: event.name,
+        result: event.result,
+      })
+    } catch {
+      // Consumer rendering must not interrupt the realtime transport.
+    }
+    return true
   }
 
   private matchesEndpointTurn(turnId: string | undefined) {
@@ -540,6 +572,7 @@ export class RealtimeSession {
       this.options.onAssistantText('')
     }
     this.currentResponseId = null
+    this.completedToolCallIds.clear()
     this.playbackStartedReported = false
     this.interruptPending = false
     this.options.onTool('')

@@ -500,6 +500,7 @@ export default function App() {
           setLiveArtifacts([])
         },
         onTool: setToolStatus,
+        onToolResult: () => {},
         onAudio: (audio) => media.enqueueOutput(audio),
         onAudioDone: () => media.finishOutput(),
         onInterrupted: () => media.clearOutput(),

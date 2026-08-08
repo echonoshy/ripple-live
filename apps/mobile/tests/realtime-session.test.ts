@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { RealtimeSession } from '../src/realtime/RealtimeSession.ts'
+import type { ToolCompletion } from '../src/realtime/toolResults.ts'
 import {
   REALTIME_PROTOCOL_VERSION,
   createTurnId,
@@ -27,12 +28,17 @@ test('turn ids are non-empty and unique', () => {
   assert.notEqual(first, second)
 })
 
-function failureHarness() {
+function failureHarness({
+  onToolResult,
+}: {
+  onToolResult?: (result: ToolCompletion) => void
+} = {}) {
   const states: string[] = []
   const tools: string[] = []
   const assistantTexts: string[] = []
   const errors: string[] = []
   const responseFailures: string[] = []
+  const results: ToolCompletion[] = []
   let audioClears = 0
   const session = new RealtimeSession({
     server: '127.0.0.1:8700',
@@ -44,6 +50,10 @@ function failureHarness() {
     onAssistantText: (text) => assistantTexts.push(text),
     onUserText: () => {},
     onTool: (label) => tools.push(label),
+    onToolResult: (result) => {
+      results.push(result)
+      onToolResult?.(result)
+    },
     onAudio: () => {},
     onAudioDone: () => {},
     onInterrupted: () => {
@@ -65,11 +75,124 @@ function failureHarness() {
     assistantTexts,
     errors,
     responseFailures,
+    results,
     get audioClears() {
       return audioClears
     },
   }
 }
+
+test('emits one correlated completed tool result without altering opaque fields', () => {
+  const harness = failureHarness()
+  harness.receive({ type: 'response.created', response_id: 'response-1' })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 'response-1',
+    call_id: ' call-1 ',
+    name: ' remember ',
+    result: { ok: true },
+  })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 'response-1',
+    call_id: ' call-1 ',
+    name: ' remember ',
+    result: { ok: true },
+  })
+
+  assert.deepEqual(harness.results, [
+    { callId: ' call-1 ', name: ' remember ', result: { ok: true } },
+  ])
+})
+
+test('ignores stale, uncorrelated, and blank tool results', () => {
+  const harness = failureHarness()
+  harness.receive({ type: 'response.created', response_id: 'response-current' })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 'stale',
+    call_id: 'call-1',
+    name: 'remember',
+    result: { ok: true },
+  })
+  harness.receive({
+    type: 'response.tool.completed',
+    call_id: 'call-2',
+    name: 'remember',
+    result: { ok: true },
+  })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 'response-current',
+    call_id: '  ',
+    name: 'remember',
+    result: { ok: true },
+  })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 'response-current',
+    call_id: 'call-3',
+    name: '\t',
+    result: { ok: true },
+  })
+
+  assert.deepEqual(harness.results, [])
+  assert.deepEqual(harness.tools, [''])
+})
+
+test('does not re-emit tool results after response completion', () => {
+  const harness = failureHarness()
+  harness.receive({ type: 'response.created', response_id: 'response-1' })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 'response-1',
+    call_id: 'call-1',
+    name: 'remember',
+    result: { ok: true },
+  })
+  harness.receive({ type: 'response.done', response_id: 'response-1' })
+  harness.receive({
+    type: 'response.tool.completed',
+    response_id: 'response-1',
+    call_id: 'call-2',
+    name: 'remember',
+    result: { ok: true },
+  })
+
+  assert.deepEqual(harness.results, [
+    { callId: 'call-1', name: 'remember', result: { ok: true } },
+  ])
+  assert.equal(harness.states.at(-1), 'listening')
+})
+
+test('contains a tool result callback exception and continues session transport', () => {
+  const harness = failureHarness({
+    onToolResult: () => {
+      throw new Error('callback failed')
+    },
+  })
+  harness.receive({ type: 'response.created', response_id: 'response-1' })
+
+  assert.doesNotThrow(() => {
+    harness.receive({
+      type: 'response.tool.completed',
+      response_id: 'response-1',
+      call_id: 'call-1',
+      name: 'remember',
+      result: { ok: true },
+    })
+  })
+  harness.receive({
+    type: 'response.text.delta',
+    response_id: 'response-1',
+    delta: 'still connected',
+  })
+
+  assert.deepEqual(harness.results, [
+    { callId: 'call-1', name: 'remember', result: { ok: true } },
+  ])
+  assert.deepEqual(harness.assistantTexts, ['still connected'])
+})
 
 function readySessionHarness() {
   const sent: Array<Record<string, unknown>> = []
@@ -84,6 +207,7 @@ function readySessionHarness() {
     onAssistantText: () => {},
     onUserText: () => {},
     onTool: () => {},
+    onToolResult: () => {},
     onAudio: () => {},
     onAudioDone: () => {},
     onInterrupted: () => {},
@@ -548,6 +672,7 @@ test('playback start is reported once for the active response', async () => {
     onAssistantText: () => {},
     onUserText: () => {},
     onTool: () => {},
+    onToolResult: () => {},
     onAudio: () => {},
     onAudioDone: () => {},
     onInterrupted: () => {},
@@ -597,6 +722,7 @@ test('speech start immediately interrupts an active response before capturing in
     onAssistantText: () => {},
     onUserText: () => {},
     onTool: () => {},
+    onToolResult: () => {},
     onAudio: () => {},
     onAudioDone: () => {},
     onInterrupted: () => {
@@ -649,6 +775,7 @@ test('speech start clears locally buffered playback after generation is already 
     onAssistantText: () => {},
     onUserText: () => {},
     onTool: () => {},
+    onToolResult: () => {},
     onAudio: () => {},
     onAudioDone: () => {},
     onInterrupted: () => {
