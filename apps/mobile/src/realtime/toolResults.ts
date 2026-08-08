@@ -56,24 +56,38 @@ const CARRIAGE_RETURN = '\r'
 const LINE_FEED = '\n'
 const graphemeExtension = /^(?:\p{Mark}|\p{Emoji_Modifier}|\p{Variation_Selector})$/u
 
+type OwnDataRead =
+  | { kind: 'data'; value: unknown }
+  | { kind: 'missing' }
+  | { kind: 'invalid' }
+
+function isObject(value: unknown): value is object {
+  return typeof value === 'object' && value !== null
+}
+
+function isArray(value: unknown): value is unknown[] {
+  try {
+    return Array.isArray(value)
+  } catch {
+    return false
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+  return isObject(value) && !isArray(value)
 }
 
-function own(record: object, key: PropertyKey) {
-  const descriptor = Object.getOwnPropertyDescriptor(record, key)
-  return descriptor !== undefined && Object.hasOwn(descriptor, 'value')
-}
-
-function ownValue<T>(record: object, key: PropertyKey): T | undefined {
-  const descriptor = Object.getOwnPropertyDescriptor(record, key)
-  return descriptor !== undefined && Object.hasOwn(descriptor, 'value')
-    ? (descriptor.value as T)
-    : undefined
-}
-
-function hasOwnAccessor(record: object, key: PropertyKey) {
-  return Object.hasOwn(record, key) && !own(record, key)
+function ownValue(record: unknown, key: PropertyKey): OwnDataRead {
+  if (!isObject(record)) return { kind: 'invalid' }
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key)
+    if (descriptor === undefined) return { kind: 'missing' }
+    return Object.hasOwn(descriptor, 'value')
+      ? { kind: 'data', value: descriptor.value }
+      : { kind: 'invalid' }
+  } catch {
+    return { kind: 'invalid' }
+  }
 }
 
 function codePoint(value: string) {
@@ -124,6 +138,8 @@ function fallbackGraphemes(value: string) {
     if (joined || character === ZERO_WIDTH_JOINER || graphemeExtension.test(character)) {
       current += character
       joined = character === ZERO_WIDTH_JOINER
+      regionalIndicatorCount = 0
+      currentHangul = null
       continue
     }
     if (isRegionalIndicator(character) && regionalIndicatorCount % 2 === 1) {
@@ -213,18 +229,36 @@ function sourceUrl(value: unknown): string | null {
 }
 
 function isSuccessful(value: unknown): value is Record<string, unknown> {
-  return isRecord(value) && own(value, 'ok') && ownValue(value, 'ok') === true
+  if (!isRecord(value)) return false
+  const ok = ownValue(value, 'ok')
+  return ok.kind === 'data' && ok.value === true
 }
 
 function generic(callId: string, name: string, success: boolean): LiveResult {
-  const labels: Record<string, [string, string]> = {
-    remember: ['记忆操作已完成', '记忆操作未完成'],
-    create_todo: ['待办创建已完成', '待办创建未完成'],
-    list_todos: ['待办查询已完成', '待办查询未完成'],
-    web_search: ['搜索已完成', '搜索未完成'],
-    weather_lookup: ['天气查询已完成', '天气查询未完成'],
+  let completed = '操作已完成'
+  let failed = '操作未完成'
+  switch (name) {
+    case 'remember':
+      completed = '记忆操作已完成'
+      failed = '记忆操作未完成'
+      break
+    case 'create_todo':
+      completed = '待办创建已完成'
+      failed = '待办创建未完成'
+      break
+    case 'list_todos':
+      completed = '待办查询已完成'
+      failed = '待办查询未完成'
+      break
+    case 'web_search':
+      completed = '搜索已完成'
+      failed = '搜索未完成'
+      break
+    case 'weather_lookup':
+      completed = '天气查询已完成'
+      failed = '天气查询未完成'
+      break
   }
-  const [completed, failed] = labels[name] ?? ['操作已完成', '操作未完成']
   return {
     kind: 'generic',
     callId,
@@ -234,25 +268,30 @@ function generic(callId: string, name: string, success: boolean): LiveResult {
 }
 
 function parseMemory(callId: string, result: Record<string, unknown>): LiveResult | null {
-  if (!own(result, 'memory')) return null
-  const memory = ownValue(result, 'memory')
-  if (!isRecord(memory) || !own(memory, 'id') || !own(memory, 'user_note')) return null
-  const memoryId = identifier(ownValue(memory, 'id'))
-  const title = displayText(ownValue(memory, 'user_note'))
+  const memoryField = ownValue(result, 'memory')
+  if (memoryField.kind !== 'data' || !isRecord(memoryField.value)) return null
+  const id = ownValue(memoryField.value, 'id')
+  const userNote = ownValue(memoryField.value, 'user_note')
+  if (id.kind !== 'data' || userNote.kind !== 'data') return null
+  const memoryId = identifier(id.value)
+  const title = displayText(userNote.value)
   if (!memoryId || !title) return null
   return { kind: 'memory_receipt', callId, memoryId, title, status: 'success' }
 }
 
 function parseTodo(callId: string, result: Record<string, unknown>): LiveResult | null {
-  if (!own(result, 'todo')) return null
-  const todo = ownValue(result, 'todo')
-  if (!isRecord(todo) || !own(todo, 'id') || !own(todo, 'title')) return null
-  const todoId = identifier(ownValue(todo, 'id'))
-  const title = displayText(ownValue(todo, 'title'))
+  const todoField = ownValue(result, 'todo')
+  if (todoField.kind !== 'data' || !isRecord(todoField.value)) return null
+  const id = ownValue(todoField.value, 'id')
+  const todoTitle = ownValue(todoField.value, 'title')
+  if (id.kind !== 'data' || todoTitle.kind !== 'data') return null
+  const todoId = identifier(id.value)
+  const title = displayText(todoTitle.value)
   if (!todoId || !title) return null
 
-  if (hasOwnAccessor(todo, 'due_at')) return null
-  const dueValue = own(todo, 'due_at') ? ownValue(todo, 'due_at') : undefined
+  const due = ownValue(todoField.value, 'due_at')
+  if (due.kind === 'invalid') return null
+  const dueValue = due.kind === 'data' ? due.value : undefined
   const dueAt = dueValue === undefined || dueValue === null ? null : finiteNumber(dueValue)
   if (dueAt === null && dueValue !== undefined && dueValue !== null) return null
   return { kind: 'todo_receipt', callId, todoId, title, dueAt, status: 'success' }
@@ -263,12 +302,21 @@ function validatedRows<T>(
   maximum: number,
   parse: (value: unknown) => T | null,
 ): T[] | null {
-  const count = Math.min(values.length, maximum)
+  const length = ownValue(values, 'length')
+  if (
+    length.kind !== 'data' ||
+    typeof length.value !== 'number' ||
+    !Number.isSafeInteger(length.value) ||
+    length.value < 0
+  ) {
+    return null
+  }
+  const count = Math.min(length.value, maximum)
   const rows: T[] = []
   for (let index = 0; index < count; index += 1) {
-    if (!Object.hasOwn(values, index)) return null
-    if (!own(values, index)) return null
-    const row = parse(ownValue(values, index))
+    const value = ownValue(values, index)
+    if (value.kind !== 'data') return null
+    const row = parse(value.value)
     if (row === null) return null
     rows.push(row)
   }
@@ -276,42 +324,43 @@ function validatedRows<T>(
 }
 
 function parseTodoList(callId: string, result: Record<string, unknown>): LiveResult | null {
-  if (!own(result, 'completed') || !own(result, 'todos')) return null
   const completed = ownValue(result, 'completed')
   const todos = ownValue(result, 'todos')
-  if (typeof completed !== 'boolean' || !Array.isArray(todos)) return null
-  const titles = validatedRows(todos, MAX_TODO_ROWS, (todo) => {
-    if (!isRecord(todo) || !own(todo, 'title')) return null
-    return displayText(ownValue(todo, 'title'))
+  if (completed.kind !== 'data' || todos.kind !== 'data' || typeof completed.value !== 'boolean' || !isArray(todos.value)) {
+    return null
+  }
+  const titles = validatedRows(todos.value, MAX_TODO_ROWS, (todo) => {
+    if (!isRecord(todo)) return null
+    const title = ownValue(todo, 'title')
+    return title.kind === 'data' ? displayText(title.value) : null
   })
   if (!titles) return null
   return {
     kind: 'todo_list',
     callId,
     titles,
-    completed,
+    completed: completed.value,
     status: 'success',
   }
 }
 
 function parseSearch(callId: string, result: Record<string, unknown>): LiveResult | null {
-  if (!own(result, 'data')) return null
   const data = ownValue(result, 'data')
-  if (!isRecord(data) || !own(data, 'results')) return null
-  const searchResults = ownValue(data, 'results')
-  if (!Array.isArray(searchResults) || searchResults.length === 0) {
-    return null
-  }
-  const items = validatedRows(searchResults, MAX_SEARCH_ROWS, (source) => {
-    if (!isRecord(source) || !own(source, 'title') || !own(source, 'url') || !own(source, 'snippet')) {
-      return null
-    }
-    const title = displayText(ownValue(source, 'title'))
-    const url = sourceUrl(ownValue(source, 'url'))
-    const snippet = displayText(ownValue(source, 'snippet'), MAX_SNIPPET_LENGTH)
+  if (data.kind !== 'data' || !isRecord(data.value)) return null
+  const searchResults = ownValue(data.value, 'results')
+  if (searchResults.kind !== 'data' || !isArray(searchResults.value)) return null
+  const items = validatedRows(searchResults.value, MAX_SEARCH_ROWS, (source) => {
+    if (!isRecord(source)) return null
+    const titleField = ownValue(source, 'title')
+    const urlField = ownValue(source, 'url')
+    const snippetField = ownValue(source, 'snippet')
+    if (titleField.kind !== 'data' || urlField.kind !== 'data' || snippetField.kind !== 'data') return null
+    const title = displayText(titleField.value)
+    const url = sourceUrl(urlField.value)
+    const snippet = displayText(snippetField.value, MAX_SNIPPET_LENGTH)
     return title && url && snippet ? { title, url, snippet } : null
   })
-  if (!items) return null
+  if (!items || items.length === 0) return null
   return { kind: 'search', callId, items, status: 'success' }
 }
 
@@ -324,15 +373,19 @@ function numericTemperature(value: unknown): number | null {
 }
 
 function parseWeather(callId: string, result: Record<string, unknown>): LiveResult | null {
-  if (!own(result, 'data')) return null
   const data = ownValue(result, 'data')
-  if (!isRecord(data)) return null
+  if (data.kind !== 'data' || !isRecord(data.value)) return null
 
-  const hasDirectFields = own(data, 'location') && own(data, 'summary')
-  const directLocation = hasDirectFields ? displayText(ownValue(data, 'location')) : null
-  const directSummary = hasDirectFields ? displayText(ownValue(data, 'summary')) : null
-  const hasDirectTemperature = !Object.hasOwn(data, 'temperature') || own(data, 'temperature')
-  const directTemperature = own(data, 'temperature') ? ownValue(data, 'temperature') : undefined
+  const directLocationField = ownValue(data.value, 'location')
+  const directSummaryField = ownValue(data.value, 'summary')
+  const directTemperatureField = ownValue(data.value, 'temperature')
+  const directLocation =
+    directLocationField.kind === 'data' ? displayText(directLocationField.value) : null
+  const directSummary =
+    directSummaryField.kind === 'data' ? displayText(directSummaryField.value) : null
+  const hasDirectTemperature = directTemperatureField.kind !== 'invalid'
+  const directTemperature =
+    directTemperatureField.kind === 'data' ? directTemperatureField.value : undefined
   const directTemperatureValid =
     directTemperature === undefined || directTemperature === null || finiteNumber(directTemperature) !== null
   if (directLocation && directSummary && hasDirectTemperature && directTemperatureValid) {
@@ -349,21 +402,24 @@ function parseWeather(callId: string, result: Record<string, unknown>): LiveResu
     }
   }
 
-  if (!own(data, 'location') || !own(data, 'now')) return null
-  const locationData = ownValue(data, 'location')
-  const now = ownValue(data, 'now')
-  if (!isRecord(locationData) || !isRecord(now) || !own(locationData, 'name') || !own(now, 'text')) {
+  if (directLocationField.kind !== 'data') return null
+  const nowField = ownValue(data.value, 'now')
+  if (nowField.kind !== 'data' || !isRecord(directLocationField.value) || !isRecord(nowField.value)) {
     return null
   }
-  const location = displayText(ownValue(locationData, 'name'))
-  const summary = displayText(ownValue(now, 'text'))
-  const hasTemperature = !Object.hasOwn(now, 'temp') || own(now, 'temp')
-  const rawTemperature = own(now, 'temp') ? ownValue(now, 'temp') : undefined
+  const locationName = ownValue(directLocationField.value, 'name')
+  const weatherText = ownValue(nowField.value, 'text')
+  const temperatureField = ownValue(nowField.value, 'temp')
+  if (locationName.kind !== 'data' || weatherText.kind !== 'data' || temperatureField.kind === 'invalid') {
+    return null
+  }
+  const location = displayText(locationName.value)
+  const summary = displayText(weatherText.value)
+  const rawTemperature = temperatureField.kind === 'data' ? temperatureField.value : undefined
   const temperature = rawTemperature === undefined || rawTemperature === null ? null : numericTemperature(rawTemperature)
   if (
     !location ||
     !summary ||
-    !hasTemperature ||
     (temperature === null && rawTemperature !== undefined && rawTemperature !== null)
   ) {
     return null
@@ -371,15 +427,15 @@ function parseWeather(callId: string, result: Record<string, unknown>): LiveResu
   return { kind: 'weather', callId, location, summary, temperature, status: 'success' }
 }
 
-export function parseLiveResult(event: ToolCompletion): LiveResult {
+function parseResult(event: ToolCompletion): LiveResult {
   const eventRecord = isRecord(event) ? event : null
-  const validCallId = eventRecord && own(eventRecord, 'callId')
-    ? identifier(ownValue(eventRecord, 'callId'))
-    : null
+  const callIdField = eventRecord ? ownValue(eventRecord, 'callId') : { kind: 'invalid' as const }
+  const validCallId = callIdField.kind === 'data' ? identifier(callIdField.value) : null
   const callId = validCallId ?? INVALID_CALL_ID
-  const nameValue = eventRecord && own(eventRecord, 'name') ? ownValue(eventRecord, 'name') : undefined
-  const name = typeof nameValue === 'string' ? nameValue : ''
-  const result = eventRecord && own(eventRecord, 'result') ? ownValue(eventRecord, 'result') : undefined
+  const nameField = eventRecord ? ownValue(eventRecord, 'name') : { kind: 'invalid' as const }
+  const name = nameField.kind === 'data' && typeof nameField.value === 'string' ? nameField.value : ''
+  const resultField = eventRecord ? ownValue(eventRecord, 'result') : { kind: 'invalid' as const }
+  const result = resultField.kind === 'data' ? resultField.value : undefined
   if (!validCallId) return generic(callId, name, false)
   if (!isSuccessful(result)) return generic(callId, name, false)
 
@@ -404,4 +460,12 @@ export function parseLiveResult(event: ToolCompletion): LiveResult {
       return generic(callId, name, true)
   }
   return parsed ?? generic(callId, name, false)
+}
+
+export function parseLiveResult(event: ToolCompletion): LiveResult {
+  try {
+    return parseResult(event)
+  } catch {
+    return { kind: 'generic', callId: INVALID_CALL_ID, label: '操作未完成', status: 'error' }
+  }
 }

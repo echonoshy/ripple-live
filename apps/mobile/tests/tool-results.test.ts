@@ -562,3 +562,99 @@ test('fallback segmentation keeps flags, Hangul, and CRLF complete at the bounda
     if (result.kind === 'memory_receipt') assert.equal(result.title, item.expected)
   }
 })
+
+test('uses deterministic generic output for dangerous or non-string unknown tool names', () => {
+  const names: unknown[] = [
+    '__proto__',
+    'constructor',
+    'toString',
+    'valueOf',
+    Symbol('tool'),
+    { toString: () => { throw new Error('must not coerce') } },
+  ]
+
+  for (const name of names) {
+    const result = parseLiveResult({ callId: 'unknown-name', name, result: { ok: true } } as ToolCompletion)
+    assert.deepEqual(result, {
+      kind: 'generic',
+      callId: 'unknown-name',
+      label: '操作已完成',
+      status: 'success',
+    })
+  }
+})
+
+test('is total for throwing and revoked proxies at envelope and nested levels', () => {
+  const throwingEnvelope = new Proxy({}, {
+    getOwnPropertyDescriptor: () => { throw new Error('descriptor trap') },
+  })
+  const revokedEnvelope = Proxy.revocable({}, {})
+  revokedEnvelope.revoke()
+  const revokedResult = Proxy.revocable({}, {})
+  revokedResult.revoke()
+  const throwingRows = new Proxy([{ title: '待办' }], {
+    getOwnPropertyDescriptor: (target, key) => {
+      if (key === 'length') throw new Error('length trap')
+      return Reflect.getOwnPropertyDescriptor(target, key)
+    },
+  })
+
+  const events: unknown[] = [
+    throwingEnvelope,
+    revokedEnvelope.proxy,
+    { callId: 'revoked-result', name: 'remember', result: revokedResult.proxy },
+    {
+      callId: 'proxy-array',
+      name: 'list_todos',
+      result: { ok: true, completed: false, todos: throwingRows },
+    },
+  ]
+
+  for (const event of events) {
+    assert.doesNotThrow(() => parseLiveResult(event as ToolCompletion))
+    assert.equal(parseLiveResult(event as ToolCompletion).kind, 'generic')
+  }
+})
+
+test('reads each validated field descriptor once', () => {
+  let idDescriptorReads = 0
+  const memory = new Proxy(
+    { id: 'one-read', user_note: '标题' },
+    {
+      getOwnPropertyDescriptor: (target, key) => {
+        if (key === 'id') idDescriptorReads += 1
+        return Reflect.getOwnPropertyDescriptor(target, key)
+      },
+    },
+  )
+
+  const result = parseLiveResult({
+    callId: 'one-read',
+    name: 'remember',
+    result: { ok: true, memory },
+  })
+  assert.equal(result.kind, 'memory_receipt')
+  assert.equal(idDescriptorReads, 1)
+})
+
+test('forced fallback resets RI and Hangul adjacency after extension marks', async () => {
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  const prefix = 'a'.repeat(119)
+  const cases = [
+    `${prefix}🇨\u0301🇳z`,
+    `${prefix}\u1100\u0301\u1161z`,
+  ]
+
+  for (const title of cases) {
+    const expected = Array.from(segmenter.segment(title), (item) => item.segment).slice(0, 120).join('')
+    const result = await withForcedFallback((parse) =>
+      parse({
+        callId: `fallback-mark-${title.length}`,
+        name: 'remember',
+        result: { ok: true, memory: { id: `fallback-mark-${title.length}`, user_note: title } },
+      }),
+    )
+    assert.equal(result.kind, 'memory_receipt')
+    if (result.kind === 'memory_receipt') assert.equal(result.title, expected)
+  }
+})
