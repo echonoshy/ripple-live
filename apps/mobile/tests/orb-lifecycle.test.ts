@@ -292,7 +292,7 @@ test('cleanup cancels a queued frame and ignores a late callback', () => {
   }
 })
 
-test('a long rAF gap does not immediately downgrade a stable high-quality orb', () => {
+test('a long rAF gap clears near-threshold slow observation before a fresh two seconds', () => {
   const browser = installBrowserFakes(false, { captureFrames: true })
   const harness = createHarness()
 
@@ -303,20 +303,25 @@ test('a long rAF gap does not immediately downgrade a stable high-quality orb', 
       harness.latestProps,
       harness.onFallback,
     )
-    runCadence(browser, 0, 2500, 1000 / 17)
+    runCadence(browser, 0, 2500, 60)
+    runCadence(browser, 2500 + (1000 / 44), 4386.4, 44)
     assert.equal(harness.latestProps.current.qualityTier, 'high')
 
-    browser.setNow(3734)
-    runNextFrame(browser, 3734)
-
+    browser.setNow(5586.6)
+    runNextFrame(browser, 5586.6)
     assert.equal(harness.latestProps.current.qualityTier, 'high')
+
+    runCadence(browser, 5586.6 + (1000 / 44), 7585, 44)
+    assert.equal(harness.latestProps.current.qualityTier, 'high')
+    runCadence(browser, 7585 + (1000 / 44), 7690, 44)
+    assert.equal(harness.latestProps.current.qualityTier, 'low')
     cleanup()
   } finally {
     browser.restore()
   }
 })
 
-test('a rAF gap resets low-tier recovery until a fresh stable five seconds elapse', () => {
+test('a rAF gap clears near-threshold low recovery until a fresh five seconds elapse', () => {
   const browser = installBrowserFakes(false, { captureFrames: true })
   const harness = createHarness()
   harness.latestProps.current.qualityTier = 'low'
@@ -328,15 +333,45 @@ test('a rAF gap resets low-tier recovery until a fresh stable five seconds elaps
       harness.latestProps,
       harness.onFallback,
     )
-    runCadence(browser, 0, 2500, 60)
+    runCadence(browser, 0, 4500, 120)
     assert.equal(harness.latestProps.current.qualityTier, 'low')
 
-    browser.setNow(3700)
-    runNextFrame(browser, 3700)
-    runCadence(browser, 3700 + (1000 / 60), 8600, 60)
+    browser.setNow(5501)
+    runNextFrame(browser, 5501)
     assert.equal(harness.latestProps.current.qualityTier, 'low')
 
-    runCadence(browser, 8600 + (1000 / 60), 8800, 60)
+    runCadence(browser, 5501 + (1000 / 120), 10499, 120)
+    assert.equal(harness.latestProps.current.qualityTier, 'low')
+
+    runCadence(browser, 10499 + (1000 / 120), 10600, 120)
+    assert.equal(harness.latestProps.current.qualityTier, 'high')
+    cleanup()
+  } finally {
+    browser.restore()
+  }
+})
+
+test('a regressed rAF timestamp starts low-tier recovery from a fresh observation', () => {
+  const browser = installBrowserFakes(false, { captureFrames: true })
+  const harness = createHarness()
+  harness.latestProps.current.qualityTier = 'low'
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    runCadence(browser, 0, 4500, 120)
+    assert.equal(harness.latestProps.current.qualityTier, 'low')
+
+    browser.setNow(4499)
+    runNextFrame(browser, 4499)
+    runCadence(browser, 4499 + (1000 / 120), 5000, 120)
+    assert.equal(harness.latestProps.current.qualityTier, 'low')
+
+    runCadence(browser, 5000 + (1000 / 120), 9600, 120)
     assert.equal(harness.latestProps.current.qualityTier, 'high')
     cleanup()
   } finally {
