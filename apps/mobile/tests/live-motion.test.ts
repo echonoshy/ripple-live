@@ -6,6 +6,10 @@ import {
   scheduleCaptionClear,
 } from '../src/live/caption.ts'
 import {
+  cameraErrorAfterSwitch,
+  visibleCallError,
+} from '../src/live/callErrors.ts'
+import {
   MOTION_TIMING,
   mapSessionState,
   nextQualityTier,
@@ -61,6 +65,32 @@ test('clears unchanged text when the active caption source switches', () => {
     userText: '上一轮问题',
     assistantText: '新的回答',
   }), '新的回答')
+})
+
+test('camera outcomes cannot clear or mask a session error that arrives mid-switch', () => {
+  let sessionError = ''
+  let cameraError = '上次摄像头切换失败'
+
+  cameraError = ''
+  sessionError = '实时连接已断开'
+  cameraError = cameraErrorAfterSwitch(cameraError, 'switched')
+  assert.equal(sessionError, '实时连接已断开')
+  assert.equal(cameraError, '')
+  assert.equal(visibleCallError(sessionError, cameraError), '实时连接已断开')
+
+  cameraError = cameraErrorAfterSwitch(cameraError, 'failed')
+  assert.equal(sessionError, '实时连接已断开')
+  assert.equal(cameraError, '无法切换摄像头，请重试')
+  assert.equal(visibleCallError(sessionError, cameraError), '实时连接已断开')
+})
+
+test('camera success clears only prior camera-owned feedback', () => {
+  assert.equal(cameraErrorAfterSwitch('上次摄像头切换失败', 'switched'), '')
+  assert.equal(
+    cameraErrorAfterSwitch('上次摄像头切换失败', 'stale'),
+    '上次摄像头切换失败',
+  )
+  assert.equal(visibleCallError('', '无法切换摄像头，请重试'), '无法切换摄像头，请重试')
 })
 
 test('maps every transport state to one visual state', () => {

@@ -62,6 +62,7 @@ import {
   type LibraryItem,
   type LibraryView,
 } from './library'
+import { cameraErrorAfterSwitch, visibleCallError } from './live/callErrors'
 import { LiveMedia } from './media/LiveMedia'
 import { notifyDueTodos } from './reminders'
 import {
@@ -158,6 +159,7 @@ export default function App() {
   const server = DEFAULT_SERVER
   const [sessionState, setSessionState] = useState<SessionState>('idle')
   const [errorMessage, setErrorMessage] = useState('')
+  const [cameraErrorMessage, setCameraErrorMessage] = useState('')
   const [assistantText, setAssistantText] = useState('')
   const [userText, setUserText] = useState('')
   const [toolStatus, setToolStatus] = useState('')
@@ -414,6 +416,7 @@ export default function App() {
     if (sessionState !== 'ended' && sessionState !== 'error') return
     mediaRef.current?.stop()
     mediaRef.current = null
+    setCameraErrorMessage('')
     setInputLevel(0)
     setOutputLevel(0)
   }, [sessionState])
@@ -421,6 +424,7 @@ export default function App() {
   const stopCall = useCallback(async () => {
     mediaRef.current?.stop()
     mediaRef.current = null
+    setCameraErrorMessage('')
     setInputLevel(0)
     setOutputLevel(0)
     await sessionRef.current?.close()
@@ -441,6 +445,7 @@ export default function App() {
 
       setMode(nextMode)
       setErrorMessage('')
+      setCameraErrorMessage('')
       setAssistantText('')
       setUserText('')
       setToolStatus('')
@@ -554,19 +559,26 @@ export default function App() {
     const media = mediaRef.current
     if (!media) return
     const next = cameraFacing === 'user' ? 'environment' : 'user'
+    setCameraErrorMessage('')
     try {
       const outcome = await media.setFacingMode(next)
       if (mediaRef.current !== media) return
       if (outcome === 'stale') return
       if (outcome === 'failed') {
-        setErrorMessage('无法切换摄像头，请重试')
+        setCameraErrorMessage((previous) =>
+          cameraErrorAfterSwitch(previous, outcome),
+        )
         return
       }
       setCameraFacing(next)
-      setErrorMessage('')
+      setCameraErrorMessage((previous) =>
+        cameraErrorAfterSwitch(previous, outcome),
+      )
     } catch {
       if (mediaRef.current === media) {
-        setErrorMessage('无法切换摄像头，请重试')
+        setCameraErrorMessage((previous) =>
+          cameraErrorAfterSwitch(previous, 'failed'),
+        )
       }
     }
   }
@@ -1681,7 +1693,7 @@ export default function App() {
           userText={userText}
           assistantText={assistantText}
           toolStatus={toolStatus}
-          errorMessage={errorMessage}
+          errorMessage={visibleCallError(errorMessage, cameraErrorMessage)}
           artifacts={liveArtifacts}
           server={server}
           accessToken={accessToken}
