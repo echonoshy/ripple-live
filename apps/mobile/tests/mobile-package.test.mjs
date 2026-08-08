@@ -278,10 +278,20 @@ test('mobile live orb releases an interrupted response within 160ms', () => {
     path.join(appRoot, 'src/live/LiveCall.css'),
     'utf8',
   )
+  const orbSource = readFileSync(
+    path.join(appRoot, 'src/components/LiveOrb.tsx'),
+    'utf8',
+  )
 
   assert.match(
+    orbSource,
+    /isInterruptionRelease\(previousState, props\.state\)/,
+  )
+  assert.match(orbSource, /is-interruption-release/)
+  assert.match(cssSource, /\.is-interruption-release\s*\{[^}]*transition-duration:\s*160ms;/s)
+  assert.doesNotMatch(
     cssSource,
-    /\.live-orb-canvas\.is-listening,\s*\.live-orb-fallback\.is-listening\s*\{[^}]*transition-duration:\s*160ms;/s,
+    /\.live-orb-canvas\.is-listening,\s*\.live-orb-fallback\.is-listening\s*\{[^}]*transition-duration:/s,
   )
 })
 

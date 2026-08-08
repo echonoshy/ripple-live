@@ -36,6 +36,10 @@
 .live-orb-fallback.is-listening {
   filter: brightness(1.06);
   transform: scale(1);
+}
+
+.live-orb-canvas.is-interruption-release,
+.live-orb-fallback.is-interruption-release {
   transition-duration: 160ms;
 }
 

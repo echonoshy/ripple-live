@@ -40,6 +40,13 @@ const visualState: Record<SessionState, VisualState> = {
 
 export const mapSessionState = (state: SessionState) => visualState[state]
 
+export function isInterruptionRelease(
+  previous: VisualState | null,
+  next: VisualState,
+) {
+  return previous === 'speaking' && next === 'listening'
+}
+
 export function smoothLevel(previous: number, input: number, alpha: number) {
   const target = Math.min(1, Math.max(0, Number.isFinite(input) ? input : 0))
   return previous + (target - previous) * Math.min(1, Math.max(0, alpha))

@@ -101,6 +101,15 @@ function createHarness() {
   }
 }
 
+function runNextFrame(
+  browser: ReturnType<typeof installBrowserFakes>,
+  nowMs: number,
+) {
+  const callback = browser.calls.frames.shift()
+  assert.ok(callback, `expected a queued frame at ${nowMs}ms`)
+  callback(nowMs)
+}
+
 test('partial observer setup failure releases resources and enters fallback', () => {
   const browser = installBrowserFakes(true)
   const harness = createHarness()
@@ -152,10 +161,34 @@ test('successful lifecycle cleanup is idempotent', () => {
   }
 })
 
-test('forced-low mode renders the orb at no more than 30fps', () => {
+test('high-quality mode targets at most 60fps on 120Hz callbacks', () => {
+  const browser = installBrowserFakes(false, { captureFrames: true })
+  const harness = createHarness()
+  const updates: number[] = []
+  harness.renderer.update = (frame) => updates.push(frame.nowMs)
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    const callbacks = Array.from({ length: 13 }, (_, index) => index * (1000 / 120))
+    for (const nowMs of callbacks) runNextFrame(browser, nowMs)
+
+    assert.equal(updates[0], 0)
+    assert.deepEqual(updates, callbacks.filter((_, index) => index % 2 === 0))
+    cleanup()
+  } finally {
+    browser.restore()
+  }
+})
+
+test('low-quality mode keeps deadline cadence across jittered 30fps boundaries', () => {
   const browser = installBrowserFakes(false, {
-    reducedMotion: true,
     captureFrames: true,
+    reducedMotion: true,
   })
   const harness = createHarness()
   const updates: number[] = []
@@ -168,13 +201,65 @@ test('forced-low mode renders the orb at no more than 30fps', () => {
       harness.latestProps,
       harness.onFallback,
     )
-    browser.calls.frames.shift()?.(0)
-    browser.calls.frames.shift()?.(16)
-    browser.calls.frames.shift()?.(34)
+    for (const nowMs of [0, 16, 33.2, 33.4, 49.5, 66.5, 66.8, 83, 99.9, 100.1, 116, 133.4]) {
+      runNextFrame(browser, nowMs)
+    }
 
     assert.equal(harness.latestProps.current.qualityTier, 'low')
-    assert.deepEqual(updates, [0, 34])
+    assert.deepEqual(updates, [0, 33.4, 66.8, 100.1, 133.4])
     cleanup()
+  } finally {
+    browser.restore()
+  }
+})
+
+test('low-to-high quality changes resync without an immediate burst or long stall', () => {
+  const browser = installBrowserFakes(false, { captureFrames: true })
+  const harness = createHarness()
+  harness.latestProps.current.qualityTier = 'low'
+  const updates: number[] = []
+  harness.renderer.update = (frame) => updates.push(frame.nowMs)
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    runNextFrame(browser, 0)
+    runNextFrame(browser, 34)
+    harness.latestProps.current.qualityTier = 'high'
+    runNextFrame(browser, 40)
+    runNextFrame(browser, 50.8)
+
+    assert.deepEqual(updates, [0, 34, 50.8])
+    cleanup()
+  } finally {
+    browser.restore()
+  }
+})
+
+test('cleanup cancels a queued frame and ignores a late callback', () => {
+  const browser = installBrowserFakes(false, { captureFrames: true })
+  const harness = createHarness()
+  let updates = 0
+  harness.renderer.update = () => { updates += 1 }
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    const lateCallback = browser.calls.frames[0]
+    cleanup()
+    cleanup()
+    lateCallback?.(0)
+
+    assert.equal(updates, 0)
+    assert.deepEqual(browser.calls.framesCancelled, [42])
   } finally {
     browser.restore()
   }

@@ -11,6 +11,7 @@ import {
 } from '../src/live/callErrors.ts'
 import {
   MOTION_TIMING,
+  isInterruptionRelease,
   mapSessionState,
   nextQualityTier,
   smoothLevel,
@@ -108,6 +109,13 @@ test('uses approved motion timing', () => {
     cameraMs: 420,
     captionHoldMs: 1800,
   })
+})
+
+test('uses the interruption release only for speaking-to-listening', () => {
+  assert.equal(isInterruptionRelease('speaking', 'listening'), true)
+  for (const previous of ['connecting', 'thinking', 'tool', 'listening'] as const) {
+    assert.equal(isInterruptionRelease(previous, 'listening'), false)
+  }
 })
 
 test('smooths level changes and clamps invalid input', () => {

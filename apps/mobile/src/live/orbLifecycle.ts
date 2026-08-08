@@ -30,7 +30,11 @@ const pixelRatioFor = (qualityTier: QualityTier) => {
     : Math.min(Math.max(ratio, 1), 1.25)
 }
 
-const LOW_QUALITY_FRAME_INTERVAL_MS = 1000 / 30
+const frameIntervalFor = (qualityTier: QualityTier) => (
+  1000 / (qualityTier === 'high' ? 60 : 30)
+)
+const MAX_PACING_GAP_MS = 1000
+const PACING_EPSILON_MS = 0.01
 
 export function startOrbLifecycle(
   renderer: OrbRenderer,
@@ -56,7 +60,9 @@ export function startOrbLifecycle(
   let lastCondition: 'slow' | 'stable' | 'neutral' = 'neutral'
   let lastWidth = 0
   let lastHeight = 0
-  let lastRenderedAt = Number.NEGATIVE_INFINITY
+  let pacedQuality: QualityTier | null = null
+  let lastRenderedAt: number | null = null
+  let nextRenderDeadline: number | null = null
 
   const safely = (operation: () => void) => {
     try {
@@ -128,8 +134,41 @@ export function startOrbLifecycle(
     batteryLow = battery.level <= 0.15 && !battery.charging
     applyPowerPolicy()
   }
+  const shouldRender = (nowMs: number) => {
+    const qualityTier = latestProps.current.qualityTier
+    const interval = frameIntervalFor(qualityTier)
+    if (lastRenderedAt === null || !Number.isFinite(nowMs)) {
+      pacedQuality = qualityTier
+      lastRenderedAt = nowMs
+      nextRenderDeadline = nowMs + interval
+      return true
+    }
+    if (pacedQuality !== qualityTier) {
+      pacedQuality = qualityTier
+      nextRenderDeadline = lastRenderedAt + interval
+    }
+    if (nextRenderDeadline === null || nowMs < lastRenderedAt) {
+      lastRenderedAt = nowMs
+      nextRenderDeadline = nowMs + interval
+      return true
+    }
+    if (nowMs + PACING_EPSILON_MS < nextRenderDeadline) return false
+    if (nowMs - lastRenderedAt > MAX_PACING_GAP_MS) {
+      lastRenderedAt = nowMs
+      nextRenderDeadline = nowMs + interval
+      return true
+    }
+
+    const elapsedIntervals = Math.floor(
+      (nowMs - nextRenderDeadline + PACING_EPSILON_MS) / interval,
+    ) + 1
+    nextRenderDeadline += elapsedIntervals * interval
+    lastRenderedAt = nowMs
+    return true
+  }
 
   const draw = (nowMs: number) => {
+    if (!active) return
     try {
       frameTimes.push(nowMs)
       const windowStart = nowMs - 2000
@@ -163,12 +202,8 @@ export function startOrbLifecycle(
         }
       }
 
-      if (
-        latestProps.current.qualityTier === 'high'
-        || nowMs - lastRenderedAt >= LOW_QUALITY_FRAME_INTERVAL_MS
-      ) {
+      if (shouldRender(nowMs)) {
         renderer.update({ ...latestProps.current, nowMs })
-        lastRenderedAt = nowMs
       }
       frame = requestAnimationFrame(draw)
     } catch {

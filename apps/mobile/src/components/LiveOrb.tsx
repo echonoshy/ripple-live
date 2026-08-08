@@ -1,5 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
-import type { QualityTier, VisualState } from '../live/motion'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import {
+  isInterruptionRelease,
+  type QualityTier,
+  type VisualState,
+} from '../live/motion'
 import {
   createOrbRenderer,
   type OrbRenderer,
@@ -15,6 +19,7 @@ export type LiveOrbProps = {
 
 export function LiveOrb(props: LiveOrbProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const previousVisualStateRef = useRef<VisualState | null>(null)
   const [fallback, setFallback] = useState(false)
   const latestProps = useRef({
     state: props.state,
@@ -26,6 +31,13 @@ export function LiveOrb(props: LiveOrbProps) {
   latestProps.current.state = props.state
   latestProps.current.inputLevel = props.inputLevel
   latestProps.current.outputLevel = props.outputLevel
+
+  const previousState = previousVisualStateRef.current
+  const interruptionRelease = isInterruptionRelease(previousState, props.state)
+
+  useLayoutEffect(() => {
+    previousVisualStateRef.current = props.state
+  }, [props.state])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -48,7 +60,8 @@ export function LiveOrb(props: LiveOrbProps) {
   }, [])
 
   const stateClass = `is-${props.state}`
+  const interruptionClass = interruptionRelease ? ' is-interruption-release' : ''
   return fallback
-    ? <div className={`live-orb-fallback ${stateClass}`} aria-hidden="true" />
-    : <canvas ref={canvasRef} className={`live-orb-canvas ${stateClass}`} aria-hidden="true" />
+    ? <div className={`live-orb-fallback ${stateClass}${interruptionClass}`} aria-hidden="true" />
+    : <canvas ref={canvasRef} className={`live-orb-canvas ${stateClass}${interruptionClass}`} aria-hidden="true" />
 }
