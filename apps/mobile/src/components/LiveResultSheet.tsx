@@ -6,6 +6,7 @@ import {
   X,
 } from '@phosphor-icons/react'
 import type { ReactNode } from 'react'
+import { openExternalUrl } from '../live/externalLinks'
 import type { LiveResult } from '../realtime/toolResults'
 
 export type LiveResultSheetProps = {
@@ -71,10 +72,16 @@ function ResultBody({ result }: { result: LiveResult }) {
           <ul className="live-result-sources">
             {result.items.slice(0, 3).map((item) => (
               <li key={item.url}>
-                <a href={item.url} target="_blank" rel="noopener noreferrer">
+                <button
+                  type="button"
+                  aria-label={`在外部浏览器打开来源：${item.title}`}
+                  onClick={() => {
+                    void openExternalUrl(item.url)
+                  }}
+                >
                   <span>{item.title}</span>
                   <small>{item.snippet}</small>
-                </a>
+                </button>
               </li>
             ))}
           </ul>

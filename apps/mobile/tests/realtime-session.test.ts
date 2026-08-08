@@ -10,6 +10,162 @@ import {
   createSessionStart,
 } from '../src/realtime/protocol.ts'
 
+type FakeSocket = {
+  onopen: (() => void) | null
+  onmessage: ((event: { data: string }) => void) | null
+  onerror: (() => void) | null
+  onclose: (() => void) | null
+  sent: string[]
+  closes: number
+  open(): void
+  finishClose(): void
+  message(event: Record<string, unknown>): void
+}
+
+function installDeferredWebSockets(t: Parameters<typeof test>[1] extends (context: infer T) => unknown ? T : never) {
+  const sockets: FakeSocket[] = []
+  const originalWebSocket = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket')
+  const originalIsTauri = Object.getOwnPropertyDescriptor(globalThis, 'isTauri')
+
+  class DeferredWebSocket implements FakeSocket {
+    onopen: (() => void) | null = null
+    onmessage: ((event: { data: string }) => void) | null = null
+    onerror: (() => void) | null = null
+    onclose: (() => void) | null = null
+    sent: string[] = []
+    closes = 0
+
+    constructor(_url: string) {
+      sockets.push(this)
+    }
+
+    send(message: string) {
+      this.sent.push(message)
+    }
+
+    close() {
+      this.closes += 1
+    }
+
+    open() {
+      this.onopen?.()
+    }
+
+    finishClose() {
+      this.onclose?.()
+    }
+
+    message(event: Record<string, unknown>) {
+      this.onmessage?.({ data: JSON.stringify(event) })
+    }
+  }
+
+  Object.defineProperty(globalThis, 'WebSocket', {
+    configurable: true,
+    value: DeferredWebSocket,
+  })
+  Object.defineProperty(globalThis, 'isTauri', {
+    configurable: true,
+    value: false,
+  })
+  t.after(() => {
+    if (originalWebSocket) Object.defineProperty(globalThis, 'WebSocket', originalWebSocket)
+    else Reflect.deleteProperty(globalThis, 'WebSocket')
+    if (originalIsTauri) Object.defineProperty(globalThis, 'isTauri', originalIsTauri)
+    else Reflect.deleteProperty(globalThis, 'isTauri')
+  })
+
+  return sockets
+}
+
+function connectingSession(states: string[], ready: { count: number }) {
+  return new RealtimeSession({
+    server: '127.0.0.1:8700',
+    accessToken: 'test-token',
+    mode: 'audio',
+    onState: (state) => states.push(state),
+    onError: () => {},
+    onResponseFailed: () => {},
+    onAssistantText: () => {},
+    onUserText: () => {},
+    onTool: () => {},
+    onToolResult: () => {},
+    onAudio: () => {},
+    onAudioDone: () => {},
+    onInterrupted: () => {},
+    onArtifact: () => {},
+    onFrameRequested: () => null,
+    onReady: async () => {
+      ready.count += 1
+    },
+    onConversation: () => {},
+  })
+}
+
+test('close invalidates a pending browser connection and closes its late transport', async (t) => {
+  const sockets = installDeferredWebSockets(t)
+  const states: string[] = []
+  const ready = { count: 0 }
+  const session = connectingSession(states, ready)
+
+  const connecting = session.connect()
+  assert.equal(sockets.length, 1)
+  await session.close()
+  sockets[0]?.open()
+  await connecting
+  sockets[0]?.message({ type: 'session.ready' })
+
+  assert.equal(sockets[0]?.closes, 1)
+  assert.deepEqual(sockets[0]?.sent, [])
+  assert.deepEqual(states, ['connecting', 'ended'])
+  assert.equal(ready.count, 0)
+})
+
+test('a late old connection cannot affect a newer session', async (t) => {
+  const sockets = installDeferredWebSockets(t)
+  const oldStates: string[] = []
+  const oldReady = { count: 0 }
+  const oldSession = connectingSession(oldStates, oldReady)
+  const oldConnecting = oldSession.connect()
+  await oldSession.close()
+
+  const newStates: string[] = []
+  const newReady = { count: 0 }
+  const newSession = connectingSession(newStates, newReady)
+  const newConnecting = newSession.connect()
+  sockets[1]?.open()
+  await newConnecting
+  sockets[1]?.message({ type: 'session.ready' })
+
+  sockets[0]?.open()
+  await oldConnecting
+  sockets[0]?.message({ type: 'session.ready' })
+
+  assert.equal(sockets[0]?.closes, 1)
+  assert.equal(oldReady.count, 0)
+  assert.deepEqual(oldStates, ['connecting', 'ended'])
+  assert.equal(sockets[1]?.closes, 0)
+  assert.equal(newReady.count, 1)
+  assert.deepEqual(newStates, ['connecting', 'preparing', 'listening'])
+})
+
+test('a pending connect settles when its stale socket closes before opening', async (t) => {
+  const sockets = installDeferredWebSockets(t)
+  const states: string[] = []
+  const session = connectingSession(states, { count: 0 })
+
+  const connecting = session.connect()
+  await session.close()
+  sockets[0]?.finishClose()
+
+  const settled = await Promise.race([
+    connecting.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 0)),
+  ])
+  assert.equal(settled, true)
+  assert.deepEqual(states, ['connecting', 'ended'])
+})
+
 test('session start declares protocol version and native build', () => {
   const event = createSessionStart('video')
 

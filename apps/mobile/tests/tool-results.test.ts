@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 import { LiveResultSheet } from '../src/components/LiveResultSheet.tsx'
 import { createSingleFlight } from '../src/live/callLifecycle.ts'
+import { createExternalUrlOpener } from '../src/live/externalLinks.ts'
 import { liveResultsReducer } from '../src/live/liveResults.ts'
 import { parseLiveResult } from '../src/realtime/toolResults.ts'
 import type { LiveResult } from '../src/realtime/toolResults.ts'
@@ -122,6 +123,57 @@ test('coalesces repeated leave requests until the active close finishes', async 
   await nextCall
 })
 
+test('browser source opening uses a new isolated tab without replacing the call', async () => {
+  const calls: Array<[string, string, string]> = []
+  const popup = { opener: {} as unknown }
+  const openExternal = createExternalUrlOpener({
+    isNative: () => false,
+    openNative: async () => {},
+    openBrowser: (url, target, features) => {
+      calls.push([url, target, features])
+      return popup
+    },
+  })
+
+  assert.equal(await openExternal('https://example.com/source'), true)
+  assert.deepEqual(calls, [
+    ['https://example.com/source', '_blank', 'noopener,noreferrer'],
+  ])
+  assert.equal(popup.opener, null)
+})
+
+test('external source opening contains native failures as a no-op', async () => {
+  let browserCalls = 0
+  const openExternal = createExternalUrlOpener({
+    isNative: () => true,
+    openNative: async () => {
+      throw new Error('native browser unavailable')
+    },
+    openBrowser: () => {
+      browserCalls += 1
+      return null
+    },
+  })
+
+  assert.equal(await openExternal('https://example.com/source'), false)
+  assert.equal(browserCalls, 0)
+})
+
+test('external source opening refuses non-http URL schemes', async () => {
+  let opens = 0
+  const openExternal = createExternalUrlOpener({
+    isNative: () => false,
+    openNative: async () => {},
+    openBrowser: () => {
+      opens += 1
+      return null
+    },
+  })
+
+  assert.equal(await openExternal('javascript:alert(1)'), false)
+  assert.equal(opens, 0)
+})
+
 test('creates a memory receipt only for a successful validated memory', () => {
   const result = parseLiveResult({
     callId: 'call-1',
@@ -219,6 +271,36 @@ test('bounds web search cards to three validated sources', () => {
   assert.deepEqual(result, {
     kind: 'search',
     callId: 'call-5',
+    items: [
+      { title: 'One', url: 'https://one.example/', snippet: 'First' },
+      { title: 'Two', url: 'https://two.example/', snippet: 'Second' },
+      { title: 'Three', url: 'https://three.example/', snippet: 'Third' },
+    ],
+    status: 'success',
+  })
+})
+
+test('deduplicates canonical search URLs while retaining three unique sources', () => {
+  const result = parseLiveResult({
+    callId: 'call-unique-search',
+    name: 'web_search',
+    result: {
+      ok: true,
+      data: {
+        results: [
+          { title: 'One', url: 'https://one.example', snippet: 'First' },
+          { title: 'One duplicate', url: 'https://one.example/', snippet: 'Duplicate' },
+          { title: 'Two', url: 'https://two.example', snippet: 'Second' },
+          { title: 'Three', url: 'https://three.example', snippet: 'Third' },
+          { title: 'Four', url: 'https://four.example', snippet: 'Fourth' },
+        ],
+      },
+    },
+  })
+
+  assert.deepEqual(result, {
+    kind: 'search',
+    callId: 'call-unique-search',
     items: [
       { title: 'One', url: 'https://one.example/', snippet: 'First' },
       { title: 'Two', url: 'https://two.example/', snippet: 'Second' },

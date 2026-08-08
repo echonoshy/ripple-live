@@ -170,6 +170,7 @@ export class RealtimeSession {
   private transport: Transport | null = null
   private ready = false
   private closed = false
+  private connectionGeneration = 0
   private assistantText = ''
   private interruptPending = false
   private currentResponseId: string | null = null
@@ -191,6 +192,8 @@ export class RealtimeSession {
   }
 
   async connect() {
+    if (this.closed) return
+    const generation = ++this.connectionGeneration
     const params = new URLSearchParams({
       mode: this.options.mode,
       access_token: this.options.accessToken,
@@ -208,36 +211,59 @@ export class RealtimeSession {
         url,
         (message) => this.handleTauriMessage(message),
       )
+      if (!this.isActiveConnection(generation)) {
+        await connection.transport.close().catch(() => {})
+        return
+      }
       this.transport = connection.transport
       connection.activate()
-      await this.startSession()
+      await this.startSession(generation)
       return
     }
 
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(url)
       socket.onopen = () => {
-        this.transport = {
+        const transport: Transport = {
           send: async (message) => socket.send(message),
           close: async () => socket.close(1000, 'user_stop'),
         }
-        void this.startSession().then(resolve).catch(reject)
+        if (!this.isActiveConnection(generation)) {
+          void transport.close().then(resolve).catch(resolve)
+          return
+        }
+        this.transport = transport
+        void this.startSession(generation).then(resolve).catch(reject)
       }
-      socket.onmessage = (event) => this.handleText(String(event.data))
-      socket.onerror = () => reject(new Error(`无法连接 ${url}`))
+      socket.onmessage = (event) => {
+        if (this.isActiveConnection(generation)) {
+          this.handleText(String(event.data))
+        }
+      }
+      socket.onerror = () => {
+        if (this.isActiveConnection(generation)) reject(new Error(`无法连接 ${url}`))
+        else resolve()
+      }
       socket.onclose = () => {
-        if (!this.closed) {
+        if (this.isActiveConnection(generation)) {
           this.clearEndpointState()
           this.closed = true
+          this.connectionGeneration += 1
           this.ready = false
           this.options.onState('ended')
+        } else {
+          resolve()
         }
       }
     })
   }
 
-  private async startSession() {
-    if (!this.transport) return
+  private isActiveConnection(generation: number) {
+    return !this.closed && generation === this.connectionGeneration
+  }
+
+  private async startSession(generation: number) {
+    if (!this.transport || !this.isActiveConnection(generation)) return
     this.options.onState('preparing')
     await this.sendEvent(
       createSessionStart(this.options.mode),
@@ -322,6 +348,7 @@ export class RealtimeSession {
   }
 
   private handleTauriMessage(message: TauriMessage) {
+    if (this.closed) return
     if (message.type === 'Text') {
       this.handleText(message.data)
     } else if (message.type === 'Close' && !this.closed) {
@@ -333,6 +360,7 @@ export class RealtimeSession {
   }
 
   private handleText(text: string) {
+    if (this.closed) return
     let event: RealtimeEvent
     try {
       event = JSON.parse(text) as RealtimeEvent
@@ -682,17 +710,20 @@ export class RealtimeSession {
 
   async close() {
     this.clearEndpointState()
+    this.connectionGeneration += 1
     if (this.closed) return
     this.closed = true
-    if (this.transport) {
+    const transport = this.transport
+    this.transport = null
+    if (transport) {
       try {
         await this.waitForSendIdle()
-        await this.transport.send(JSON.stringify({ type: 'session.close' }))
+        await transport.send(JSON.stringify({ type: 'session.close' }))
       } catch {
         // A disconnected socket still counts as closed.
       }
       try {
-        await this.transport.close()
+        await transport.close()
       } catch {
         // Native disconnect can fail when the peer has already closed.
       }

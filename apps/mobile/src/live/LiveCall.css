@@ -459,17 +459,20 @@
   content: '•';
 }
 
-.live-result-sources a {
+.live-result-sources button {
   display: grid;
+  width: 100%;
   min-height: 44px;
   padding: 7px 9px;
+  border: 0;
   border-radius: 12px;
   background: rgb(158 220 255 / 8%);
   gap: 2px;
+  text-align: left;
   text-decoration: none;
 }
 
-.live-result-sources a:focus-visible {
+.live-result-sources button:focus-visible {
   outline: 3px solid #9fdaff;
   outline-offset: 1px;
 }

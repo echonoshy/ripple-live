@@ -465,8 +465,12 @@ export default function App() {
 
   useEffect(() => {
     return () => {
-      mediaRef.current?.stop()
-      void sessionRef.current?.close()
+      const media = mediaRef.current
+      const session = sessionRef.current
+      mediaRef.current = null
+      sessionRef.current = null
+      media?.stop()
+      void session?.close()
     }
   }, [])
 
@@ -489,25 +493,31 @@ export default function App() {
       setSessionState('connecting')
 
       let session: RealtimeSession
+      const ownsSession = () => sessionRef.current === session
       const media = new LiveMedia({
         video: videoRef.current,
         canvas: canvasRef.current,
         withVideo: nextMode === 'video',
         facingMode: cameraFacing,
-        onPlaybackStarted: (bufferedMs) =>
-          session.outputPlaybackStarted(bufferedMs),
-        onPlaybackEnded: () => session.outputPlaybackEnded(),
-        onOutputLevel: setOutputLevel,
+        onPlaybackStarted: (bufferedMs) => {
+          if (ownsSession()) session.outputPlaybackStarted(bufferedMs)
+        },
+        onPlaybackEnded: () => {
+          if (ownsSession()) session.outputPlaybackEnded()
+        },
+        onOutputLevel: (level) => {
+          if (ownsSession()) setOutputLevel(level)
+        },
       })
       session = new RealtimeSession({
         server,
         accessToken,
         mode: nextMode,
         onState: (state) => {
-          if (sessionRef.current === session) setSessionState(state)
+          if (ownsSession()) setSessionState(state)
         },
         onError: (message) => {
-          if (sessionRef.current !== session) return
+          if (!ownsSession()) return
           setInputLevel(0)
           setOutputLevel(0)
           setErrorMessage(message)
@@ -515,28 +525,38 @@ export default function App() {
           setSessionState('error')
         },
         onResponseFailed: (message) => {
-          if (sessionRef.current !== session) return
+          if (!ownsSession()) return
           setErrorMessage(message)
-          dispatchLiveResults({ type: 'clear' })
         },
-        onAssistantText: setAssistantText,
+        onAssistantText: (text) => {
+          if (ownsSession()) setAssistantText(text)
+        },
         onUserText: (text) => {
-          if (sessionRef.current !== session) return
+          if (!ownsSession()) return
           setUserText(text)
           setLiveArtifacts([])
           dispatchLiveResults({ type: 'clear' })
         },
-        onTool: setToolStatus,
+        onTool: (status) => {
+          if (ownsSession()) setToolStatus(status)
+        },
         onToolResult: (event) => {
-          if (sessionRef.current !== session) return
+          if (!ownsSession()) return
           dispatchLiveResults({ type: 'add', result: parseLiveResult(event) })
         },
-        onAudio: (audio) => media.enqueueOutput(audio),
-        onAudioDone: () => media.finishOutput(),
-        onInterrupted: () => media.clearOutput(),
-        onFrameRequested: () => media.captureFrame(),
+        onAudio: (audio) => {
+          if (ownsSession()) media.enqueueOutput(audio)
+        },
+        onAudioDone: () => {
+          if (ownsSession()) media.finishOutput()
+        },
+        onInterrupted: () => {
+          if (ownsSession()) media.clearOutput()
+        },
+        onFrameRequested: () =>
+          ownsSession() ? media.captureFrame() : null,
         onArtifact: (artifact) => {
-          if (sessionRef.current !== session) return
+          if (!ownsSession()) return
           setLiveArtifacts((items) =>
             items.some((item) => item.id === artifact.id)
               ? items
@@ -545,17 +565,20 @@ export default function App() {
         },
         onConversation: () => {},
         onReady: async () => {
+          if (!ownsSession()) return
           await media.start((audio) => {
-            void session.sendInput(audio)
+            if (ownsSession()) void session.sendInput(audio)
           }, () => {
+            if (!ownsSession()) return
             setUserText('')
             setAssistantText('')
             void session.speechStarted()
           }, () => {
-            void session.speechPaused()
+            if (ownsSession()) void session.speechPaused()
           }, (level) => {
-            setInputLevel(level)
+            if (ownsSession()) setInputLevel(level)
           })
+          if (!ownsSession()) media.stop()
         },
       })
 

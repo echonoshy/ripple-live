@@ -120,7 +120,10 @@ test('mobile uses protocol v4 semantic endpointing', () => {
   assert.match(realtimeSource, /case 'input\.frame\.requested'/)
   assert.match(realtimeSource, /'high'/)
   assert.match(realtimeSource, /onInterrupted: \(\) => void/)
-  assert.match(appSource, /onInterrupted: \(\) => media\.clearOutput\(\)/)
+  assert.match(
+    appSource,
+    /onInterrupted: \(\) => \{\s*if \(ownsSession\(\)\) media\.clearOutput\(\)/,
+  )
   assert.match(protocolSource, /REALTIME_PROTOCOL_VERSION = 4/)
   assert.match(appSource, /void session\.speechPaused\(\)/)
   assert.doesNotMatch(appSource, /void session\.commitInput\(\)/)
@@ -131,6 +134,39 @@ test('mobile uses protocol v4 semantic endpointing', () => {
   assert.match(playbackSource, /type: 'audio-level'/)
   assert.match(mediaSource, /onOutputLevel: \(level: number\) => void/)
   assert.match(mediaSource, /this\.options\.onOutputLevel\(event\.data\.level\)/)
+})
+
+test('every live session UI and media callback checks active ownership', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const callbackSource = appSource.slice(
+    appSource.indexOf('const ownsSession ='),
+    appSource.indexOf('mediaRef.current = media'),
+  )
+
+  for (const callback of [
+    'onPlaybackStarted',
+    'onPlaybackEnded',
+    'onOutputLevel',
+    'onState',
+    'onError',
+    'onResponseFailed',
+    'onAssistantText',
+    'onUserText',
+    'onTool',
+    'onToolResult',
+    'onAudio',
+    'onAudioDone',
+    'onInterrupted',
+    'onFrameRequested',
+    'onArtifact',
+    'onReady',
+  ]) {
+    const start = callbackSource.indexOf(`${callback}:`)
+    assert.notEqual(start, -1, `${callback} should be configured`)
+    const next = callbackSource.indexOf('\n        on', start + callback.length + 1)
+    const body = callbackSource.slice(start, next === -1 ? undefined : next)
+    assert.match(body, /ownsSession\(\)/, `${callback} should guard session ownership`)
+  }
 })
 
 test('mobile todo reminders are enabled for Android and iOS', () => {
@@ -266,10 +302,46 @@ test('mobile live call renders typed result receipts without unsafe HTML', () =>
   assert.match(resultSource, /todo_receipt/)
   assert.match(resultSource, /weather/)
   assert.match(resultSource, /search/)
-  assert.match(resultSource, /target="_blank"/)
-  assert.match(resultSource, /rel="noopener noreferrer"/)
+  assert.doesNotMatch(resultSource, /<a\b|href=|target=/)
+  assert.match(resultSource, /openExternalUrl/)
   assert.doesNotMatch(resultSource, /dangerouslySetInnerHTML/)
   assert.match(callSource, /<LiveResultSheet/)
+})
+
+test('mobile opens live search sources through the native external-browser capability', () => {
+  const packageJson = JSON.parse(
+    readFileSync(path.join(appRoot, 'package.json'), 'utf8'),
+  )
+  const cargo = readFileSync(path.join(appRoot, 'src-tauri/Cargo.toml'), 'utf8')
+  const rust = readFileSync(path.join(appRoot, 'src-tauri/src/lib.rs'), 'utf8')
+  const capability = JSON.parse(
+    readFileSync(path.join(appRoot, 'src-tauri/capabilities/default.json'), 'utf8'),
+  )
+  const externalLinkPath = path.join(appRoot, 'src/live/externalLinks.ts')
+
+  assert.equal(existsSync(externalLinkPath), true, 'externalLinks.ts should exist')
+  assert.equal(typeof packageJson.dependencies['@tauri-apps/plugin-opener'], 'string')
+  assert.match(cargo, /tauri-plugin-opener/)
+  assert.match(rust, /tauri_plugin_opener::init\(\)/)
+  const openerPermission = capability.permissions.find(
+    (permission) =>
+      typeof permission === 'object' &&
+      permission.identifier === 'opener:allow-open-url',
+  )
+  assert.deepEqual(openerPermission, {
+    identifier: 'opener:allow-open-url',
+    allow: [{ url: 'https://*' }, { url: 'http://*' }],
+  })
+})
+
+test('a failed response preserves confirmed live receipts', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const responseFailure = appSource.match(
+    /onResponseFailed: \(message\) => \{[\s\S]*?\n\s*\},\n\s*onAssistantText:/,
+  )?.[0]
+
+  assert.ok(responseFailure, 'onResponseFailed callback should be present')
+  assert.doesNotMatch(responseFailure, /dispatchLiveResults/)
 })
 
 test('mobile live call controls retain scoped focus and size contracts', () => {
