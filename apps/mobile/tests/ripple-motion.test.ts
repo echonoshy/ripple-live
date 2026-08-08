@@ -48,3 +48,34 @@ test('reduced motion suppresses propagation and keeps a short halo pulse', () =>
   assert.equal(next.frame.progress, null)
   assert.ok(next.frame.haloPulse > 0)
 })
+
+test('enabling reduced motion stops an active ring immediately', () => {
+  let state = advanceRipple(
+    createRippleState(),
+    { signal: signal(1, 'speech'), visualState: 'listening', outputLevel: 0, reducedMotion: false },
+    1000,
+  ).state
+  const next = advanceRipple(
+    state,
+    { signal: null, visualState: 'listening', outputLevel: 0, reducedMotion: true },
+    1100,
+  )
+
+  assert.equal(next.frame.kind, null)
+  assert.equal(next.frame.progress, null)
+  assert.equal(next.state.activeKind, null)
+})
+
+test('tracks only the highest consumed incrementing signal ID', () => {
+  let state = createRippleState()
+  for (let id = 1; id <= 1000; id++) {
+    state = advanceRipple(
+      state,
+      { signal: signal(id, 'speech'), visualState: 'listening', outputLevel: 0, reducedMotion: false },
+      id * 1300,
+    ).state
+  }
+
+  assert.equal(state.lastConsumedSignalId, 1000)
+  assert.equal('consumedSignalIds' in state, false)
+})

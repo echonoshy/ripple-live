@@ -30,9 +30,9 @@ export type RippleState = {
   activeKind: RippleKind | null
   activeStartedAtMs: number | null
   assistantEmphasisUsed: boolean
-  consumedSignalIds: readonly number[]
   cooldownUntilMs: number
   haloPulseStartedAtMs: number | null
+  lastConsumedSignalId: number | null
   previousVisualState: VisualState | null
 }
 
@@ -41,9 +41,9 @@ export function createRippleState(): RippleState {
     activeKind: null,
     activeStartedAtMs: null,
     assistantEmphasisUsed: false,
-    consumedSignalIds: [],
     cooldownUntilMs: 0,
     haloPulseStartedAtMs: null,
+    lastConsumedSignalId: null,
     previousVisualState: null,
   }
 }
@@ -64,7 +64,7 @@ export function advanceRipple(
   input: RippleInput,
   nowMs: number,
 ): { state: RippleState; frame: RippleFrame } {
-  const active = hasActiveRing(state, nowMs)
+  const active = !input.reducedMotion && hasActiveRing(state, nowMs)
   let next: RippleState = {
     ...state,
     activeKind: active ? state.activeKind : null,
@@ -77,9 +77,12 @@ export function advanceRipple(
   }
 
   let requestedKind: RippleKind | null = null
-  if (input.signal !== null && !state.consumedSignalIds.includes(input.signal.id)) {
+  if (
+    input.signal !== null
+    && (state.lastConsumedSignalId === null || input.signal.id > state.lastConsumedSignalId)
+  ) {
     requestedKind = input.signal.kind
-    next = { ...next, consumedSignalIds: [...state.consumedSignalIds, input.signal.id] }
+    next = { ...next, lastConsumedSignalId: input.signal.id }
   }
 
   if (
