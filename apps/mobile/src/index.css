@@ -1,9 +1,10 @@
 html {
-  background: #020406;
+  background: #09090B;
   font-family:
-    "Noto Sans SC",
+    Inter,
+    "SF Pro Display",
     "PingFang SC",
-    "Microsoft YaHei",
+    "Noto Sans SC",
     system-ui,
     sans-serif;
   font-synthesis: none;
@@ -28,6 +29,6 @@ button {
 
 @media (prefers-color-scheme: dark) {
   html {
-    background: #020406;
+    background: #09090B;
   }
 }

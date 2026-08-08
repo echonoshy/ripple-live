@@ -34,7 +34,7 @@ export function BottomNav({
             aria-label={label}
             onClick={() => onSelect(tab)}
           >
-            <IconComponent aria-hidden="true" weight={active === tab ? 'fill' : 'regular'} />
+            <IconComponent aria-hidden="true" weight="regular" />
             <span>{label}</span>
           </button>
         ))}

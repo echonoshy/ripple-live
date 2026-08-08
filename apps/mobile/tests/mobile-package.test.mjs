@@ -225,9 +225,13 @@ test('mobile home presents voice as the primary call entry with explicit camera 
   assert.equal(existsSync(homePath), true, 'ConversationHome.tsx should exist')
   const homeSource = readFileSync(homePath, 'utf8')
   assert.match(appSource, /<ConversationHome/)
-  assert.match(homeSource, /想聊点什么？/)
-  assert.match(homeSource, /开始说话/)
-  assert.match(homeSource, /打开镜头/)
+  assert.match(homeSource, /有什么想聊的？/)
+  assert.match(homeSource, /可以直接说/)
+  assert.match(homeSource, /开始对话/)
+  assert.equal((homeSource.match(/<LiveOrb\b/g) ?? []).length, 1)
+  assert.match(homeSource, /<LiveOrb\s+state="idle"/)
+  assert.doesNotMatch(homeSource, /<span>历史<\/span>/)
+  assert.match(homeSource, /aria-label="打开镜头"/)
   assert.match(homeSource, /onClick=\{onStartAudio\}/)
   assert.match(homeSource, /onClick=\{onStartVideo\}/)
   assert.match(homeSource, /onClick=\{onOpenHistory\}/)
@@ -239,8 +243,40 @@ test('mobile home presents voice as the primary call entry with explicit camera 
   assert.match(appSource, /openCall\('audio', selectedConversation\.id\)/)
   assert.doesNotMatch(appSource, /打开镜头，开始聊聊/)
   assert.doesNotMatch(homeSource, /统计|最近对话|自动保存/)
-  assert.match(cssSource, /--canvas:\s*#020406/)
+  assert.doesNotMatch(homeSource, /conversation-core/)
+  assert.doesNotMatch(cssSource, /\.conversation-core/)
   assert.doesNotMatch(cssSource, /#9046ff|--ripple-violet|--voice-accent:\s*#b98aff/)
+})
+
+test('mobile uses the approved warm shared tokens and typography', () => {
+  const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
+  const indexSource = readFileSync(path.join(appRoot, 'src/index.css'), 'utf8')
+
+  for (const token of [
+    '--live-bg: #07080C',
+    '--app-bg: #09090B',
+    '--surface: #101014',
+    '--surface-raised: #151821',
+    '--text-primary: #F5F4F0',
+    '--danger: #ED687A',
+    '--success: #69D49D',
+    '--line: rgb(255 255 255 / 8%)',
+    '--text-secondary: rgb(238 237 232 / 58%)',
+    '--text-tertiary: rgb(238 237 232 / 36%)',
+    '--orb-deep: #0a2e75',
+    '--orb-cobalt: #2f77e6',
+    '--orb-soft-blue: #9bc3ff',
+    '--orb-cream: #fff6e9',
+    '--focus-ring: rgb(155 195 255 / 58%)',
+  ]) {
+    assert.match(cssSource, new RegExp(token.replace(/[()]/g, '\\$&')))
+  }
+  assert.match(
+    cssSource,
+    /font-family:\s*Inter, "SF Pro Display", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;/,
+  )
+  assert.doesNotMatch(cssSource, /body\s*\{[^}]*letter-spacing:\s*-/s)
+  assert.match(indexSource, /background:\s*#09090B/)
 })
 
 test('live call owns camera transitions explicitly and renders truthful camera states', () => {
@@ -300,6 +336,10 @@ test('mobile navigation exposes four tabs with screen-derived selection', () => 
   assert.equal((appSource.match(/<BottomNav /g) ?? []).length, 1)
   assert.match(navCssSource, /min-height:\s*44px/)
   assert.match(navCssSource, /env\(safe-area-inset-bottom\)/)
+  assert.match(navSource, /<IconComponent aria-hidden="true" weight="regular" \/>/)
+  assert.doesNotMatch(navSource, /weight=\{active === tab \? 'fill' : 'regular'\}/)
+  assert.match(navCssSource, /\.bottom-nav button\.is-active::after\s*\{[^}]*width:\s*3px;[^}]*height:\s*3px;/s)
+  assert.match(navCssSource, /\.bottom-nav button > svg\s*\{[^}]*width:\s*20px;[^}]*height:\s*20px;/s)
 })
 
 test('mobile live orb uses a single canvas renderer with a static fallback', () => {

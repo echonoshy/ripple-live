@@ -3,6 +3,7 @@ import {
   Microphone,
   VideoCamera,
 } from '@phosphor-icons/react'
+import { LiveOrb } from './LiveOrb'
 
 export function ConversationHome({
   onStartAudio,
@@ -23,31 +24,33 @@ export function ConversationHome({
         aria-label="查看聊天历史"
         onClick={onOpenHistory}
       >
-        <ClockCounterClockwise aria-hidden="true" />
-        <span>历史</span>
+        <ClockCounterClockwise aria-hidden="true" weight="regular" />
       </button>
 
       <div className="conversation-home-content">
-        <div className="conversation-core" aria-hidden="true">
-          <span />
+        <div className="home-orb">
+          <LiveOrb state="idle" inputLevel={0} outputLevel={0} />
         </div>
-        <h1>想聊点什么？</h1>
-        <button
-          className="start-speaking-button"
-          type="button"
-          onClick={onStartAudio}
-        >
-          <Microphone aria-hidden="true" weight="fill" />
-          开始说话
-        </button>
-        <button
-          className="open-camera-button"
-          type="button"
-          onClick={onStartVideo}
-        >
-          <VideoCamera aria-hidden="true" />
-          打开镜头
-        </button>
+        <h1>有什么想聊的？</h1>
+        <p className="home-prompt">可以直接说</p>
+        <div className="home-actions">
+          <button
+            className="start-speaking-button"
+            type="button"
+            onClick={onStartAudio}
+          >
+            <Microphone aria-hidden="true" weight="regular" />
+            开始对话
+          </button>
+          <button
+            className="open-camera-button"
+            type="button"
+            aria-label="打开镜头"
+            onClick={onStartVideo}
+          >
+            <VideoCamera aria-hidden="true" weight="regular" />
+          </button>
+        </div>
         {historyError && (
           <p className="history-error" role="status">
             {historyError}
