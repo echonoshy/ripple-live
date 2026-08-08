@@ -31,6 +31,94 @@ test('normalizes missing legacy actions and non-finite due times', () => {
   ])
 })
 
+test('normalization rejects inherited actions and contains throwing action proxies', () => {
+  const inheritedAction = Object.create({
+    kind: 'memory',
+    target_id: 'inherited-memory',
+    label: '不应出现',
+    due_at: null,
+  })
+  const throwingAction = new Proxy({}, {
+    getOwnPropertyDescriptor() { throw new Error('action descriptor trap') },
+    get() { throw new Error('action get trap') },
+  })
+
+  const [message] = normalizeConversationMessages([{
+    id: 3,
+    role: 'user',
+    content: '包含坏 action',
+    created_at: 3,
+    attachments: [],
+    actions: [
+      inheritedAction,
+      throwingAction,
+      { kind: 'todo', target_id: 'todo-safe', label: '安全待办', due_at: null },
+    ],
+  }])
+
+  assert.deepEqual(message.actions, [
+    { kind: 'todo', target_id: 'todo-safe', label: '安全待办', due_at: null },
+  ])
+})
+
+test('normalization is total for throwing action arrays and message proxies', () => {
+  const throwingActions = new Proxy([], {
+    getOwnPropertyDescriptor() { throw new Error('array descriptor trap') },
+    get() { throw new Error('array get trap') },
+  })
+  const throwingMessage = new Proxy({}, {
+    getOwnPropertyDescriptor() { throw new Error('message descriptor trap') },
+    ownKeys() { throw new Error('message ownKeys trap') },
+    get() { throw new Error('message get trap') },
+  })
+
+  assert.doesNotThrow(() => normalizeConversationMessages(new Proxy([], {
+    getOwnPropertyDescriptor() { throw new Error('messages descriptor trap') },
+    get() { throw new Error('messages get trap') },
+  })))
+  assert.deepEqual(normalizeConversationMessages(new Proxy([], {
+    getOwnPropertyDescriptor() { throw new Error('messages descriptor trap') },
+    get() { throw new Error('messages get trap') },
+  })), [])
+
+  assert.deepEqual(normalizeConversationMessages([
+    throwingMessage,
+    {
+      id: 4,
+      role: 'user',
+      content: '异常 actions 数组',
+      created_at: 4,
+      attachments: [],
+      actions: throwingActions,
+    },
+    {
+      id: 5,
+      role: 'assistant',
+      content: '后续有效消息',
+      created_at: 5,
+      attachments: [],
+      actions: [],
+    },
+  ]), [
+    {
+      id: 4,
+      role: 'user',
+      content: '异常 actions 数组',
+      created_at: 4,
+      attachments: [],
+      actions: [],
+    },
+    {
+      id: 5,
+      role: 'assistant',
+      content: '后续有效消息',
+      created_at: 5,
+      attachments: [],
+      actions: [],
+    },
+  ])
+})
+
 test('recognizes only memory and todo actions with non-empty own targets', () => {
   const inheritedTarget = Object.create({ target_id: 'inherited' })
   inheritedTarget.kind = 'memory'

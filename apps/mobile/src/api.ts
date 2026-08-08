@@ -270,35 +270,86 @@ export function batchConversations(
   return batchMutation(server, token, '/v1/conversations/batch', ids, action)
 }
 
-type ConversationMessagePayload = Omit<ConversationMessage, 'actions'> & {
-  actions?: unknown
+function ownDataValue(value: unknown, key: string) {
+  if (!value || typeof value !== 'object') return undefined
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function safeArrayValues(value: unknown, limit: number): unknown[] {
+  try {
+    if (!Array.isArray(value)) return []
+  } catch {
+    return []
+  }
+  const rawLength = ownDataValue(value, 'length')
+  if (typeof rawLength !== 'number' || !Number.isSafeInteger(rawLength) || rawLength < 0) {
+    return []
+  }
+  const values: unknown[] = []
+  for (let index = 0; index < Math.min(rawLength, limit); index += 1) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+      if (descriptor && 'value' in descriptor) values.push(descriptor.value)
+    } catch {
+      // A malformed row must not discard other rows from the same response.
+    }
+  }
+  return values
 }
 
 export function normalizeConversationMessages(
-  messages: ConversationMessagePayload[],
+  messages: unknown,
 ): ConversationMessage[] {
-  return messages.map((message) => ({
-    ...message,
-    actions: Array.isArray(message.actions)
-      ? message.actions.flatMap((candidate): ConversationAction[] => {
-          if (!candidate || typeof candidate !== 'object') return []
-          const record = candidate as Record<string, unknown>
-          if (
-            typeof record.kind !== 'string' ||
-            typeof record.target_id !== 'string' ||
-            typeof record.label !== 'string'
-          ) return []
-          return [{
-            kind: record.kind,
-            target_id: record.target_id,
-            label: record.label,
-            due_at: typeof record.due_at === 'number' && Number.isFinite(record.due_at)
-              ? record.due_at
-              : null,
-          }]
-        })
-      : [],
-  }))
+  return safeArrayValues(messages, 500).flatMap((message): ConversationMessage[] => {
+    const id = ownDataValue(message, 'id')
+    const role = ownDataValue(message, 'role')
+    const content = ownDataValue(message, 'content')
+    const createdAt = ownDataValue(message, 'created_at')
+    if (
+      typeof id !== 'number' || !Number.isFinite(id) ||
+      typeof role !== 'string' ||
+      typeof content !== 'string' ||
+      typeof createdAt !== 'number' || !Number.isFinite(createdAt)
+    ) return []
+
+    const actions = safeArrayValues(ownDataValue(message, 'actions'), 10)
+      .flatMap((candidate): ConversationAction[] => {
+        const kind = ownDataValue(candidate, 'kind')
+        const targetId = ownDataValue(candidate, 'target_id')
+        const label = ownDataValue(candidate, 'label')
+        const dueAt = ownDataValue(candidate, 'due_at')
+        if (
+          typeof kind !== 'string' ||
+          typeof targetId !== 'string' ||
+          typeof label !== 'string'
+        ) return []
+        return [{
+          kind,
+          target_id: targetId,
+          label,
+          due_at: typeof dueAt === 'number' && Number.isFinite(dueAt)
+            ? dueAt
+            : null,
+        }]
+      })
+
+    return [{
+      id,
+      role,
+      content,
+      created_at: createdAt,
+      attachments: safeArrayValues(
+        ownDataValue(message, 'attachments'),
+        100,
+      ) as MemoryArtifact[],
+      actions,
+    }]
+  })
 }
 
 export async function conversationMessages(
@@ -306,7 +357,7 @@ export async function conversationMessages(
   token: string,
   conversationId: string,
 ) {
-  const payload = await request<{ data: ConversationMessagePayload[] }>(
+  const payload = await request<{ data: unknown }>(
     server,
     `/v1/conversations/${encodeURIComponent(conversationId)}/messages?limit=500`,
     {},
