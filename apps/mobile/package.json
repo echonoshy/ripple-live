@@ -11,7 +11,7 @@
     "test:playback": "tsx --test tests/playback-telemetry.test.ts",
     "test:media": "tsx --test tests/live-media-lifecycle.test.ts tests/camera-orchestration.test.ts",
     "test:live-media": "tsx --test tests/live-media.test.ts tests/live-media-lifecycle.test.ts tests/camera-orchestration.test.ts",
-    "test:live-ui": "tsx --test tests/live-motion.test.ts tests/orb-lifecycle.test.ts tests/orb-renderer.test.ts",
+    "test:live-ui": "tsx --test tests/live-motion.test.ts tests/orb-lifecycle.test.ts tests/orb-renderer.test.ts tests/frame-request-visibility.test.ts",
     "test:realtime": "tsx --test tests/realtime-session.test.ts",
     "test:tool-results": "tsx --test tests/tool-results.test.ts",
     "lint": "oxlint",

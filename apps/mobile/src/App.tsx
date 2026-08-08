@@ -81,6 +81,7 @@ import {
   createSingleFlight,
 } from './live/callLifecycle'
 import { liveResultsReducer } from './live/liveResults'
+import { createMinimumVisibleSignal } from './live/frameRequestVisibility'
 import { LiveMedia } from './media/LiveMedia'
 import { notifyDueTodos } from './reminders'
 import {
@@ -197,6 +198,7 @@ export default function App() {
   const [cameraErrorMessage, setCameraErrorMessage] = useState('')
   const [cameraPhase, setCameraPhase] = useState<CameraPhase>('off')
   const [cameraPreviewVisible, setCameraPreviewVisible] = useState(false)
+  const [cameraControlReady, setCameraControlReady] = useState(false)
   const [frameRequestActive, setFrameRequestActive] = useState(false)
   const [assistantText, setAssistantText] = useState('')
   const [userText, setUserText] = useState('')
@@ -267,6 +269,10 @@ export default function App() {
   const cameraOrchestratorRef = useRef<ReturnType<
     typeof createCameraOrchestrator
   > | null>(null)
+  const frameRequestVisibilityRef = useRef<ReturnType<
+    typeof createMinimumVisibleSignal
+  > | null>(null)
+  const cameraControlReadyRef = useRef(false)
   const initialCameraRequestRef = useRef(false)
   const cameraFlipGenerationRef = useRef(0)
   const callLifecycleRef = useRef(createCallLifecycleGuard())
@@ -341,6 +347,9 @@ export default function App() {
         conversationOwnershipRef.current.invalidate()
         cameraOrchestratorRef.current?.invalidate()
         cameraOrchestratorRef.current = null
+        frameRequestVisibilityRef.current?.dispose()
+        frameRequestVisibilityRef.current = null
+        cameraControlReadyRef.current = false
         cameraFlipGenerationRef.current += 1
         mediaRef.current?.stop()
         mediaRef.current = null
@@ -350,6 +359,7 @@ export default function App() {
         initialCameraRequestRef.current = false
         setCameraPhase('off')
         setCameraPreviewVisible(false)
+        setCameraControlReady(false)
         setFrameRequestActive(false)
         setActiveConversationIdState(null)
         setSelectedConversation(null)
@@ -540,11 +550,15 @@ export default function App() {
     if (sessionState !== 'ended' && sessionState !== 'error') return
     cameraOrchestratorRef.current?.invalidate()
     cameraOrchestratorRef.current = null
+    frameRequestVisibilityRef.current?.dispose()
+    frameRequestVisibilityRef.current = null
+    cameraControlReadyRef.current = false
     cameraFlipGenerationRef.current += 1
     mediaRef.current?.stop()
     mediaRef.current = null
     setCameraPhase('off')
     setCameraPreviewVisible(false)
+    setCameraControlReady(false)
     setFrameRequestActive(false)
     setCameraErrorMessage('')
     setInputLevel(0)
@@ -554,12 +568,16 @@ export default function App() {
   const stopCall = useCallback(async () => {
     cameraOrchestratorRef.current?.invalidate()
     cameraOrchestratorRef.current = null
+    frameRequestVisibilityRef.current?.dispose()
+    frameRequestVisibilityRef.current = null
+    cameraControlReadyRef.current = false
     cameraFlipGenerationRef.current += 1
     mediaRef.current?.stop()
     mediaRef.current = null
     initialCameraRequestRef.current = false
     setCameraPhase('off')
     setCameraPreviewVisible(false)
+    setCameraControlReady(false)
     setFrameRequestActive(false)
     setCameraErrorMessage('')
     setInputLevel(0)
@@ -643,6 +661,9 @@ export default function App() {
       navigationGuard.invalidate()
       cameraOrchestratorRef.current?.invalidate()
       cameraOrchestratorRef.current = null
+      frameRequestVisibilityRef.current?.dispose()
+      frameRequestVisibilityRef.current = null
+      cameraControlReadyRef.current = false
       cameraFlipGenerationRef.current += 1
       mediaRef.current = null
       sessionRef.current = null
@@ -675,10 +696,13 @@ export default function App() {
       setMuted(false)
       setInputLevel(0)
       setOutputLevel(0)
+      cameraControlReadyRef.current = false
+      setCameraControlReady(false)
       setSessionState('connecting')
 
       let session: RealtimeSession
       let cameraOrchestrator: ReturnType<typeof createCameraOrchestrator>
+      let frameRequestVisibility: ReturnType<typeof createMinimumVisibleSignal>
       const conversationOwner = conversationOwnershipRef.current.current()
       const ownsSession = () =>
         callLifecycleRef.current.owns(owner) &&
@@ -717,10 +741,23 @@ export default function App() {
         conversationId: activeConversationId ?? undefined,
         mode: 'audio',
         onState: (state) => {
-          if (ownsSession()) setSessionState(state)
+          if (!ownsSession()) return
+          if (
+            state === 'idle' ||
+            state === 'connecting' ||
+            state === 'preparing' ||
+            state === 'ended' ||
+            state === 'error'
+          ) {
+            cameraControlReadyRef.current = false
+            setCameraControlReady(false)
+          }
+          setSessionState(state)
         },
         onError: (message) => {
           if (!ownsSession()) return
+          cameraControlReadyRef.current = false
+          setCameraControlReady(false)
           setInputLevel(0)
           setOutputLevel(0)
           setErrorMessage(message)
@@ -759,7 +796,7 @@ export default function App() {
         onFrameRequested: () =>
           ownsSession() ? media.captureFrame() : null,
         onFrameRequestState: (active) => {
-          if (ownsSession()) setFrameRequestActive(active)
+          if (ownsSession()) frameRequestVisibility.update(active)
         },
         onArtifact: (artifact) => {
           if (!ownsSession()) return
@@ -788,6 +825,8 @@ export default function App() {
             media.stop()
             return
           }
+          cameraControlReadyRef.current = true
+          setCameraControlReady(true)
           if (initialCameraRequestRef.current) {
             initialCameraRequestRef.current = false
             await cameraOrchestrator.open(cameraFacing)
@@ -810,16 +849,28 @@ export default function App() {
           if (snapshot.serverMode === 'audio' || snapshot.serverMode === 'video') {
             setMode(snapshot.serverMode)
           }
-          if (!snapshot.previewVisible) setFrameRequestActive(false)
         },
         onError: (message) => {
           if (ownsSession()) setCameraErrorMessage(message)
+        },
+      })
+      frameRequestVisibility = createMinimumVisibleSignal({
+        minimumMs: 160,
+        onVisible: (visible) => {
+          if (ownsSession()) setFrameRequestActive(visible)
+        },
+        timers: {
+          now: () => performance.now(),
+          setTimeout: (callback, delayMs) =>
+            window.setTimeout(callback, delayMs),
+          clearTimeout: (handle) => window.clearTimeout(handle as number),
         },
       })
 
       mediaRef.current = media
       sessionRef.current = session
       cameraOrchestratorRef.current = cameraOrchestrator
+      frameRequestVisibilityRef.current = frameRequestVisibility
 
       try {
         await session.connect()
@@ -836,6 +887,12 @@ export default function App() {
         if (cameraOrchestratorRef.current === cameraOrchestrator) {
           cameraOrchestratorRef.current = null
         }
+        frameRequestVisibility.dispose()
+        if (frameRequestVisibilityRef.current === frameRequestVisibility) {
+          frameRequestVisibilityRef.current = null
+        }
+        cameraControlReadyRef.current = false
+        setCameraControlReady(false)
         initialCameraRequestRef.current = false
         media.stop()
         const closing = session.close()
@@ -884,6 +941,8 @@ export default function App() {
     setMode('audio')
     setCameraPhase('off')
     setCameraPreviewVisible(false)
+    cameraControlReadyRef.current = false
+    setCameraControlReady(false)
     setFrameRequestActive(false)
     setCameraErrorMessage('')
     setSessionState('idle')
@@ -959,6 +1018,7 @@ export default function App() {
   }
 
   const toggleCamera = async () => {
+    if (!cameraControlReadyRef.current) return
     const orchestrator = cameraOrchestratorRef.current
     if (!orchestrator) return
     setCameraErrorMessage('')
@@ -977,7 +1037,12 @@ export default function App() {
   const flipCamera = async () => {
     const media = mediaRef.current
     const orchestrator = cameraOrchestratorRef.current
-    if (!media || !orchestrator || orchestrator.current().phase !== 'on') return
+    if (
+      !cameraControlReadyRef.current ||
+      !media ||
+      !orchestrator ||
+      orchestrator.current().phase !== 'on'
+    ) return
     const flipGeneration = ++cameraFlipGenerationRef.current
     const next = cameraFacing === 'user' ? 'environment' : 'user'
     setCameraErrorMessage('')
@@ -1045,6 +1110,9 @@ export default function App() {
     callLifecycleRef.current.invalidate()
     cameraOrchestratorRef.current?.invalidate()
     cameraOrchestratorRef.current = null
+    frameRequestVisibilityRef.current?.dispose()
+    frameRequestVisibilityRef.current = null
+    cameraControlReadyRef.current = false
     cameraFlipGenerationRef.current += 1
     mediaRef.current?.stop()
     mediaRef.current = null
@@ -1054,6 +1122,7 @@ export default function App() {
     initialCameraRequestRef.current = false
     setCameraPhase('off')
     setCameraPreviewVisible(false)
+    setCameraControlReady(false)
     setFrameRequestActive(false)
     localStorage.removeItem('ripple-access-token')
     setAccessToken('')
@@ -2085,6 +2154,7 @@ export default function App() {
           mode={mode}
           cameraPhase={cameraPhase}
           cameraPreviewVisible={cameraPreviewVisible}
+          cameraControlReady={cameraControlReady}
           frameRequestActive={frameRequestActive}
           state={sessionState}
           elapsed={elapsed}

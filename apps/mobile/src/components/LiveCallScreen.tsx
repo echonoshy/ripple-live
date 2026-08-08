@@ -80,6 +80,7 @@ export type LiveCallScreenProps = {
   mode: RealtimeMode
   cameraPhase: CameraPhase
   cameraPreviewVisible: boolean
+  cameraControlReady: boolean
   frameRequestActive: boolean
   state: SessionState
   elapsed: number
@@ -107,6 +108,7 @@ export function LiveCallScreen({
   mode,
   cameraPhase,
   cameraPreviewVisible,
+  cameraControlReady,
   frameRequestActive,
   state,
   elapsed,
@@ -264,7 +266,9 @@ export function LiveCallScreen({
             className={`control-button camera-control ${videoMode ? 'is-active' : ''}`}
             type="button"
             aria-label={
-              cameraBusy
+              !cameraControlReady
+                ? '镜头尚未就绪'
+                : cameraBusy
                 ? cameraStatus
                 : videoMode
                   ? '关闭镜头'
@@ -272,13 +276,15 @@ export function LiveCallScreen({
                     ? '重试镜头'
                     : '开启镜头'
             }
-            disabled={cameraBusy}
+            disabled={!cameraControlReady || cameraBusy}
             onClick={() => { void onToggleCamera().catch(() => {}) }}
           >
             {videoMode ? <VideoCameraSlash /> : <VideoCamera />}
           </button>
           <span>
-            {cameraPhase === 'opening'
+            {!cameraControlReady
+              ? '准备中'
+              : cameraPhase === 'opening'
               ? '开启中'
               : cameraPhase === 'closing'
                 ? '关闭中'

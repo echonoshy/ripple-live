@@ -223,3 +223,82 @@ test('camera interruption corrects server audio without stopping the call', asyn
   assert.equal(harness.orchestrator.current().serverMode, 'audio')
   assert.equal(harness.events.includes('camera:disable'), false)
 })
+
+test('interruption during opening waits for a late video acknowledgement before confirming audio', async () => {
+  const harness = createHarness()
+  const opening = harness.orchestrator.open('environment')
+  harness.cameraRequests[0].resolve('enabled')
+  await Promise.resolve()
+  assert.equal(harness.modeRequests[0].mode, 'video')
+
+  const interrupted = harness.orchestrator.interrupt()
+  assert.equal(harness.modeRequests.length, 1)
+  assert.equal(harness.orchestrator.current().previewVisible, false)
+  harness.modeRequests[0].request.resolve()
+  assert.equal(await opening, 'stale')
+  await Promise.resolve()
+  assert.equal(harness.modeRequests[1].mode, 'audio')
+  harness.modeRequests[1].request.resolve()
+
+  assert.equal(await interrupted, 'off')
+  assert.equal(harness.orchestrator.current().serverMode, 'audio')
+  assert.equal(harness.events.includes('camera:disable'), false)
+})
+
+test('interruption during opening waits for video timeout before issuing corrective audio', async () => {
+  const harness = createHarness()
+  const opening = harness.orchestrator.open('environment')
+  harness.cameraRequests[0].resolve('enabled')
+  await Promise.resolve()
+
+  const interrupted = harness.orchestrator.interrupt()
+  assert.equal(harness.modeRequests.length, 1)
+  harness.modeRequests[0].request.reject(new Error('video timeout'))
+  assert.equal(await opening, 'stale')
+  await Promise.resolve()
+  assert.equal(harness.modeRequests[1].mode, 'audio')
+  harness.modeRequests[1].request.resolve()
+
+  assert.equal(await interrupted, 'off')
+  assert.equal(harness.orchestrator.current().phase, 'off')
+})
+
+test('failed interruption correction stays unknown and retries audio without reopening camera', async () => {
+  const harness = createHarness()
+  const opening = harness.orchestrator.open('environment')
+  harness.cameraRequests[0].resolve('enabled')
+  await Promise.resolve()
+  const interrupted = harness.orchestrator.interrupt()
+  harness.modeRequests[0].request.resolve()
+  assert.equal(await opening, 'stale')
+  await Promise.resolve()
+  harness.modeRequests[1].request.reject(new Error('audio timeout'))
+  assert.equal(await interrupted, 'error')
+  assert.deepEqual(harness.orchestrator.current(), {
+    phase: 'error',
+    previewVisible: false,
+    recovery: 'audio',
+    serverMode: 'unknown',
+  })
+
+  const retry = harness.orchestrator.retry('user')
+  assert.equal(harness.modeRequests[2].mode, 'audio')
+  harness.modeRequests[2].request.resolve()
+  assert.equal(await retry, 'off')
+  assert.equal(harness.cameraRequests.length, 1)
+})
+
+test('call invalidation cancels an interruption queued behind video mode work', async () => {
+  const harness = createHarness()
+  const opening = harness.orchestrator.open('environment')
+  harness.cameraRequests[0].resolve('enabled')
+  await Promise.resolve()
+  const interrupted = harness.orchestrator.interrupt()
+  harness.orchestrator.invalidate()
+  harness.modeRequests[0].request.resolve()
+
+  assert.equal(await opening, 'stale')
+  assert.equal(await interrupted, 'stale')
+  assert.equal(harness.modeRequests.length, 1)
+  assert.equal(harness.orchestrator.current().phase, 'off')
+})

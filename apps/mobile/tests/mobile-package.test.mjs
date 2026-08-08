@@ -255,10 +255,20 @@ test('live call owns camera transitions explicitly and renders truthful camera s
   assert.match(appSource, /createCameraOrchestrator/)
   assert.match(appSource, /initialCameraRequestRef\.current = nextMode === 'video'/)
   assert.match(appSource, /onFrameRequestState: \(active\)/)
+  assert.match(appSource, /cameraControlReady/)
+  assert.match(appSource, /if \(!cameraControlReadyRef\.current\) return/)
+  assert.match(
+    appSource,
+    /await media\.start[\s\S]*cameraControlReadyRef\.current = true[\s\S]*if \(initialCameraRequestRef\.current\)/,
+  )
+  for (const blockedState of ['idle', 'connecting', 'preparing', 'ended', 'error']) {
+    assert.match(appSource, new RegExp(`state === '${blockedState}'`))
+  }
   assert.doesNotMatch(appSource, /withVideo:/)
   assert.doesNotMatch(mediaSource, /withVideo/)
   assert.match(callSource, /cameraPhase === 'opening'/)
   assert.match(callSource, /frameRequestActive && cameraPhase === 'on'/)
+  assert.match(callSource, /disabled=\{!cameraControlReady \|\| cameraBusy\}/)
   assert.match(callSource, /aria-label=.*切换摄像头/s)
   assert.match(callCssSource, /opacity 420ms/)
   assert.match(callCssSource, /prefers-reduced-motion: reduce/)

@@ -179,8 +179,9 @@ export function createCameraOrchestrator(
   }
 
   const interrupt = () => {
+    if (snapshot.recovery === 'audio' && active) return active
+    const prior = active
     const owner = ++generation
-    active = null
     publish({
       phase: 'error',
       previewVisible: false,
@@ -188,6 +189,17 @@ export function createCameraOrchestrator(
       serverMode: 'unknown',
     })
     const request = (async (): Promise<CameraTransactionResult> => {
+      // RealtimeSession permits one mode transaction. A camera track can end
+      // after video was sent but before its ACK/timeout. Let that transaction
+      // settle, then always confirm audio while this call still owns the work.
+      if (prior) {
+        try {
+          await prior
+        } catch {
+          // The corrective audio request below is authoritative.
+        }
+      }
+      if (!owns(owner)) return 'stale'
       try {
         await dependencies.setMode('audio')
         if (!owns(owner)) return 'stale'

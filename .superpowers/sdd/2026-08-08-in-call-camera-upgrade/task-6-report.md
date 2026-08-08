@@ -63,3 +63,35 @@ Fresh sequential verification completed with exit 0:
 - `git diff --check`: clean
 
 Vite retains the existing warning that the main minified chunk exceeds 500 kB. No backend, Responses API, iOS, or generated native project files were changed.
+
+## Independent-review fix round
+
+Three Important findings were corrected test-first.
+
+### Opening interruption serialization
+
+An ended camera track could fire while `setMode('video')` was still pending. The first implementation invalidated the open owner but immediately called `setMode('audio')`; `RealtimeSession` correctly rejected that conflicting request as busy. `interrupt()` now captures and awaits the prior camera transaction (late video ACK, timeout, or error), then always issues the authoritative audio request if the same call generation still owns the correction.
+
+Behavior tests cover late video ACK, video timeout, corrective-audio failure with unknown/retry state, successful audio retry without reopening camera, and call invalidation while the correction is queued. The microphone/playback/session are never stopped by camera interruption.
+
+### Ready-gated camera control
+
+`cameraControlReadyRef` is false for missing orchestration/media readiness and session states idle, connecting, preparing, ended, and error. The visible control is disabled with “准备中”, while the handler and flip handler independently guard the ref. It becomes true only after the owner session's `onReady` media start completes. The explicit home-video intent remains stored across startup, is consumed exactly once after readiness, and uses the same audio session.
+
+All leave/error/logout/auth/session-replacement/unmount paths synchronously clear the ready ref and presentation state.
+
+### Minimum frame-request visibility
+
+Added `createMinimumVisibleSignal`, instantiated per owner session with injected timers. A true `onFrameRequestState` becomes visible immediately; the matching false schedules removal no earlier than 160 ms, so a capture queued within one task still crosses a paint window. A newer true cancels and extends the pending hide. Dispose cancels the timer and clears state; old session callbacks are inert through the existing owner check.
+
+Only `onFrameRequestState` can assert the focus signal. Non-frame camera snapshots do not assert or prematurely clear it; lifecycle cleanup may synchronously clear it.
+
+Review-fix focused GREEN:
+
+- `npm run test:media`: 15/15
+- `npm run test:live-ui`: 26/26, including 3 fake-timer visibility tests
+- `npm run test:mobile`: all package/conversation/library checks
+- `npm run build`: passed
+- `npm run lint`: clean
+
+The final fresh full sequence also passed: live-media 38/38, realtime 52/52, mobile package 18/18 plus conversation 6/6 and library 5/5, media 15/15, playback 5/5, live-ui 26/26, tool-results 44/44, lint, production build, and `git diff --check`.
