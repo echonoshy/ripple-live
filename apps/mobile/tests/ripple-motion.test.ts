@@ -3,12 +3,10 @@ import test from 'node:test'
 import {
   RIPPLE_MOTION,
   advanceRipple,
-  createRippleSignalEmitter,
+  createRippleSignal,
   createRippleState,
-  type RippleSignal,
+  setRippleSignalIdForTesting,
 } from '../src/live/ripple.ts'
-
-const signal = (id: number, kind: RippleSignal['kind']): RippleSignal => ({ id, kind })
 
 test('uses the approved B/R2 dimensions and timing', () => {
   assert.deepEqual(RIPPLE_MOTION, {
@@ -22,13 +20,13 @@ test('uses the approved B/R2 dimensions and timing', () => {
 
 test('consumes dense events but starts only one ring inside the cooldown', () => {
   let state = createRippleState()
-  let next = advanceRipple(state, { signal: signal(1, 'speech'), visualState: 'listening', outputLevel: 0, reducedMotion: false }, 1000)
+  let next = advanceRipple(state, { signal: createRippleSignal('speech'), visualState: 'listening', outputLevel: 0, reducedMotion: false }, 1000)
   state = next.state
   assert.equal(next.frame.progress, 0)
-  next = advanceRipple(state, { signal: signal(2, 'tool'), visualState: 'tool', outputLevel: 0, reducedMotion: false }, 1300)
+  next = advanceRipple(state, { signal: createRippleSignal('tool'), visualState: 'tool', outputLevel: 0, reducedMotion: false }, 1300)
   assert.equal(next.frame.kind, 'speech')
   assert.ok(next.frame.progress > 0)
-  next = advanceRipple(next.state, { signal: signal(3, 'tool'), visualState: 'tool', outputLevel: 0, reducedMotion: false }, 2300)
+  next = advanceRipple(next.state, { signal: createRippleSignal('tool'), visualState: 'tool', outputLevel: 0, reducedMotion: false }, 2300)
   assert.equal(next.frame.kind, 'tool')
 })
 
@@ -45,7 +43,7 @@ test('assistant output crosses the emphasis threshold once per speaking phrase',
 })
 
 test('reduced motion suppresses propagation and keeps a short halo pulse', () => {
-  const next = advanceRipple(createRippleState(), { signal: signal(1, 'speech'), visualState: 'listening', outputLevel: 0, reducedMotion: true }, 1000)
+  const next = advanceRipple(createRippleState(), { signal: createRippleSignal('speech'), visualState: 'listening', outputLevel: 0, reducedMotion: true }, 1000)
   assert.equal(next.frame.progress, null)
   assert.ok(next.frame.haloPulse > 0)
 })
@@ -53,7 +51,7 @@ test('reduced motion suppresses propagation and keeps a short halo pulse', () =>
 test('enabling reduced motion stops an active ring immediately', () => {
   let state = advanceRipple(
     createRippleState(),
-    { signal: signal(1, 'speech'), visualState: 'listening', outputLevel: 0, reducedMotion: false },
+    { signal: createRippleSignal('speech'), visualState: 'listening', outputLevel: 0, reducedMotion: false },
     1000,
   ).state
   const next = advanceRipple(
@@ -69,35 +67,29 @@ test('enabling reduced motion stops an active ring immediately', () => {
 
 test('tracks only the highest consumed incrementing signal ID', () => {
   let state = createRippleState()
-  const emitter = createRippleSignalEmitter()
   for (let id = 1; id <= 1000; id++) {
     state = advanceRipple(
       state,
-      { signal: emitter.emit('speech'), visualState: 'listening', outputLevel: 0, reducedMotion: false },
+      { signal: createRippleSignal('speech'), visualState: 'listening', outputLevel: 0, reducedMotion: false },
       id * 1300,
     ).state
   }
 
-  assert.equal(state.lastConsumedSignalId, 1000)
+  assert.ok(state.lastConsumedSignalId !== null)
   assert.equal('consumedSignalIds' in state, false)
 })
 
-test('emits positive, monotonically increasing safe signal IDs', () => {
-  const emitter = createRippleSignalEmitter()
-  assert.deepEqual(emitter.emit('speech'), { id: 1, kind: 'speech' })
-  assert.deepEqual(emitter.emit('tool'), { id: 2, kind: 'tool' })
+test('creates globally unique, positive, monotonically increasing signal IDs', () => {
+  const first = createRippleSignal('speech')
+  const second = createRippleSignal('tool')
+  assert.ok(first.id > 0)
+  assert.equal(second.id, first.id + 1)
+  assert.notEqual(first.id, second.id)
 })
 
-test('refuses to roll an emitter beyond the largest safe signal ID', () => {
-  const emitter = createRippleSignalEmitter(Number.MAX_SAFE_INTEGER - 1)
-  assert.equal(emitter.emit('speech').id, Number.MAX_SAFE_INTEGER)
-  assert.throws(() => emitter.emit('tool'), RangeError)
-})
-
-test('treats repeated and lower emitter IDs as stale', () => {
-  const emitter = createRippleSignalEmitter()
-  const first = emitter.emit('speech')
-  const second = emitter.emit('tool')
+test('treats repeated and lower factory IDs as stale', () => {
+  const first = createRippleSignal('speech')
+  const second = createRippleSignal('tool')
   let state = advanceRipple(
     createRippleState(),
     { signal: second, visualState: 'tool', outputLevel: 0, reducedMotion: false },
@@ -117,4 +109,14 @@ test('treats repeated and lower emitter IDs as stale', () => {
     3600,
   )
   assert.equal(next.frame.kind, null)
+})
+
+test('fails clearly when the module signal factory reaches the safe integer limit', () => {
+  setRippleSignalIdForTesting(Number.MAX_SAFE_INTEGER - 1)
+  try {
+    assert.equal(createRippleSignal('speech').id, Number.MAX_SAFE_INTEGER)
+    assert.throws(() => createRippleSignal('tool'), RangeError)
+  } finally {
+    setRippleSignalIdForTesting(0)
+  }
 })

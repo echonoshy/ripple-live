@@ -1,10 +1,9 @@
 import type { VisualState } from './motion'
 
 export type RippleKind = 'speech' | 'assistant' | 'tool' | 'interrupt'
-export type RippleSignal = { id: number; kind: RippleKind }
-export type RippleSignalEmitter = {
-  emit(kind: RippleKind): RippleSignal
-}
+declare const rippleSignalIdBrand: unique symbol
+export type RippleSignalId = number & { readonly [rippleSignalIdBrand]: true }
+export type RippleSignal = { readonly id: RippleSignalId; readonly kind: RippleKind }
 export type RippleInput = {
   signal: RippleSignal | null
   visualState: VisualState
@@ -28,22 +27,21 @@ export const RIPPLE_MOTION = {
 
 const HALO_PULSE_MS = 160
 const ASSISTANT_EMPHASIS_LEVEL = 0.28
+let latestRippleSignalId = 0
 
-export function createRippleSignalEmitter(lastId = 0): RippleSignalEmitter {
+export function createRippleSignal(kind: RippleKind): RippleSignal {
+  if (latestRippleSignalId === Number.MAX_SAFE_INTEGER) {
+    throw new RangeError('Ripple signal ID exceeds the safe integer range')
+  }
+  latestRippleSignalId += 1
+  return { id: latestRippleSignalId as RippleSignalId, kind }
+}
+
+export function setRippleSignalIdForTesting(lastId: number) {
   if (!Number.isSafeInteger(lastId) || lastId < 0 || lastId > Number.MAX_SAFE_INTEGER) {
     throw new RangeError('Ripple signal ID must be a non-negative safe integer')
   }
-
-  let currentId = lastId
-  return {
-    emit(kind) {
-      if (currentId === Number.MAX_SAFE_INTEGER) {
-        throw new RangeError('Ripple signal ID exceeds the safe integer range')
-      }
-      currentId += 1
-      return { id: currentId, kind }
-    },
-  }
+  latestRippleSignalId = lastId
 }
 
 export type RippleState = {
@@ -52,7 +50,7 @@ export type RippleState = {
   assistantEmphasisUsed: boolean
   cooldownUntilMs: number
   haloPulseStartedAtMs: number | null
-  lastConsumedSignalId: number | null
+  lastConsumedSignalId: RippleSignalId | null
   previousVisualState: VisualState | null
 }
 
