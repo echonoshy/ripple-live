@@ -3,6 +3,7 @@ import test from 'node:test'
 import { createOrbRenderer, type OrbFrame } from '../src/live/orbRenderer.ts'
 
 type UniformLocation = WebGLUniformLocation & { name: string }
+type FakeShader = WebGLShader & { kind: number }
 
 class FakeWebGl {
   readonly VERTEX_SHADER = 0x8b31
@@ -11,9 +12,12 @@ class FakeWebGl {
   readonly LINK_STATUS = 0x8b82
   readonly TRIANGLES = 0x0004
   readonly floatUniforms = new Map<string, number[]>()
+  fragmentSource = ''
 
-  createShader() { return {} as WebGLShader }
-  shaderSource() {}
+  createShader(kind: number) { return { kind } as FakeShader }
+  shaderSource(shader: FakeShader, source: string) {
+    if (shader.kind === this.FRAGMENT_SHADER) this.fragmentSource = source
+  }
   compileShader() {}
   getShaderParameter() { return true }
   getShaderInfoLog() { return null }
@@ -77,4 +81,27 @@ test('reduced motion freezes geometry uniforms while brightness energy remains l
   const energy = gl.floatUniforms.get('uEnergy')
   assert.ok(energy)
   assert.notEqual(energy[0], energy[1])
+})
+
+test('fragment shader consumes clamped energy only through appearance output', () => {
+  const { gl } = createHarness()
+
+  assert.match(
+    gl.fragmentSource,
+    /float appearanceEnergy = clamp\(uEnergy, 0\.0, 1\.0\);/,
+  )
+  assert.match(
+    gl.fragmentSource,
+    /float brightness = mix\(0\.94, 1\.06, appearanceEnergy\);/,
+  )
+  assert.match(
+    gl.fragmentSource,
+    /outColor = vec4\([^;]*brightness,[^;]*edgeAlpha\s*\);/,
+  )
+
+  const geometry = gl.fragmentSource.slice(
+    gl.fragmentSource.indexOf('float geometryEnergy'),
+    gl.fragmentSource.indexOf('float body'),
+  )
+  assert.doesNotMatch(geometry, /\buEnergy\b|\bappearanceEnergy\b/)
 })

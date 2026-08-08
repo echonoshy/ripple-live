@@ -39,7 +39,7 @@ float ball(vec2 p, vec2 c, float r) {
 
 void main() {
   vec2 p = (gl_FragCoord.xy * 2.0 - uResolution) / uResolution.y;
-  float energy = uEnergy;
+  float appearanceEnergy = clamp(uEnergy, 0.0, 1.0);
   float motion = uReducedMotion == 1 ? 0.0 : 1.0;
   float geometryEnergy = uReducedMotion == 1 ? 0.0 : uGeometryEnergy;
   float t = uTime * (0.42 + geometryEnergy * 1.2) * motion;
@@ -58,10 +58,16 @@ void main() {
   vec3 deep = vec3(0.063, 0.231, 0.38);
   vec3 mid = vec3(0.298, 0.659, 0.886);
   vec3 ice = vec3(0.88, 0.97, 1.0);
+  float brightness = mix(0.94, 1.06, appearanceEnergy);
+  float highlightStrength = mix(0.78, 0.88, appearanceEnergy);
+  float edgeIntensity = mix(0.40, 0.48, appearanceEnergy);
+  float edgeAlpha = mix(0.50, 0.58, appearanceEnergy);
   vec3 color = mix(deep, mid, clamp(field - 1.2, 0.0, 1.0));
-  color = mix(color, ice, highlight * body * 0.85);
-  float brightness = 0.82 + energy * 0.18;
-  outColor = vec4((color * body + mid * edge * 0.45) * brightness, body + edge * 0.55);
+  color = mix(color, ice, highlight * body * highlightStrength);
+  outColor = vec4(
+    (color * body + mid * edge * edgeIntensity) * brightness,
+    body + edge * edgeAlpha
+  );
 }`
 
 export type OrbFrame = {
