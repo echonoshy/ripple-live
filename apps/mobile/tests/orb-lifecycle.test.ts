@@ -9,13 +9,14 @@ import type { OrbRenderer } from '../src/live/orbRenderer.ts'
 type GlobalKey =
   | 'window'
   | 'navigator'
+  | 'performance'
   | 'ResizeObserver'
   | 'requestAnimationFrame'
   | 'cancelAnimationFrame'
 
 function installBrowserFakes(
   observeThrows: boolean,
-  options: { reducedMotion?: boolean; captureFrames?: boolean } = {},
+  options: { reducedMotion?: boolean; captureFrames?: boolean; nowMs?: number } = {},
 ) {
   const descriptors = new Map<GlobalKey, PropertyDescriptor | undefined>()
   const setGlobal = (key: GlobalKey, value: unknown) => {
@@ -34,10 +35,18 @@ function installBrowserFakes(
     framesCancelled: [] as number[],
     frames: [] as FrameRequestCallback[],
   }
+  let nowMs = options.nowMs ?? 0
+  const motionListeners = new Set<() => void>()
   const mediaQuery = {
     matches: options.reducedMotion ?? false,
-    addEventListener: () => { calls.mediaAdded += 1 },
-    removeEventListener: () => { calls.mediaRemoved += 1 },
+    addEventListener: (_type: string, listener: () => void) => {
+      calls.mediaAdded += 1
+      motionListeners.add(listener)
+    },
+    removeEventListener: (_type: string, listener: () => void) => {
+      calls.mediaRemoved += 1
+      motionListeners.delete(listener)
+    },
   }
 
   class FakeResizeObserver {
@@ -49,6 +58,7 @@ function installBrowserFakes(
 
   setGlobal('window', { devicePixelRatio: 2, matchMedia: () => mediaQuery })
   setGlobal('navigator', {})
+  setGlobal('performance', { now: () => nowMs })
   setGlobal('ResizeObserver', FakeResizeObserver)
   setGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     if (options.captureFrames) calls.frames.push(callback)
@@ -60,6 +70,11 @@ function installBrowserFakes(
 
   return {
     calls,
+    setNow(nextNowMs: number) { nowMs = nextNowMs },
+    setReducedMotion(matches: boolean) {
+      mediaQuery.matches = matches
+      for (const listener of motionListeners) listener()
+    },
     restore() {
       for (const [key, descriptor] of descriptors) {
         if (descriptor) Object.defineProperty(globalThis, key, descriptor)
@@ -108,6 +123,18 @@ function runNextFrame(
   const callback = browser.calls.frames.shift()
   assert.ok(callback, `expected a queued frame at ${nowMs}ms`)
   callback(nowMs)
+}
+
+function runCadence(
+  browser: ReturnType<typeof installBrowserFakes>,
+  fromMs: number,
+  throughMs: number,
+  fps: number,
+) {
+  const interval = 1000 / fps
+  for (let nowMs = fromMs; nowMs <= throughMs + 0.01; nowMs += interval) {
+    runNextFrame(browser, nowMs)
+  }
 }
 
 test('partial observer setup failure releases resources and enters fallback', () => {
@@ -260,6 +287,104 @@ test('cleanup cancels a queued frame and ignores a late callback', () => {
 
     assert.equal(updates, 0)
     assert.deepEqual(browser.calls.framesCancelled, [42])
+  } finally {
+    browser.restore()
+  }
+})
+
+test('a long rAF gap does not immediately downgrade a stable high-quality orb', () => {
+  const browser = installBrowserFakes(false, { captureFrames: true })
+  const harness = createHarness()
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    runCadence(browser, 0, 2500, 1000 / 17)
+    assert.equal(harness.latestProps.current.qualityTier, 'high')
+
+    browser.setNow(3734)
+    runNextFrame(browser, 3734)
+
+    assert.equal(harness.latestProps.current.qualityTier, 'high')
+    cleanup()
+  } finally {
+    browser.restore()
+  }
+})
+
+test('a rAF gap resets low-tier recovery until a fresh stable five seconds elapse', () => {
+  const browser = installBrowserFakes(false, { captureFrames: true })
+  const harness = createHarness()
+  harness.latestProps.current.qualityTier = 'low'
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    runCadence(browser, 0, 2500, 60)
+    assert.equal(harness.latestProps.current.qualityTier, 'low')
+
+    browser.setNow(3700)
+    runNextFrame(browser, 3700)
+    runCadence(browser, 3700 + (1000 / 60), 8600, 60)
+    assert.equal(harness.latestProps.current.qualityTier, 'low')
+
+    runCadence(browser, 8600 + (1000 / 60), 8800, 60)
+    assert.equal(harness.latestProps.current.qualityTier, 'high')
+    cleanup()
+  } finally {
+    browser.restore()
+  }
+})
+
+test('a forced-low policy applied after a rAF gap remains low', () => {
+  const browser = installBrowserFakes(false, { captureFrames: true })
+  const harness = createHarness()
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    runCadence(browser, 0, 300, 60)
+
+    browser.setNow(1500)
+    browser.setReducedMotion(true)
+    runNextFrame(browser, 1500)
+
+    assert.equal(harness.latestProps.current.qualityTier, 'low')
+    cleanup()
+  } finally {
+    browser.restore()
+  }
+})
+
+test('normal no-gap frame cadence still degrades and recovers quality', () => {
+  const browser = installBrowserFakes(false, { captureFrames: true })
+  const harness = createHarness()
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    runCadence(browser, 0, 2200, 44)
+    assert.equal(harness.latestProps.current.qualityTier, 'low')
+
+    runCadence(browser, 2200 + (1000 / 60), 9500, 60)
+    assert.equal(harness.latestProps.current.qualityTier, 'high')
+    cleanup()
   } finally {
     browser.restore()
   }

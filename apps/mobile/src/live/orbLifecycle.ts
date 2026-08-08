@@ -33,7 +33,7 @@ const pixelRatioFor = (qualityTier: QualityTier) => {
 const frameIntervalFor = (qualityTier: QualityTier) => (
   1000 / (qualityTier === 'high' ? 60 : 30)
 )
-const MAX_PACING_GAP_MS = 1000
+const MAX_FRAME_GAP_MS = 1000
 const PACING_EPSILON_MS = 0.01
 
 export function startOrbLifecycle(
@@ -63,6 +63,7 @@ export function startOrbLifecycle(
   let pacedQuality: QualityTier | null = null
   let lastRenderedAt: number | null = null
   let nextRenderDeadline: number | null = null
+  let lastAnimationFrameAt: number | null = null
 
   const safely = (operation: () => void) => {
     try {
@@ -134,13 +135,28 @@ export function startOrbLifecycle(
     batteryLow = battery.level <= 0.15 && !battery.charging
     applyPowerPolicy()
   }
+  const resetFramePacing = (nowMs: number) => {
+    const qualityTier = latestProps.current.qualityTier
+    pacedQuality = qualityTier
+    lastRenderedAt = nowMs
+    nextRenderDeadline = nowMs + frameIntervalFor(qualityTier)
+  }
+  const resetAfterFrameGap = (nowMs: number) => {
+    const hadGap = lastAnimationFrameAt !== null && (
+      nowMs < lastAnimationFrameAt
+      || nowMs - lastAnimationFrameAt > MAX_FRAME_GAP_MS
+    )
+    lastAnimationFrameAt = nowMs
+    if (!hadGap) return false
+    resetQualityObservation(nowMs)
+    resetFramePacing(nowMs)
+    return true
+  }
   const shouldRender = (nowMs: number) => {
     const qualityTier = latestProps.current.qualityTier
     const interval = frameIntervalFor(qualityTier)
     if (lastRenderedAt === null || !Number.isFinite(nowMs)) {
-      pacedQuality = qualityTier
-      lastRenderedAt = nowMs
-      nextRenderDeadline = nowMs + interval
+      resetFramePacing(nowMs)
       return true
     }
     if (pacedQuality !== qualityTier) {
@@ -148,16 +164,10 @@ export function startOrbLifecycle(
       nextRenderDeadline = lastRenderedAt + interval
     }
     if (nextRenderDeadline === null || nowMs < lastRenderedAt) {
-      lastRenderedAt = nowMs
-      nextRenderDeadline = nowMs + interval
+      resetFramePacing(nowMs)
       return true
     }
     if (nowMs + PACING_EPSILON_MS < nextRenderDeadline) return false
-    if (nowMs - lastRenderedAt > MAX_PACING_GAP_MS) {
-      lastRenderedAt = nowMs
-      nextRenderDeadline = nowMs + interval
-      return true
-    }
 
     const elapsedIntervals = Math.floor(
       (nowMs - nextRenderDeadline + PACING_EPSILON_MS) / interval,
@@ -170,6 +180,7 @@ export function startOrbLifecycle(
   const draw = (nowMs: number) => {
     if (!active) return
     try {
+      const resumed = resetAfterFrameGap(nowMs)
       frameTimes.push(nowMs)
       const windowStart = nowMs - 2000
       while (frameTimes.length > 1 && frameTimes[0] < windowStart) {
@@ -202,7 +213,7 @@ export function startOrbLifecycle(
         }
       }
 
-      if (shouldRender(nowMs)) {
+      if (resumed || shouldRender(nowMs)) {
         renderer.update({ ...latestProps.current, nowMs })
       }
       frame = requestAnimationFrame(draw)
