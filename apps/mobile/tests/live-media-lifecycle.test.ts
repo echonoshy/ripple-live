@@ -28,11 +28,14 @@ function fakeStream(name: string) {
 }
 
 function fakeVideo() {
+  const events = new EventTarget()
   return {
     srcObject: null as MediaStream | null,
     style: { transform: '' },
     play: async () => {},
     pause: () => {},
+    addEventListener: events.addEventListener.bind(events),
+    removeEventListener: events.removeEventListener.bind(events),
     videoWidth: 1280,
     videoHeight: 720,
   } as unknown as HTMLVideoElement
@@ -98,21 +101,6 @@ function installAudio(t: TestContext) {
   })
 }
 
-function createMedia(video = fakeVideo()) {
-  return {
-    video,
-    media: new LiveMedia({
-      video,
-      canvas: {} as HTMLCanvasElement,
-      withVideo: true,
-      facingMode: 'user',
-      onPlaybackStarted: () => {},
-      onPlaybackEnded: () => {},
-      onOutputLevel: () => {},
-    }),
-  }
-}
-
 test('stop during a pending start disposes the late microphone stream without rejecting', async (t) => {
   const request = deferred<MediaStream>()
   const microphone = fakeStream('microphone')
@@ -147,118 +135,60 @@ test('stop during a pending start disposes the late microphone stream without re
   assert.equal(video.srcObject, null)
 })
 
-test('stop during a pending camera flip disposes the late stream', async (t) => {
-  const requests: Array<ReturnType<typeof deferred<MediaStream>>> = []
-  installNavigator(t, () => {
-    const request = deferred<MediaStream>()
-    requests.push(request)
-    return request.promise
-  })
-  const { media, video } = createMedia()
-  const current = fakeStream('current')
-  const late = fakeStream('late')
-
-  const opening = media.setFacingMode('environment')
-  requests[0].resolve(current.stream)
-  assert.equal(await opening, 'switched')
-  const flipping = media.setFacingMode('user')
-  media.stop()
-  requests[1].resolve(late.stream)
-
-  assert.equal(await flipping, 'stale')
-  assert.equal(current.track.stops, 1)
-  assert.equal(late.track.stops, 1)
-  assert.equal(video.srcObject, null)
-})
-
-test('latest overlapping camera flip wins and the stale stream is stopped', async (t) => {
-  const requests: Array<ReturnType<typeof deferred<MediaStream>>> = []
-  installNavigator(t, () => {
-    const request = deferred<MediaStream>()
-    requests.push(request)
-    return request.promise
-  })
-  const { media, video } = createMedia()
-  const current = fakeStream('current')
-  const stale = fakeStream('stale')
-  const latest = fakeStream('latest')
-
-  const opening = media.setFacingMode('environment')
-  requests[0].resolve(current.stream)
-  assert.equal(await opening, 'switched')
-  const first = media.setFacingMode('user')
-  const second = media.setFacingMode('environment')
-  requests[2].resolve(latest.stream)
-  assert.equal(await second, 'switched')
-  requests[1].resolve(stale.stream)
-
-  assert.equal(await first, 'stale')
-  assert.equal(video.srcObject, latest.stream)
-  assert.equal(current.track.stops, 1)
-  assert.equal(stale.track.stops, 1)
-  assert.equal(latest.track.stops, 0)
-})
-
-test('a superseded flip play failure restores the old preview while latest acquisition waits', async (t) => {
-  const requests: Array<ReturnType<typeof deferred<MediaStream>>> = []
-  installNavigator(t, () => {
-    const request = deferred<MediaStream>()
-    requests.push(request)
-    return request.promise
-  })
-  const { media, video } = createMedia()
-  const current = fakeStream('current')
-  const stale = fakeStream('stale')
-  const latest = fakeStream('latest')
-
-  const opening = media.setFacingMode('environment')
-  requests[0].resolve(current.stream)
-  assert.equal(await opening, 'switched')
-
-  const stalePlay = deferred<void>()
-  let playCalls = 0
-  video.play = () => {
-    playCalls += 1
-    return playCalls === 1 ? stalePlay.promise : Promise.resolve()
+test('legacy initialVideo starts microphone and playback before requesting camera', async (t) => {
+  const requests: MediaStreamConstraints[] = []
+  const microphoneTrack = { kind: 'audio', stops: 0, stop() { this.stops += 1 } }
+  const cameraTrack = {
+    kind: 'video',
+    readyState: 'live',
+    stops: 0,
+    stop() { this.stops += 1 },
+    addEventListener() {},
+    removeEventListener() {},
   }
-  const first = media.setFacingMode('user')
-  requests[1].resolve(stale.stream)
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(video.srcObject, stale.stream)
-
-  const second = media.setFacingMode('environment')
-  stalePlay.reject(new Error('stale play failed'))
-  assert.equal(await first, 'stale')
-  assert.equal(video.srcObject, current.stream)
-  assert.equal(current.track.stops, 0)
-  assert.equal(stale.track.stops, 1)
-
-  requests[2].resolve(latest.stream)
-  assert.equal(await second, 'switched')
-  assert.equal(video.srcObject, latest.stream)
-  assert.equal(current.track.stops, 1)
-})
-
-test('failed camera flip preserves the current preview and resolves without rejection', async (t) => {
-  const requests: Array<ReturnType<typeof deferred<MediaStream>>> = []
-  installNavigator(t, () => {
-    const request = deferred<MediaStream>()
-    requests.push(request)
-    return request.promise
+  const microphone = {
+    getTracks: () => [microphoneTrack],
+    getVideoTracks: () => [],
+  } as unknown as MediaStream
+  const camera = {
+    getTracks: () => [cameraTrack],
+    getVideoTracks: () => [cameraTrack],
+  } as unknown as MediaStream
+  installNavigator(t, async (constraints) => {
+    requests.push(constraints)
+    return constraints.video === false ? microphone : camera
   })
-  const { media, video } = createMedia()
-  const current = fakeStream('current')
+  installAudio(t)
+  const originalVadNew = MicVAD.new
+  MicVAD.new = async () => ({ destroy: async () => {} }) as MicVAD
+  t.after(() => { MicVAD.new = originalVadNew })
+  const video = fakeVideo()
+  Object.defineProperty(video, 'readyState', { configurable: true, value: 2 })
+  const media = new LiveMedia({
+    video,
+    canvas: {} as HTMLCanvasElement,
+    initialVideo: true,
+    facingMode: 'environment',
+    onPlaybackStarted: () => {},
+    onPlaybackEnded: () => {},
+    onOutputLevel: () => {},
+  })
 
-  const opening = media.setFacingMode('environment')
-  requests[0].resolve(current.stream)
-  assert.equal(await opening, 'switched')
-  const flipping = media.setFacingMode('user')
-  requests[1].reject(new Error('camera unavailable'))
+  await media.start(() => {}, () => {}, () => {}, () => {})
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0].video, false)
+  assert.deepEqual(requests[1].video, {
+    facingMode: { ideal: 'environment' },
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+  })
+  assert.equal(media.cameraEnabled, true)
 
-  assert.equal(await flipping, 'failed')
-  assert.equal(video.srcObject, current.stream)
-  assert.equal(current.track.stops, 0)
+  media.disableCamera()
+  assert.equal(cameraTrack.stops, 1)
+  assert.equal(microphoneTrack.stops, 0)
+  media.stop()
+  assert.equal(microphoneTrack.stops, 1)
 })
 
 test('assetBlob forwards cancellation and rejects with AbortError', async (t) => {

@@ -1,13 +1,22 @@
 import { MicVAD } from '@ricky0123/vad-web'
+import {
+  CameraController,
+  type CameraEnableResult,
+  type CameraFacingMode,
+  waitForFirstFrame,
+} from './CameraController'
 
 type LiveMediaOptions = {
   video: HTMLVideoElement
   canvas: HTMLCanvasElement
-  withVideo: boolean
-  facingMode: 'user' | 'environment'
+  initialVideo?: boolean
+  /** @deprecated Kept until the in-call orchestration migrates to initialVideo. */
+  withVideo?: boolean
+  facingMode: CameraFacingMode
   onPlaybackStarted: (bufferedMs: number) => void
   onPlaybackEnded: () => void
   onOutputLevel: (level: number) => void
+  onCameraInterrupted?: () => void
 }
 
 type AudioChunkMessage = {
@@ -33,6 +42,11 @@ type PlaybackStateMessage = {
 }
 
 type CameraSwitchResult = 'switched' | 'stale' | 'failed'
+
+const liveCameraProfile = {
+  width: { ideal: 1280 },
+  height: { ideal: 720 },
+} satisfies Pick<MediaTrackConstraints, 'width' | 'height'>
 
 function resample(
   samples: Float32Array,
@@ -65,7 +79,7 @@ function resampleTo16k(samples: Float32Array, sourceRate: number) {
 export class LiveMedia {
   private readonly options: LiveMediaOptions
   private audioStream: MediaStream | null = null
-  private videoStream: MediaStream | null = null
+  private readonly camera: CameraController
   private captureContext: AudioContext | null = null
   private playbackContext: AudioContext | null = null
   private captureNode: AudioWorkletNode | null = null
@@ -75,7 +89,7 @@ export class LiveMedia {
   private vad: MicVAD | null = null
   private muted = false
   private running = false
-  private facingMode: 'user' | 'environment'
+  private facingMode: CameraFacingMode
   private fallbackVad = false
   private fallbackSpeaking = false
   private fallbackSilenceChunks = 0
@@ -83,7 +97,6 @@ export class LiveMedia {
   private preRoll: Float32Array[] = []
   private preRollSamples = 0
   private lifecycleGeneration = 0
-  private cameraGeneration = 0
   private startPromise: Promise<void> | null = null
   private pendingStreams = new Set<MediaStream>()
   private pendingContexts = new Set<AudioContext>()
@@ -91,6 +104,18 @@ export class LiveMedia {
   constructor(options: LiveMediaOptions) {
     this.options = options
     this.facingMode = options.facingMode
+    this.camera = new CameraController(options.video, {
+      getUserMedia: (constraints) =>
+        navigator.mediaDevices.getUserMedia(constraints),
+      waitForFirstFrame: (video, timeoutMs, signal) =>
+        waitForFirstFrame(video, timeoutMs, undefined, signal),
+      onInterrupted: options.onCameraInterrupted,
+      videoConstraints: liveCameraProfile,
+    })
+  }
+
+  get cameraEnabled() {
+    return this.camera.enabled
   }
 
   start(
@@ -106,10 +131,8 @@ export class LiveMedia {
     if (this.running) return Promise.resolve()
 
     const generation = ++this.lifecycleGeneration
-    const cameraOperation = ++this.cameraGeneration
     const task = this.startInternal(
       generation,
-      cameraOperation,
       onChunk,
       onSpeechStart,
       onSpeechEnd,
@@ -123,22 +146,12 @@ export class LiveMedia {
 
   private async startInternal(
     generation: number,
-    cameraOperation: number,
     onChunk: (audio: Float32Array, frame: string | null) => void,
     onSpeechStart: () => void,
     onSpeechEnd: () => void,
     onLevel: (level: number) => void,
   ) {
     try {
-      if (this.options.withVideo) {
-        await this.replaceCamera(
-          this.facingMode,
-          generation,
-          cameraOperation,
-        )
-        if (!this.isCurrent(generation)) return
-      }
-
       if (!await this.openPlayback(generation)) return
 
       const audioStream = await navigator.mediaDevices.getUserMedia({
@@ -187,6 +200,11 @@ export class LiveMedia {
       this.captureNode = captureNode
       this.silentGain = silentGain
       this.running = true
+
+      if (this.options.initialVideo ?? this.options.withVideo ?? false) {
+        const cameraResult = await this.enableCamera(this.facingMode)
+        if (cameraResult === 'stale' || !this.isCurrent(generation)) return
+      }
 
       captureNode.port.onmessage = (
         event: MessageEvent<AudioChunkMessage | AudioLevelMessage>,
@@ -316,25 +334,30 @@ export class LiveMedia {
   }
 
   async setFacingMode(
-    facingMode: 'user' | 'environment',
+    facingMode: CameraFacingMode,
   ): Promise<CameraSwitchResult> {
-    if (!this.options.withVideo) {
+    if (!this.cameraEnabled) {
       this.facingMode = facingMode
       return 'switched'
     }
-    const generation = this.lifecycleGeneration
-    const cameraOperation = ++this.cameraGeneration
     try {
-      return await this.replaceCamera(
-        facingMode,
-        generation,
-        cameraOperation,
-      )
+      const result = await this.enableCamera(facingMode)
+      return result === 'enabled' ? 'switched' : 'stale'
     } catch {
-      return this.isCameraCurrent(generation, cameraOperation)
-        ? 'failed'
-        : 'stale'
+      return 'failed'
     }
+  }
+
+  async enableCamera(
+    facingMode: CameraFacingMode = this.facingMode,
+  ): Promise<CameraEnableResult> {
+    const result = await this.camera.enable(facingMode)
+    if (result === 'enabled') this.facingMode = facingMode
+    return result
+  }
+
+  disableCamera() {
+    this.camera.disable()
   }
 
   enqueueOutput(samples: Float32Array) {
@@ -360,7 +383,6 @@ export class LiveMedia {
 
   stop() {
     this.lifecycleGeneration += 1
-    this.cameraGeneration += 1
     this.startPromise = null
     this.running = false
     this.fallbackVad = false
@@ -394,7 +416,7 @@ export class LiveMedia {
     this.playbackContext = null
     for (const context of this.pendingContexts) void context.close().catch(() => {})
     this.pendingContexts.clear()
-    this.stopCamera()
+    this.disableCamera()
   }
 
   private async openPlayback(generation = this.lifecycleGeneration) {
@@ -460,85 +482,8 @@ export class LiveMedia {
     return true
   }
 
-  private async replaceCamera(
-    facingMode: 'user' | 'environment',
-    generation: number,
-    cameraOperation: number,
-  ) {
-    const replacement = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: { ideal: facingMode },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-      },
-    })
-    this.pendingStreams.add(replacement)
-    if (!this.isCameraCurrent(generation, cameraOperation)) {
-      this.disposePendingStream(replacement)
-      return 'stale'
-    }
-
-    const previous = this.videoStream
-    const previousTransform = this.options.video.style.transform
-    this.options.video.srcObject = replacement
-    this.options.video.style.transform =
-      facingMode === 'user' ? 'scaleX(-1)' : 'none'
-    try {
-      await this.options.video.play()
-    } catch (error) {
-      this.disposePendingStream(replacement)
-      if (this.isCurrent(generation)) {
-        this.restoreCamera(previous, previousTransform, replacement)
-      }
-      if (this.isCameraCurrent(generation, cameraOperation)) {
-        throw error
-      }
-      return 'stale'
-    }
-
-    if (!this.isCameraCurrent(generation, cameraOperation)) {
-      this.disposePendingStream(replacement)
-      if (this.isCurrent(generation)) {
-        this.restoreCamera(previous, previousTransform, replacement)
-      }
-      return 'stale'
-    }
-
-    this.pendingStreams.delete(replacement)
-    this.videoStream = replacement
-    this.facingMode = facingMode
-    if (previous && previous !== replacement) {
-      previous.getTracks().forEach((track) => track.stop())
-    }
-    return 'switched'
-  }
-
-  private stopCamera() {
-    this.videoStream?.getTracks().forEach((track) => track.stop())
-    this.videoStream = null
-    this.options.video.pause()
-    this.options.video.srcObject = null
-  }
-
-  private restoreCamera(
-    previous: MediaStream | null,
-    previousTransform: string,
-    replacement: MediaStream,
-  ) {
-    if (this.options.video.srcObject !== replacement) return
-    this.options.video.srcObject = previous
-    this.options.video.style.transform = previousTransform
-    if (previous) void this.options.video.play().catch(() => {})
-    else this.options.video.pause()
-  }
-
   private isCurrent(generation: number) {
     return this.lifecycleGeneration === generation
-  }
-
-  private isCameraCurrent(generation: number, cameraOperation: number) {
-    return this.isCurrent(generation) && this.cameraGeneration === cameraOperation
   }
 
   private disposePendingStream(stream: MediaStream) {
@@ -553,7 +498,7 @@ export class LiveMedia {
 
   captureFrame() {
     if (
-      !this.options.withVideo ||
+      !this.cameraEnabled ||
       !this.options.video.videoWidth ||
       !this.options.video.videoHeight
     ) {
