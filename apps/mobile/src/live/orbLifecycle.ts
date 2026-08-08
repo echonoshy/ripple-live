@@ -30,6 +30,8 @@ const pixelRatioFor = (qualityTier: QualityTier) => {
     : Math.min(Math.max(ratio, 1), 1.25)
 }
 
+const LOW_QUALITY_FRAME_INTERVAL_MS = 1000 / 30
+
 export function startOrbLifecycle(
   renderer: OrbRenderer,
   canvas: HTMLCanvasElement,
@@ -54,6 +56,7 @@ export function startOrbLifecycle(
   let lastCondition: 'slow' | 'stable' | 'neutral' = 'neutral'
   let lastWidth = 0
   let lastHeight = 0
+  let lastRenderedAt = Number.NEGATIVE_INFINITY
 
   const safely = (operation: () => void) => {
     try {
@@ -160,7 +163,13 @@ export function startOrbLifecycle(
         }
       }
 
-      renderer.update({ ...latestProps.current, nowMs })
+      if (
+        latestProps.current.qualityTier === 'high'
+        || nowMs - lastRenderedAt >= LOW_QUALITY_FRAME_INTERVAL_MS
+      ) {
+        renderer.update({ ...latestProps.current, nowMs })
+        lastRenderedAt = nowMs
+      }
       frame = requestAnimationFrame(draw)
     } catch {
       enterFallback()

@@ -273,6 +273,18 @@ test('mobile live call controls retain scoped focus and size contracts', () => {
   )
 })
 
+test('mobile live orb releases an interrupted response within 160ms', () => {
+  const cssSource = readFileSync(
+    path.join(appRoot, 'src/live/LiveCall.css'),
+    'utf8',
+  )
+
+  assert.match(
+    cssSource,
+    /\.live-orb-canvas\.is-listening,\s*\.live-orb-fallback\.is-listening\s*\{[^}]*transition-duration:\s*160ms;/s,
+  )
+})
+
 test('mobile libraries expose accessible shared management controls', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')

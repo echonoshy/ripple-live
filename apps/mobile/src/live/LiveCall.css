@@ -36,6 +36,7 @@
 .live-orb-fallback.is-listening {
   filter: brightness(1.06);
   transform: scale(1);
+  transition-duration: 160ms;
 }
 
 .live-orb-canvas.is-thinking,

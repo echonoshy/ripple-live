@@ -13,7 +13,10 @@ type GlobalKey =
   | 'requestAnimationFrame'
   | 'cancelAnimationFrame'
 
-function installBrowserFakes(observeThrows: boolean) {
+function installBrowserFakes(
+  observeThrows: boolean,
+  options: { reducedMotion?: boolean; captureFrames?: boolean } = {},
+) {
   const descriptors = new Map<GlobalKey, PropertyDescriptor | undefined>()
   const setGlobal = (key: GlobalKey, value: unknown) => {
     descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key))
@@ -29,9 +32,10 @@ function installBrowserFakes(observeThrows: boolean) {
     mediaRemoved: 0,
     observerDisconnected: 0,
     framesCancelled: [] as number[],
+    frames: [] as FrameRequestCallback[],
   }
   const mediaQuery = {
-    matches: false,
+    matches: options.reducedMotion ?? false,
     addEventListener: () => { calls.mediaAdded += 1 },
     removeEventListener: () => { calls.mediaRemoved += 1 },
   }
@@ -46,7 +50,10 @@ function installBrowserFakes(observeThrows: boolean) {
   setGlobal('window', { devicePixelRatio: 2, matchMedia: () => mediaQuery })
   setGlobal('navigator', {})
   setGlobal('ResizeObserver', FakeResizeObserver)
-  setGlobal('requestAnimationFrame', () => 41)
+  setGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    if (options.captureFrames) calls.frames.push(callback)
+    return 41 + calls.frames.length
+  })
   setGlobal('cancelAnimationFrame', (frame: number) => {
     calls.framesCancelled.push(frame)
   })
@@ -140,6 +147,34 @@ test('successful lifecycle cleanup is idempotent', () => {
     assert.deepEqual(browser.calls.framesCancelled, [41])
     assert.equal(browser.calls.mediaRemoved, 1)
     assert.equal(browser.calls.observerDisconnected, 1)
+  } finally {
+    browser.restore()
+  }
+})
+
+test('forced-low mode renders the orb at no more than 30fps', () => {
+  const browser = installBrowserFakes(false, {
+    reducedMotion: true,
+    captureFrames: true,
+  })
+  const harness = createHarness()
+  const updates: number[] = []
+  harness.renderer.update = (frame) => updates.push(frame.nowMs)
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    browser.calls.frames.shift()?.(0)
+    browser.calls.frames.shift()?.(16)
+    browser.calls.frames.shift()?.(34)
+
+    assert.equal(harness.latestProps.current.qualityTier, 'low')
+    assert.deepEqual(updates, [0, 34])
+    cleanup()
   } finally {
     browser.restore()
   }
