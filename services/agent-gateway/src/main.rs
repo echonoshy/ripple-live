@@ -503,6 +503,97 @@ fn requested_frame_event(mode: SessionMode, response_id: &str) -> Option<Value> 
     })
 }
 
+enum ModeChangeEffect {
+    PreserveActiveResponse,
+    SpawnAudioTurn {
+        response_id: String,
+        transcript: String,
+        frames: Vec<VideoFrame>,
+    },
+    Send(Value),
+}
+
+fn apply_mode_set_transaction(
+    negotiated_protocol_version: u32,
+    event: &ClientEvent,
+    session_mode: &mut SessionMode,
+    pending_transcription_mode: Option<&mut SessionMode>,
+    pending_gate_mode: Option<&mut SessionMode>,
+    pending_turn: &mut Option<PendingTurn>,
+    frames: &mut VecDeque<VideoFrame>,
+) -> Vec<ModeChangeEffect> {
+    let mut effects = vec![ModeChangeEffect::PreserveActiveResponse];
+    let accepted_mode = match validate_mode_set(negotiated_protocol_version, event) {
+        Ok(mode) => mode,
+        Err(error) => {
+            effects.push(ModeChangeEffect::Send(error));
+            return effects;
+        }
+    };
+    let current_mode = *session_mode;
+    if let Some(snapshot) = pending_transcription_mode {
+        *snapshot = mode_snapshot_after_change(*snapshot, current_mode, accepted_mode);
+    }
+    if let Some(snapshot) = pending_gate_mode {
+        *snapshot = mode_snapshot_after_change(*snapshot, current_mode, accepted_mode);
+    }
+    let plan = plan_mode_change(current_mode, accepted_mode, pending_turn.as_ref());
+    let released_turn = if plan == ModeChangePlan::ReleasePendingAudioTurn {
+        take_pending_video_turn(pending_turn, frames)
+    } else {
+        None
+    };
+    if accepted_mode == SessionMode::Audio {
+        frames.clear();
+    }
+    *session_mode = accepted_mode;
+    if let Some(pending) = released_turn {
+        effects.push(ModeChangeEffect::SpawnAudioTurn {
+            response_id: pending.response_id,
+            transcript: pending.transcript,
+            frames: Vec::new(),
+        });
+    }
+    effects.push(ModeChangeEffect::Send(json!({
+        "type": "session.mode.changed",
+        "mode": session_mode.as_str()
+    })));
+    effects
+}
+
+enum AcceptedTurnAction {
+    RequestFrame {
+        pending: PendingTurn,
+        event: Value,
+    },
+    SpawnAudioTurn {
+        response_id: String,
+        transcript: String,
+        frames: Vec<VideoFrame>,
+    },
+}
+
+fn plan_accepted_turn(
+    mode: SessionMode,
+    response_id: &str,
+    transcript: &str,
+) -> AcceptedTurnAction {
+    match requested_frame_event(mode, response_id) {
+        Some(event) => AcceptedTurnAction::RequestFrame {
+            pending: PendingTurn {
+                response_id: response_id.to_owned(),
+                transcript: transcript.to_owned(),
+            },
+            event,
+        },
+        None => AcceptedTurnAction::SpawnAudioTurn {
+            response_id: response_id.to_owned(),
+            transcript: transcript.to_owned(),
+            frames: Vec::new(),
+        },
+    }
+}
+
 fn audio_duration_ms(sample_count: usize, sample_rate: u32) -> u128 {
     if sample_rate == 0 {
         return 0;
@@ -1797,46 +1888,50 @@ async fn handle_socket(
                     "gate_respond",
                 )
                 .await;
-                if let Some(frame_request) = requested_frame_event(accepted_mode, &response_id) {
-                    if let Some(superseded) = pending_turn.take() {
-                        record_event_best_effort(
-                            &state.context,
-                            &session_id,
-                            "server.response.cancelled",
-                            &json!({
-                                "response_id": superseded.response_id,
-                                "reason": "superseded_before_frame"
-                            }),
-                        )
-                        .await;
-                        send_event(
-                            &event_sender,
-                            json!({
-                                "type": "response.cancelled",
-                                "response_id": superseded.response_id,
-                                "reason": "superseded_before_frame"
-                            }),
-                        )
-                        .await?;
+                match plan_accepted_turn(accepted_mode, &response_id, &transcript) {
+                    AcceptedTurnAction::RequestFrame { pending, event } => {
+                        if let Some(superseded) = pending_turn.take() {
+                            record_event_best_effort(
+                                &state.context,
+                                &session_id,
+                                "server.response.cancelled",
+                                &json!({
+                                    "response_id": superseded.response_id,
+                                    "reason": "superseded_before_frame"
+                                }),
+                            )
+                            .await;
+                            send_event(
+                                &event_sender,
+                                json!({
+                                    "type": "response.cancelled",
+                                    "response_id": superseded.response_id,
+                                    "reason": "superseded_before_frame"
+                                }),
+                            )
+                            .await?;
+                        }
+                        frames.clear();
+                        pending_turn = Some(pending);
+                        send_event(&event_sender, event).await?;
                     }
-                    frames.clear();
-                    pending_turn = Some(PendingTurn {
-                        response_id: response_id.clone(),
-                        transcript,
-                    });
-                    send_event(&event_sender, frame_request).await?;
-                } else {
-                    active_response = Some(spawn_turn(
-                        state.orchestrator.clone(),
-                        state.context.clone(),
-                        user_id.clone(),
-                        session_id.clone(),
-                        event_sender.clone(),
-                        Vec::new(),
-                        Vec::new(),
-                        Some(transcript),
+                    AcceptedTurnAction::SpawnAudioTurn {
                         response_id,
-                    ));
+                        transcript,
+                        frames: accepted_frames,
+                    } => {
+                        active_response = Some(spawn_turn(
+                            state.orchestrator.clone(),
+                            state.context.clone(),
+                            user_id.clone(),
+                            session_id.clone(),
+                            event_sender.clone(),
+                            Vec::new(),
+                            accepted_frames,
+                            Some(transcript),
+                            response_id,
+                        ));
+                    }
                 }
                 continue;
             }
@@ -1992,34 +2087,26 @@ async fn handle_socket(
             "session.mode.set" => {
                 let negotiated_protocol_version = negotiated_protocol_version
                     .expect("a ready session always has a negotiated protocol version");
-                match validate_mode_set(negotiated_protocol_version, &event) {
-                    Ok(accepted_mode) => {
-                        let plan =
-                            plan_mode_change(session_mode, accepted_mode, pending_turn.as_ref());
-                        if let Some(pending) = pending_transcription.as_mut() {
-                            pending.mode = mode_snapshot_after_change(
-                                pending.mode,
-                                session_mode,
-                                accepted_mode,
-                            );
-                        }
-                        if let Some(pending) = pending_gate.as_mut() {
-                            pending.mode = mode_snapshot_after_change(
-                                pending.mode,
-                                session_mode,
-                                accepted_mode,
-                            );
-                        }
-                        let released_turn = if plan == ModeChangePlan::ReleasePendingAudioTurn {
-                            take_pending_video_turn(&mut pending_turn, &mut frames)
-                        } else {
-                            None
-                        };
-                        if accepted_mode == SessionMode::Audio {
-                            frames.clear();
-                        }
-                        session_mode = accepted_mode;
-                        if let Some(pending) = released_turn {
+                let effects = apply_mode_set_transaction(
+                    negotiated_protocol_version,
+                    &event,
+                    &mut session_mode,
+                    pending_transcription
+                        .as_mut()
+                        .map(|pending| &mut pending.mode),
+                    pending_gate.as_mut().map(|pending| &mut pending.mode),
+                    &mut pending_turn,
+                    &mut frames,
+                );
+                let mut outcome = Ok(());
+                for effect in effects {
+                    match effect {
+                        ModeChangeEffect::PreserveActiveResponse => {}
+                        ModeChangeEffect::SpawnAudioTurn {
+                            response_id,
+                            transcript,
+                            frames: accepted_frames,
+                        } => {
                             active_response = Some(spawn_turn(
                                 state.orchestrator.clone(),
                                 state.context.clone(),
@@ -2027,22 +2114,20 @@ async fn handle_socket(
                                 session_id.clone(),
                                 event_sender.clone(),
                                 Vec::new(),
-                                Vec::new(),
-                                Some(pending.transcript),
-                                pending.response_id,
+                                accepted_frames,
+                                Some(transcript),
+                                response_id,
                             ));
                         }
-                        send_event(
-                            &event_sender,
-                            json!({
-                                "type": "session.mode.changed",
-                                "mode": session_mode.as_str()
-                            }),
-                        )
-                        .await
+                        ModeChangeEffect::Send(event) => {
+                            if let Err(error) = send_event(&event_sender, event).await {
+                                outcome = Err(error);
+                                break;
+                            }
+                        }
                     }
-                    Err(error) => send_event(&event_sender, error).await,
                 }
+                outcome
             }
             "input.audio.append" => {
                 let result = endpoint_state.append_audio(event.audio.as_deref(), &state.settings);
@@ -3144,6 +3229,168 @@ mod tests {
                 "response_id": "response-new"
             })
         );
+    }
+
+    fn mode_set_event(mode: &str, response_id: &str) -> ClientEvent {
+        serde_json::from_value(json!({
+            "type": "session.mode.set",
+            "response_id": response_id,
+            "mode": mode
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn duplicate_mode_event_acks_without_changing_or_closing_session() {
+        let mut mode = SessionMode::Audio;
+        let mut pending_turn = None;
+        let mut frames = VecDeque::new();
+        let effects = apply_mode_set_transaction(
+            5,
+            &mode_set_event("audio", "duplicate"),
+            &mut mode,
+            None,
+            None,
+            &mut pending_turn,
+            &mut frames,
+        );
+
+        assert_eq!(mode, SessionMode::Audio);
+        assert!(matches!(
+            effects[0],
+            ModeChangeEffect::PreserveActiveResponse
+        ));
+        assert!(matches!(
+            &effects[1],
+            ModeChangeEffect::Send(event)
+                if event["type"] == "session.mode.changed" && event["mode"] == "audio"
+        ));
+    }
+
+    #[test]
+    fn recoverable_mode_errors_allow_the_next_valid_event() {
+        let mut mode = SessionMode::Audio;
+        let mut pending_turn = None;
+        let mut frames = VecDeque::new();
+
+        let v4 = apply_mode_set_transaction(
+            4,
+            &mode_set_event("video", "v4-request"),
+            &mut mode,
+            None,
+            None,
+            &mut pending_turn,
+            &mut frames,
+        );
+        assert!(matches!(
+            &v4[1],
+            ModeChangeEffect::Send(event)
+                if event["code"] == "unsupported_protocol"
+                    && event["response_id"] == "v4-request"
+        ));
+        assert_eq!(mode, SessionMode::Audio);
+
+        let invalid = apply_mode_set_transaction(
+            5,
+            &mode_set_event("continuous_video", "invalid-request"),
+            &mut mode,
+            None,
+            None,
+            &mut pending_turn,
+            &mut frames,
+        );
+        assert!(matches!(
+            &invalid[1],
+            ModeChangeEffect::Send(event)
+                if event["code"] == "invalid_mode"
+                    && event["response_id"] == "invalid-request"
+        ));
+
+        let valid = apply_mode_set_transaction(
+            5,
+            &mode_set_event("video", "valid-request"),
+            &mut mode,
+            None,
+            None,
+            &mut pending_turn,
+            &mut frames,
+        );
+        assert_eq!(mode, SessionMode::Video);
+        assert!(matches!(
+            &valid[1],
+            ModeChangeEffect::Send(event)
+                if event["type"] == "session.mode.changed" && event["mode"] == "video"
+        ));
+    }
+
+    #[test]
+    fn pending_video_release_is_effected_without_frames_before_ack() {
+        let mut mode = SessionMode::Video;
+        let mut pending_turn = Some(PendingTurn {
+            response_id: "response-pending".to_owned(),
+            transcript: "继续回答".to_owned(),
+        });
+        let mut frames = VecDeque::from([VideoFrame {
+            bytes: vec![1, 2, 3],
+            mime_type: "image/jpeg".to_owned(),
+            captured_at_ms: None,
+            received_at_ms: 0,
+        }]);
+
+        let effects = apply_mode_set_transaction(
+            5,
+            &mode_set_event("audio", "close-camera"),
+            &mut mode,
+            None,
+            None,
+            &mut pending_turn,
+            &mut frames,
+        );
+
+        assert!(matches!(
+            effects[0],
+            ModeChangeEffect::PreserveActiveResponse
+        ));
+        assert!(matches!(
+            &effects[1],
+            ModeChangeEffect::SpawnAudioTurn { response_id, frames, .. }
+                if response_id == "response-pending" && frames.is_empty()
+        ));
+        assert!(matches!(
+            &effects[2],
+            ModeChangeEffect::Send(event)
+                if event["type"] == "session.mode.changed" && event["mode"] == "audio"
+        ));
+        assert!(pending_turn.is_none());
+        assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn audio_to_video_keeps_old_turn_audio_and_requests_only_for_next_turn() {
+        let mut mode = SessionMode::Audio;
+        let mut old_gate_mode = SessionMode::Audio;
+        let mut pending_turn = None;
+        let mut frames = VecDeque::new();
+        let _ = apply_mode_set_transaction(
+            5,
+            &mode_set_event("video", "open-camera"),
+            &mut mode,
+            None,
+            Some(&mut old_gate_mode),
+            &mut pending_turn,
+            &mut frames,
+        );
+
+        assert!(matches!(
+            plan_accepted_turn(old_gate_mode, "response-old", "旧回合"),
+            AcceptedTurnAction::SpawnAudioTurn { .. }
+        ));
+        assert!(matches!(
+            plan_accepted_turn(mode, "response-new", "新回合"),
+            AcceptedTurnAction::RequestFrame { event, .. }
+                if event["type"] == "input.frame.requested"
+                    && event["response_id"] == "response-new"
+        ));
     }
 
     #[test]
