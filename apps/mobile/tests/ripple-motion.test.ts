@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import * as rippleModule from '../src/live/ripple.ts'
 import {
   RIPPLE_MOTION,
   advanceRipple,
   createRippleSignal,
   createRippleState,
-  setRippleSignalIdForTesting,
+  nextRippleSignalId,
 } from '../src/live/ripple.ts'
 
 test('uses the approved B/R2 dimensions and timing', () => {
@@ -111,12 +112,11 @@ test('treats repeated and lower factory IDs as stale', () => {
   assert.equal(next.frame.kind, null)
 })
 
-test('fails clearly when the module signal factory reaches the safe integer limit', () => {
-  setRippleSignalIdForTesting(Number.MAX_SAFE_INTEGER - 1)
-  try {
-    assert.equal(createRippleSignal('speech').id, Number.MAX_SAFE_INTEGER)
-    assert.throws(() => createRippleSignal('tool'), RangeError)
-  } finally {
-    setRippleSignalIdForTesting(0)
-  }
+test('does not expose a mutable reset for the global signal counter', () => {
+  assert.equal('setRippleSignalIdForTesting' in rippleModule, false)
+})
+
+test('fails clearly when the pure signal ID transition reaches the safe integer limit', () => {
+  assert.equal(nextRippleSignalId(Number.MAX_SAFE_INTEGER - 1), Number.MAX_SAFE_INTEGER)
+  assert.throws(() => nextRippleSignalId(Number.MAX_SAFE_INTEGER), RangeError)
 })

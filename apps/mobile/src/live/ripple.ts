@@ -29,19 +29,16 @@ const HALO_PULSE_MS = 160
 const ASSISTANT_EMPHASIS_LEVEL = 0.28
 let latestRippleSignalId = 0
 
-export function createRippleSignal(kind: RippleKind): RippleSignal {
-  if (latestRippleSignalId === Number.MAX_SAFE_INTEGER) {
+export function nextRippleSignalId(lastId: number): number {
+  if (!Number.isSafeInteger(lastId) || lastId < 0 || lastId >= Number.MAX_SAFE_INTEGER) {
     throw new RangeError('Ripple signal ID exceeds the safe integer range')
   }
-  latestRippleSignalId += 1
-  return { id: latestRippleSignalId as RippleSignalId, kind }
+  return lastId + 1
 }
 
-export function setRippleSignalIdForTesting(lastId: number) {
-  if (!Number.isSafeInteger(lastId) || lastId < 0 || lastId > Number.MAX_SAFE_INTEGER) {
-    throw new RangeError('Ripple signal ID must be a non-negative safe integer')
-  }
-  latestRippleSignalId = lastId
+export function createRippleSignal(kind: RippleKind): RippleSignal {
+  latestRippleSignalId = nextRippleSignalId(latestRippleSignalId)
+  return { id: latestRippleSignalId as RippleSignalId, kind }
 }
 
 export type RippleState = {
