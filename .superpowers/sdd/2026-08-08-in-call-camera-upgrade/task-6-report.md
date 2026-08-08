@@ -95,3 +95,20 @@ Review-fix focused GREEN:
 - `npm run lint`: clean
 
 The final fresh full sequence also passed: live-media 38/38, realtime 52/52, mobile package 18/18 plus conversation 6/6 and library 5/5, media 15/15, playback 5/5, live-ui 26/26, tool-results 44/44, lint, production build, and `git diff --check`.
+
+## Re-review fix: late media-start activation
+
+A further review identified that session identity alone was insufficient across the awaited `media.start()`: an ended/error session could still occupy `sessionRef` until its React effect ran, allowing a late successful media start to mark camera controls ready and consume the home-video intent.
+
+Added a per-session `createCameraActivationGuard`. At call startup the entry intent is transferred into this guard and the global ref is cleared. `onReady` captures a token only in an allowed live state, awaits media startup, then requires all of the following before readiness or camera intent can commit:
+
+- the same live-call owner and exact session;
+- the same activation token in an allowed state;
+- exact `mediaRef === media` ownership;
+- exact `cameraOrchestratorRef === cameraOrchestrator` ownership.
+
+Idle/connecting/preparing transitions during pending activation, ended/error, `onError`, connection failure, close/leave, logout, auth invalidation, replacement, and unmount invalidate the token and erase its per-session camera intent. A stale fulfillment therefore cannot enable the control or reacquire camera. A replacement session owns an independent guard.
+
+Behavioral tests cover normal home-video one-time consumption, normal voice readiness without camera, pending start followed by ended, pending start followed by error, a pending disallowed-state transition, repeated commit rejection, and old/new session isolation.
+
+Post-fix full verification passed: live-media 44/44, realtime 52/52, mobile package 18/18 plus conversation 6/6 and library 5/5, media 21/21, playback 5/5, live-ui 26/26, tool-results 44/44, lint, production build, and `git diff --check`.

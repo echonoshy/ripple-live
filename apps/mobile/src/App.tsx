@@ -69,6 +69,7 @@ import {
   type LibraryView,
 } from './library'
 import { cameraErrorAfterSwitch, visibleCallError } from './live/callErrors'
+import { createCameraActivationGuard } from './live/cameraActivation'
 import {
   createCameraOrchestrator,
   type CameraPhase,
@@ -273,6 +274,7 @@ export default function App() {
     typeof createMinimumVisibleSignal
   > | null>(null)
   const cameraControlReadyRef = useRef(false)
+  const cameraActivationInvalidatorRef = useRef<(() => void) | null>(null)
   const initialCameraRequestRef = useRef(false)
   const cameraFlipGenerationRef = useRef(0)
   const callLifecycleRef = useRef(createCallLifecycleGuard())
@@ -347,6 +349,8 @@ export default function App() {
         conversationOwnershipRef.current.invalidate()
         cameraOrchestratorRef.current?.invalidate()
         cameraOrchestratorRef.current = null
+        cameraActivationInvalidatorRef.current?.()
+        cameraActivationInvalidatorRef.current = null
         frameRequestVisibilityRef.current?.dispose()
         frameRequestVisibilityRef.current = null
         cameraControlReadyRef.current = false
@@ -550,6 +554,8 @@ export default function App() {
     if (sessionState !== 'ended' && sessionState !== 'error') return
     cameraOrchestratorRef.current?.invalidate()
     cameraOrchestratorRef.current = null
+    cameraActivationInvalidatorRef.current?.()
+    cameraActivationInvalidatorRef.current = null
     frameRequestVisibilityRef.current?.dispose()
     frameRequestVisibilityRef.current = null
     cameraControlReadyRef.current = false
@@ -568,6 +574,8 @@ export default function App() {
   const stopCall = useCallback(async () => {
     cameraOrchestratorRef.current?.invalidate()
     cameraOrchestratorRef.current = null
+    cameraActivationInvalidatorRef.current?.()
+    cameraActivationInvalidatorRef.current = null
     frameRequestVisibilityRef.current?.dispose()
     frameRequestVisibilityRef.current = null
     cameraControlReadyRef.current = false
@@ -661,6 +669,8 @@ export default function App() {
       navigationGuard.invalidate()
       cameraOrchestratorRef.current?.invalidate()
       cameraOrchestratorRef.current = null
+      cameraActivationInvalidatorRef.current?.()
+      cameraActivationInvalidatorRef.current = null
       frameRequestVisibilityRef.current?.dispose()
       frameRequestVisibilityRef.current = null
       cameraControlReadyRef.current = false
@@ -700,6 +710,12 @@ export default function App() {
       setCameraControlReady(false)
       setSessionState('connecting')
 
+      const cameraActivation = createCameraActivationGuard(
+        initialCameraRequestRef.current,
+      )
+      initialCameraRequestRef.current = false
+      cameraActivation.transition('connecting')
+      const invalidateCameraActivation = () => cameraActivation.invalidate()
       let session: RealtimeSession
       let cameraOrchestrator: ReturnType<typeof createCameraOrchestrator>
       let frameRequestVisibility: ReturnType<typeof createMinimumVisibleSignal>
@@ -741,6 +757,7 @@ export default function App() {
         conversationId: activeConversationId ?? undefined,
         mode: 'audio',
         onState: (state) => {
+          cameraActivation.transition(state)
           if (!ownsSession()) return
           if (
             state === 'idle' ||
@@ -755,6 +772,7 @@ export default function App() {
           setSessionState(state)
         },
         onError: (message) => {
+          cameraActivation.invalidate()
           if (!ownsSession()) return
           cameraControlReadyRef.current = false
           setCameraControlReady(false)
@@ -809,6 +827,8 @@ export default function App() {
         onConversation: setActiveConversationId,
         onReady: async () => {
           if (!ownsSession()) return
+          const activationToken = cameraActivation.begin()
+          if (activationToken === null) return
           await media.start((audio) => {
             if (ownsSession()) void session.sendInput(audio)
           }, () => {
@@ -821,14 +841,16 @@ export default function App() {
           }, (level) => {
             if (ownsSession()) setInputLevel(level)
           })
-          if (!ownsSession()) {
-            media.stop()
-            return
-          }
+          const exactResources =
+            mediaRef.current === media &&
+            cameraOrchestratorRef.current === cameraOrchestrator
+          const activation = exactResources && ownsSession()
+            ? cameraActivation.commit(activationToken)
+            : null
+          if (!activation) return
           cameraControlReadyRef.current = true
           setCameraControlReady(true)
-          if (initialCameraRequestRef.current) {
-            initialCameraRequestRef.current = false
+          if (activation.cameraRequested) {
             await cameraOrchestrator.open(cameraFacing)
           }
         },
@@ -871,6 +893,7 @@ export default function App() {
       sessionRef.current = session
       cameraOrchestratorRef.current = cameraOrchestrator
       frameRequestVisibilityRef.current = frameRequestVisibility
+      cameraActivationInvalidatorRef.current = invalidateCameraActivation
 
       try {
         await session.connect()
@@ -886,6 +909,12 @@ export default function App() {
         cameraOrchestrator.invalidate()
         if (cameraOrchestratorRef.current === cameraOrchestrator) {
           cameraOrchestratorRef.current = null
+        }
+        cameraActivation.invalidate()
+        if (
+          cameraActivationInvalidatorRef.current === invalidateCameraActivation
+        ) {
+          cameraActivationInvalidatorRef.current = null
         }
         frameRequestVisibility.dispose()
         if (frameRequestVisibilityRef.current === frameRequestVisibility) {
@@ -1110,6 +1139,8 @@ export default function App() {
     callLifecycleRef.current.invalidate()
     cameraOrchestratorRef.current?.invalidate()
     cameraOrchestratorRef.current = null
+    cameraActivationInvalidatorRef.current?.()
+    cameraActivationInvalidatorRef.current = null
     frameRequestVisibilityRef.current?.dispose()
     frameRequestVisibilityRef.current = null
     cameraControlReadyRef.current = false

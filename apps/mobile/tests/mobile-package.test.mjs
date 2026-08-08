@@ -259,8 +259,10 @@ test('live call owns camera transitions explicitly and renders truthful camera s
   assert.match(appSource, /if \(!cameraControlReadyRef\.current\) return/)
   assert.match(
     appSource,
-    /await media\.start[\s\S]*cameraControlReadyRef\.current = true[\s\S]*if \(initialCameraRequestRef\.current\)/,
+    /const activationToken = cameraActivation\.begin\(\)[\s\S]*await media\.start[\s\S]*cameraActivation\.commit\(activationToken\)/,
   )
+  assert.match(appSource, /mediaRef\.current === media/)
+  assert.match(appSource, /cameraOrchestratorRef\.current === cameraOrchestrator/)
   for (const blockedState of ['idle', 'connecting', 'preparing', 'ended', 'error']) {
     assert.match(appSource, new RegExp(`state === '${blockedState}'`))
   }
