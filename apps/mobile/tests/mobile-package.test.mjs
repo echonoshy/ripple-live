@@ -601,6 +601,46 @@ test('mobile live call renders typed result receipts without unsafe HTML', () =>
   assert.doesNotMatch(callCssSource, /\.live-call-screen\.has-results \.call-controls/)
 })
 
+test('reduced motion preserves static result geometry without transitions or keyframes', () => {
+  const callCssSource = readFileSync(
+    path.join(appRoot, 'src/live/LiveCall.css'),
+    'utf8',
+  )
+  const reducedMotionSource = callCssSource.slice(
+    callCssSource.lastIndexOf('@media (prefers-reduced-motion: reduce)'),
+  )
+
+  assert.match(
+    reducedMotionSource,
+    /\.live-call-screen\.has-results \.live-stage\s*\{[^}]*transform:\s*translateY\(-32px\);[^}]*transition:\s*none;/s,
+  )
+  assert.match(
+    reducedMotionSource,
+    /\.live-call-screen\.has-results \.live-orb-canvas,[\s\S]*?\.live-call-screen\.has-results \.live-orb-fallback\s*\{[^}]*animation:\s*none;[^}]*transform:\s*scale\(0\.70\);[^}]*transition:\s*none;/s,
+  )
+})
+
+test('artifact-only output activates result presentation without moving controls', () => {
+  const callSource = readFileSync(
+    path.join(appRoot, 'src/components/LiveCallScreen.tsx'),
+    'utf8',
+  )
+
+  assert.match(
+    callSource,
+    /const hasOutput = results\.length > 0 \|\| artifacts\.length > 0/,
+  )
+  assert.match(
+    callSource,
+    /className=\{`call-screen live-call-screen[\s\S]*\$\{hasOutput \? 'has-results' : ''\}`\}/,
+  )
+  assert.match(callSource, /\{hasOutput && \(\s*<div className="live-output-tray">/s)
+  const controlsStart = callSource.indexOf('<footer className="call-controls">')
+  const controlsEnd = callSource.indexOf('</footer>', controlsStart)
+  assert.ok(controlsStart >= 0 && controlsEnd > controlsStart)
+  assert.doesNotMatch(callSource.slice(controlsStart, controlsEnd), /hasOutput/)
+})
+
 test('mobile opens live search sources through the native external-browser capability', () => {
   const packageJson = JSON.parse(
     readFileSync(path.join(appRoot, 'package.json'), 'utf8'),

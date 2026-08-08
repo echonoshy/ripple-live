@@ -133,6 +133,7 @@ export function LiveCallScreen({
 }: LiveCallScreenProps) {
   const videoMode = cameraPreviewVisible
   const cameraBusy = cameraPhase === 'opening' || cameraPhase === 'closing'
+  const hasOutput = results.length > 0 || artifacts.length > 0
   const labels = liveCallLabels(state, cameraPhase, toolStatus)
   const headerAction = cameraHeaderAction(
     cameraPhase,
@@ -145,7 +146,7 @@ export function LiveCallScreen({
   } as CSSProperties
   return (
     <section
-      className={`call-screen live-call-screen ${videoMode ? 'has-video' : 'has-audio'} server-${mode} camera-phase-${cameraPhase} ${results.length > 0 ? 'has-results' : ''}`}
+      className={`call-screen live-call-screen ${videoMode ? 'has-video' : 'has-audio'} server-${mode} camera-phase-${cameraPhase} ${hasOutput ? 'has-results' : ''}`}
     >
       <div className="camera-layer" aria-hidden={!videoMode}>
         <video
@@ -235,7 +236,7 @@ export function LiveCallScreen({
         </div>
       </div>
 
-      {(results.length > 0 || artifacts.length > 0) && (
+      {hasOutput && (
         <div className="live-output-tray">
           <LiveResultSheet results={results} onDismiss={onDismissResult} />
           {artifacts.length > 0 && (

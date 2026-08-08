@@ -752,15 +752,21 @@
     animation: none;
   }
 
-  .live-stage,
-  .live-call-screen.has-results .live-stage {
+  .live-stage {
     transform: none;
+    transition: none;
+  }
+
+  .live-call-screen.has-results .live-stage {
+    transform: translateY(-32px);
     transition: none;
   }
 
   .live-call-screen.has-results .live-orb-canvas,
   .live-call-screen.has-results .live-orb-fallback {
-    transform: none;
+    animation: none;
+    transform: scale(0.70);
+    transition: none;
   }
 
   .live-output-tray {
