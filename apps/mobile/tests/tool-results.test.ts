@@ -261,3 +261,150 @@ test('truncates bounded display strings', () => {
     assert.equal(searchResult.items[0]?.snippet.length, 240)
   }
 })
+
+test('rejects sparse displayed todo and search rows', () => {
+  const sparseTodos = new Array(1)
+  const sparseSearchResults = new Array(1)
+
+  assert.deepEqual(
+    parseLiveResult({
+      callId: 'sparse-todos',
+      name: 'list_todos',
+      result: { ok: true, completed: false, todos: sparseTodos },
+    }),
+    {
+      kind: 'generic',
+      callId: 'sparse-todos',
+      label: '待办查询未完成',
+      status: 'error',
+    },
+  )
+  assert.deepEqual(
+    parseLiveResult({
+      callId: 'sparse-search',
+      name: 'web_search',
+      result: { ok: true, data: { results: sparseSearchResults } },
+    }),
+    {
+      kind: 'generic',
+      callId: 'sparse-search',
+      label: '搜索未完成',
+      status: 'error',
+    },
+  )
+})
+
+test('rejects inherited displayed todo and search rows', () => {
+  const inheritedTodos = new Array<unknown>(1)
+  const todoPrototype = Object.create(Array.prototype) as Record<number, unknown>
+  todoPrototype[0] = { title: '继承待办' }
+  Object.setPrototypeOf(inheritedTodos, todoPrototype)
+
+  const inheritedSearchResults = new Array<unknown>(1)
+  const searchPrototype = Object.create(Array.prototype) as Record<number, unknown>
+  searchPrototype[0] = { title: '继承结果', url: 'https://example.com', snippet: '不应展示' }
+  Object.setPrototypeOf(inheritedSearchResults, searchPrototype)
+
+  assert.equal(
+    parseLiveResult({
+      callId: 'inherited-todos',
+      name: 'list_todos',
+      result: { ok: true, completed: false, todos: inheritedTodos },
+    }).kind,
+    'generic',
+  )
+  assert.equal(
+    parseLiveResult({
+      callId: 'inherited-search',
+      name: 'web_search',
+      result: { ok: true, data: { results: inheritedSearchResults } },
+    }).kind,
+    'generic',
+  )
+})
+
+test('ignores sparse rows beyond the display caps', () => {
+  const todos = [
+    { title: '一' },
+    { title: '二' },
+    { title: '三' },
+    { title: '四' },
+    { title: '五' },
+  ]
+  todos.length = 6
+  const searchResults = [
+    { title: 'One', url: 'https://one.example', snippet: 'First' },
+    { title: 'Two', url: 'https://two.example', snippet: 'Second' },
+    { title: 'Three', url: 'https://three.example', snippet: 'Third' },
+  ]
+  searchResults.length = 4
+
+  const todoResult = parseLiveResult({
+    callId: 'capped-todos',
+    name: 'list_todos',
+    result: { ok: true, completed: false, todos },
+  })
+  assert.equal(todoResult.kind, 'todo_list')
+  if (todoResult.kind === 'todo_list') assert.equal(todoResult.titles.length, 5)
+
+  const searchResult = parseLiveResult({
+    callId: 'capped-search',
+    name: 'web_search',
+    result: { ok: true, data: { results: searchResults } },
+  })
+  assert.equal(searchResult.kind, 'search')
+  if (searchResult.kind === 'search') assert.equal(searchResult.items.length, 3)
+})
+
+test('preserves unbounded opaque identifiers exactly', () => {
+  const longCallId = `call-${'c'.repeat(200)}`
+  const longMemoryId = `memory-${'m'.repeat(200)}`
+  const longTodoId = `todo-${'t'.repeat(200)}`
+
+  assert.deepEqual(
+    parseLiveResult({ callId: longCallId, name: 'unknown', result: { ok: true } }),
+    { kind: 'generic', callId: longCallId, label: '操作已完成', status: 'success' },
+  )
+  assert.equal(
+    parseLiveResult({
+      callId: 'long-memory',
+      name: 'remember',
+      result: { ok: true, memory: { id: longMemoryId, user_note: '保留 ID' } },
+    }).memoryId,
+    longMemoryId,
+  )
+  assert.equal(
+    parseLiveResult({
+      callId: 'long-todo',
+      name: 'create_todo',
+      result: { ok: true, todo: { id: longTodoId, title: '保留 ID' } },
+    }).todoId,
+    longTodoId,
+  )
+})
+
+test('keeps display truncation on complete grapheme clusters', () => {
+  const combining = 'e\u0301'
+  const combiningTitle = `${combining.repeat(120)}z`
+  const zwjTitle = `${'a'.repeat(119)}👩‍💻z`
+
+  const combiningResult = parseLiveResult({
+    callId: 'grapheme-combining',
+    name: 'remember',
+    result: { ok: true, memory: { id: 'mem-grapheme-1', user_note: combiningTitle } },
+  })
+  assert.equal(combiningResult.kind, 'memory_receipt')
+  if (combiningResult.kind === 'memory_receipt') {
+    assert.equal(combiningResult.title, combining.repeat(120))
+  }
+
+  const zwjResult = parseLiveResult({
+    callId: 'grapheme-zwj',
+    name: 'remember',
+    result: { ok: true, memory: { id: 'mem-grapheme-2', user_note: zwjTitle } },
+  })
+  assert.equal(zwjResult.kind, 'memory_receipt')
+  if (zwjResult.kind === 'memory_receipt') {
+    assert.equal(zwjResult.title, `${'a'.repeat(119)}👩‍💻`)
+  }
+})

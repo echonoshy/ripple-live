@@ -44,7 +44,6 @@ export type LiveResult =
 
 export type ToolCompletion = { callId: string; name: string; result: unknown }
 
-const MAX_ID_LENGTH = 120
 const MAX_LABEL_LENGTH = 120
 const MAX_TEXT_LENGTH = 120
 const MAX_SNIPPET_LENGTH = 240
@@ -52,13 +51,49 @@ const MAX_URL_LENGTH = 2048
 const MAX_TODO_ROWS = 5
 const MAX_SEARCH_ROWS = 3
 const INVALID_CALL_ID = 'unknown-call'
+const ZERO_WIDTH_JOINER = '\u200D'
+const graphemeExtension = /^(?:\p{Mark}|\p{Emoji_Modifier}|\p{Variation_Selector})$/u
+
+const segmenter =
+  typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+    : null
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function fallbackGraphemes(value: string) {
+  const graphemes: string[] = []
+  let current = ''
+  let joined = false
+  for (const character of value) {
+    if (!current) {
+      current = character
+      continue
+    }
+    if (joined || character === ZERO_WIDTH_JOINER || graphemeExtension.test(character)) {
+      current += character
+      joined = character === ZERO_WIDTH_JOINER
+      continue
+    }
+    graphemes.push(current)
+    current = character
+  }
+  if (current) graphemes.push(current)
+  return graphemes
+}
+
 function truncate(value: string, maximum: number) {
-  return Array.from(value).slice(0, maximum).join('')
+  if (segmenter) {
+    const graphemes: string[] = []
+    for (const item of segmenter.segment(value)) {
+      if (graphemes.length === maximum) break
+      graphemes.push(item.segment)
+    }
+    return graphemes.join('')
+  }
+  return fallbackGraphemes(value).slice(0, maximum).join('')
 }
 
 function displayText(value: unknown, maximum = MAX_TEXT_LENGTH): string | null {
@@ -67,10 +102,18 @@ function displayText(value: unknown, maximum = MAX_TEXT_LENGTH): string | null {
   return trimmed ? truncate(trimmed, maximum) : null
 }
 
+function hasControlCharacter(value: string) {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)
+    if (codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)) return true
+  }
+  return false
+}
+
 function identifier(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
-  if (!trimmed || trimmed !== value || Array.from(value).length > MAX_ID_LENGTH) return null
+  if (!trimmed || hasControlCharacter(value)) return null
   return value
 }
 
@@ -142,17 +185,33 @@ function parseTodo(callId: string, result: Record<string, unknown>): LiveResult 
   return { kind: 'todo_receipt', callId, todoId, title, dueAt, status: 'success' }
 }
 
+function validatedRows<T>(
+  values: unknown[],
+  maximum: number,
+  parse: (value: unknown) => T | null,
+): T[] | null {
+  const count = Math.min(values.length, maximum)
+  const rows: T[] = []
+  for (let index = 0; index < count; index += 1) {
+    if (!Object.hasOwn(values, index)) return null
+    const row = parse(values[index])
+    if (row === null) return null
+    rows.push(row)
+  }
+  return rows
+}
+
 function parseTodoList(callId: string, result: Record<string, unknown>): LiveResult | null {
   if (typeof result.completed !== 'boolean' || !Array.isArray(result.todos)) return null
-  const titles = result.todos.slice(0, MAX_TODO_ROWS).map((todo) => {
+  const titles = validatedRows(result.todos, MAX_TODO_ROWS, (todo) => {
     if (!isRecord(todo)) return null
     return displayText(todo.title)
   })
-  if (titles.some((title) => title === null)) return null
+  if (!titles) return null
   return {
     kind: 'todo_list',
     callId,
-    titles: titles as string[],
+    titles,
     completed: result.completed,
     status: 'success',
   }
@@ -162,15 +221,15 @@ function parseSearch(callId: string, result: Record<string, unknown>): LiveResul
   if (!isRecord(result.data) || !Array.isArray(result.data.results) || result.data.results.length === 0) {
     return null
   }
-  const items = result.data.results.slice(0, MAX_SEARCH_ROWS).map((source) => {
+  const items = validatedRows(result.data.results, MAX_SEARCH_ROWS, (source) => {
     if (!isRecord(source)) return null
     const title = displayText(source.title)
     const url = sourceUrl(source.url)
     const snippet = displayText(source.snippet, MAX_SNIPPET_LENGTH)
     return title && url && snippet ? { title, url, snippet } : null
   })
-  if (items.some((item) => item === null)) return null
-  return { kind: 'search', callId, items: items as Array<{ title: string; url: string; snippet: string }>, status: 'success' }
+  if (!items) return null
+  return { kind: 'search', callId, items, status: 'success' }
 }
 
 function numericTemperature(value: unknown): number | null {
