@@ -2426,7 +2426,9 @@ mod tests {
         http::{Request, header::AUTHORIZATION},
     };
     use ripple_agent_gateway::{
-        adapters::ModelAdapters, memory::CreateMemoryRequest, readiness::check as check_readiness,
+        adapters::ModelAdapters,
+        memory::{CreateMemoryRequest, CreateTodoRequest as MemoryCreateTodoRequest},
+        readiness::check as check_readiness,
     };
     use serde_json::Value;
     use tempfile::TempDir;
@@ -3078,6 +3080,123 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn conversation_message_route_preserves_attachments_and_filters_actions() {
+        let (_directory, state, token, conversation, _) = test_state().await;
+        let user = state.context.authenticate(&token).await.unwrap().unwrap();
+        let turn = state
+            .context
+            .add_turn(&conversation, "user", "记住插头并提醒我", None)
+            .await
+            .unwrap();
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(4, 3)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        let memory = state
+            .memories
+            .create(CreateMemoryRequest {
+                user_id: user.id.clone(),
+                conversation_id: conversation.clone(),
+                source_turn_id: turn,
+                response_id: "route-action-memory-response".to_owned(),
+                tool_call_id: "route-action-memory-call".to_owned(),
+                user_note: "蓝色插头在抽屉".to_owned(),
+                visual_summary: "抽屉里的蓝色插头".to_owned(),
+                frames: vec![VideoFrame {
+                    bytes: jpeg.into_inner(),
+                    mime_type: "image/jpeg".to_owned(),
+                    captured_at_ms: Some(1_700_000_000_000),
+                    received_at_ms: 1_700_000_000_100,
+                }],
+            })
+            .await
+            .unwrap();
+        let cover = memory.memory.cover.clone().unwrap();
+        state
+            .memories
+            .attach_to_turn(turn, std::slice::from_ref(&cover))
+            .await
+            .unwrap();
+        let todo = state
+            .memories
+            .create_todo(MemoryCreateTodoRequest {
+                user_id: user.id.clone(),
+                conversation_id: conversation.clone(),
+                source_turn_id: turn,
+                response_id: "route-action-todo-response".to_owned(),
+                tool_call_id: "route-action-todo-call".to_owned(),
+                title: "周一带充电器".to_owned(),
+                visual_summary: String::new(),
+                due_at: Some(1_900_000_000.0),
+                frames: vec![],
+            })
+            .await
+            .unwrap();
+
+        state
+            .context
+            .seed_invitation_codes(&["route-action-foreign".to_owned()], 1, 24)
+            .await
+            .unwrap();
+        let (foreign_user, _) = state
+            .context
+            .register_user(
+                "route-action-foreign@example.com",
+                "password-route-foreign",
+                "route-action-foreign",
+                24,
+            )
+            .await
+            .unwrap();
+        state
+            .memories
+            .create(CreateMemoryRequest {
+                user_id: foreign_user.id,
+                conversation_id: conversation.clone(),
+                source_turn_id: turn,
+                response_id: "route-action-foreign-response".to_owned(),
+                tool_call_id: "route-action-foreign-call".to_owned(),
+                user_note: "不应泄漏".to_owned(),
+                visual_summary: String::new(),
+                frames: vec![],
+            })
+            .await
+            .unwrap();
+
+        let response = app(state)
+            .oneshot(authenticated_request(
+                "GET",
+                &format!("/v1/conversations/{conversation}/messages"),
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let message = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["id"] == turn)
+            .unwrap();
+        assert_eq!(message["actions"].as_array().unwrap().len(), 2);
+        assert_eq!(message["actions"][0]["kind"], "memory");
+        assert_eq!(message["actions"][0]["target_id"], memory.memory.id);
+        assert_eq!(message["actions"][1]["kind"], "todo");
+        assert_eq!(message["actions"][1]["target_id"], todo.id);
+        assert_eq!(message["actions"][1]["due_at"], 1_900_000_000.0);
+        assert!(!message["actions"].to_string().contains("不应泄漏"));
+        assert_eq!(message["attachments"].as_array().unwrap().len(), 1);
+        assert_eq!(message["attachments"][0]["id"], cover.id);
+        assert_eq!(message["attachments"][0]["kind"], "image");
+        assert_eq!(
+            message["attachments"][0]["content_url"],
+            format!("/v1/assets/{}/content", cover.id)
+        );
     }
 
     #[tokio::test]

@@ -49,6 +49,15 @@ pub struct ConversationMessage {
     pub content: String,
     pub created_at: f64,
     pub attachments: Vec<ConversationAttachment>,
+    pub actions: Vec<ConversationAction>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ConversationAction {
+    pub kind: String,
+    pub target_id: String,
+    pub label: String,
+    pub due_at: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -797,6 +806,7 @@ impl ContextStore {
         let mut messages = Vec::with_capacity(rows.len());
         for row in rows {
             let turn_id: i64 = row.get("id");
+            let role: String = row.get("role");
             let attachment_rows = sqlx::query(
                 "SELECT a.id, ta.memory_id, ta.todo_id, ta.caption
                  FROM turn_attachments ta JOIN assets a ON a.id = ta.asset_id
@@ -806,9 +816,30 @@ impl ContextStore {
             .bind(user_id)
             .fetch_all(&self.pool)
             .await?;
+            let action_rows = if role == "user" {
+                sqlx::query(
+                    "SELECT kind, target_id, label, due_at FROM (
+                        SELECT 'memory' AS kind, id AS target_id, user_note AS label,
+                               NULL AS due_at, 0 AS kind_order, created_at
+                        FROM memory_items WHERE user_id = ? AND source_turn_id = ?
+                        UNION ALL
+                        SELECT 'todo' AS kind, id AS target_id, title AS label,
+                               due_at, 1 AS kind_order, created_at
+                        FROM todos WHERE user_id = ? AND source_turn_id = ?
+                     ) ORDER BY kind_order ASC, created_at ASC, target_id ASC LIMIT 10",
+                )
+                .bind(user_id)
+                .bind(turn_id)
+                .bind(user_id)
+                .bind(turn_id)
+                .fetch_all(&self.pool)
+                .await?
+            } else {
+                Vec::new()
+            };
             messages.push(ConversationMessage {
                 id: turn_id,
-                role: row.get("role"),
+                role,
                 content: row.get("content"),
                 created_at: row.get("created_at"),
                 attachments: attachment_rows
@@ -823,6 +854,15 @@ impl ContextStore {
                             todo_id: attachment.get("todo_id"),
                             caption: attachment.get("caption"),
                         }
+                    })
+                    .collect(),
+                actions: action_rows
+                    .into_iter()
+                    .map(|action| ConversationAction {
+                        kind: action.get("kind"),
+                        target_id: action.get("target_id"),
+                        label: action.get("label"),
+                        due_at: action.get("due_at"),
                     })
                     .collect(),
             });
@@ -1098,6 +1138,125 @@ mod tests {
             store.recall("s1", "乌龙", 5).await.unwrap(),
             vec!["用户喜欢乌龙茶"]
         );
+    }
+
+    #[tokio::test]
+    async fn conversation_messages_include_source_actions() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ContextStore::open(&directory.path().join("actions.sqlite3"))
+            .await
+            .unwrap();
+        let user = registered_user(&store, "actions@example.com", "actions-invite").await;
+        let other =
+            registered_user(&store, "other-actions@example.com", "other-actions-invite").await;
+        let conversation = store.create_conversation(&user.id).await.unwrap();
+        let user_turn = store
+            .add_turn(&conversation, "user", "记住并提醒我", None)
+            .await
+            .unwrap();
+        store
+            .add_turn(&conversation, "assistant", "已经完成", None)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO memory_items(
+                id, user_id, conversation_id, source_turn_id, source_response_id,
+                user_note, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("mem-action")
+        .bind(&user.id)
+        .bind(&conversation)
+        .bind(user_turn)
+        .bind("response-action")
+        .bind("蓝色转接头在书桌抽屉")
+        .bind(2.0)
+        .bind(2.0)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memory_items(
+                id, user_id, conversation_id, source_turn_id, source_response_id,
+                user_note, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("foreign-action")
+        .bind(&other.id)
+        .bind(&conversation)
+        .bind(user_turn)
+        .bind("response-foreign")
+        .bind("不应泄漏")
+        .bind(1.0)
+        .bind(1.0)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO todos(
+                id, user_id, conversation_id, source_turn_id, source_response_id,
+                title, due_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("todo-action")
+        .bind(&user.id)
+        .bind(&conversation)
+        .bind(user_turn)
+        .bind("response-action")
+        .bind("周一带充电器")
+        .bind(1_900_000_000.0)
+        .bind(1.0)
+        .bind(1.0)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let messages = store
+            .conversation_messages(&user.id, &conversation, 20)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(messages[0].actions.len(), 2);
+        assert_eq!(messages[0].actions[0].kind, "memory");
+        assert_eq!(messages[0].actions[1].kind, "todo");
+        assert_eq!(messages[0].actions[1].label, "周一带充电器");
+        assert_eq!(messages[0].actions[1].due_at, Some(1_900_000_000.0));
+        assert!(messages[1].actions.is_empty());
+
+        for index in 0..9 {
+            sqlx::query(
+                "INSERT INTO memory_items(
+                    id, user_id, conversation_id, source_turn_id, source_response_id,
+                    user_note, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(format!("mem-cap-{index}"))
+            .bind(&user.id)
+            .bind(&conversation)
+            .bind(user_turn)
+            .bind(format!("response-cap-{index}"))
+            .bind(format!("记忆 {index}"))
+            .bind(10.0 + f64::from(index))
+            .bind(10.0 + f64::from(index))
+            .execute(store.pool())
+            .await
+            .unwrap();
+        }
+        let capped = store
+            .conversation_messages(&user.id, &conversation, 20)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(capped[0].actions.len(), 10);
+        assert!(
+            capped[0]
+                .actions
+                .iter()
+                .all(|action| action.kind == "memory")
+        );
+        assert_eq!(capped[0].actions[0].target_id, "mem-action");
+        assert_eq!(capped[0].actions[9].target_id, "mem-cap-8");
     }
 
     #[tokio::test]
