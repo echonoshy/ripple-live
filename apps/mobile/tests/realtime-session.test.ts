@@ -5,6 +5,7 @@ import { RealtimeSession } from '../src/realtime/RealtimeSession.ts'
 import type { ToolCompletion } from '../src/realtime/toolResults.ts'
 import {
   REALTIME_PROTOCOL_VERSION,
+  createModeSet,
   createTurnId,
   createRequestedFrameEvents,
   createSessionStart,
@@ -251,10 +252,21 @@ test('a rejected session start closes its transport and ignores late ready', asy
 test('session start declares protocol version and native build', () => {
   const event = createSessionStart('video')
 
-  assert.equal(event.protocol_version, 4)
+  assert.equal(event.protocol_version, 5)
   assert.equal(event.client_build.length > 0, true)
-  assert.equal(REALTIME_PROTOCOL_VERSION, 4)
+  assert.equal(REALTIME_PROTOCOL_VERSION, 5)
   assert.equal('activation_mode' in event, false)
+})
+
+test('protocol v5 creates only strict audio and video mode-set events', () => {
+  assert.deepEqual(createModeSet('video'), {
+    type: 'session.mode.set',
+    mode: 'video',
+  })
+  assert.throws(
+    () => createModeSet('continuous_video' as never),
+    /audio.*video|video.*audio/,
+  )
 })
 
 test('turn ids are non-empty and unique', () => {
@@ -519,13 +531,25 @@ test('contains a tool result callback exception and continues session transport'
   assert.deepEqual(harness.assistantTexts, ['still connected'])
 })
 
-function readySessionHarness() {
+function readySessionHarness({
+  mode = 'audio',
+  onModeChanged = () => {},
+  onFrameRequested = () => null,
+  onFrameRequestState = () => {},
+  modeChangeTimeoutMs,
+}: {
+  mode?: 'audio' | 'video'
+  onModeChanged?: (mode: 'audio' | 'video') => void
+  onFrameRequested?: () => string | null
+  onFrameRequestState?: (active: boolean) => void
+  modeChangeTimeoutMs?: number
+} = {}) {
   const sent: Array<Record<string, unknown>> = []
   const errors: string[] = []
   const session = new RealtimeSession({
     server: '127.0.0.1:8700',
     accessToken: 'test-token',
-    mode: 'audio',
+    mode,
     onState: () => {},
     onError: (message) => errors.push(message),
     onResponseFailed: () => {},
@@ -537,7 +561,10 @@ function readySessionHarness() {
     onAudioDone: () => {},
     onInterrupted: () => {},
     onArtifact: () => {},
-    onFrameRequested: () => null,
+    onFrameRequested,
+    onFrameRequestState,
+    onModeChanged,
+    modeChangeTimeoutMs,
     onReady: async () => {},
     onConversation: () => {},
   })
@@ -562,6 +589,181 @@ function readySessionHarness() {
     errors,
   }
 }
+
+test('setMode resolves only after a matching acknowledgement', async () => {
+  const changedModes: string[] = []
+  const { session, receive, sent } = readySessionHarness({
+    onModeChanged: (mode) => changedModes.push(mode),
+  })
+
+  const changed = session.setMode('video')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(sent.at(-1), { type: 'session.mode.set', mode: 'video' })
+
+  receive({ type: 'session.mode.changed', mode: 'audio' })
+  assert.equal(
+    await Promise.race([
+      changed.then(() => 'resolved'),
+      new Promise((resolve) => setImmediate(() => resolve('waiting'))),
+    ]),
+    'waiting',
+  )
+
+  receive({ type: 'session.mode.changed', mode: 'video' })
+  await changed
+  assert.deepEqual(changedModes, ['audio', 'video'])
+})
+
+test('setMode coalesces the same target and rejects a conflicting target', async () => {
+  const { session, receive, sent } = readySessionHarness()
+
+  const first = session.setMode('video')
+  const same = session.setMode('video')
+  const conflicting = session.setMode('audio')
+  await assert.rejects(conflicting, /切换.*进行|mode change.*pending/i)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(
+    sent.filter((event) => event.type === 'session.mode.set').length,
+    1,
+  )
+
+  receive({ type: 'session.mode.changed', mode: 'video' })
+  await Promise.all([first, same])
+  const alreadyCurrent = session.setMode('video')
+  await alreadyCurrent
+  assert.equal(
+    sent.filter((event) => event.type === 'session.mode.set').length,
+    1,
+  )
+})
+
+test('mode acknowledgement validation is own-property based and total', async () => {
+  const changedModes: string[] = []
+  const { session, receive } = readySessionHarness({
+    onModeChanged: (mode) => changedModes.push(mode),
+  })
+  const changed = session.setMode('video')
+
+  receive(Object.create({ type: 'session.mode.changed', mode: 'video' }))
+  receive({ type: 'session.mode.changed', mode: 'camera' })
+  assert.doesNotThrow(() => {
+    ;(session as unknown as { handleEvent(event: unknown): void }).handleEvent(
+      new Proxy({}, {
+        getOwnPropertyDescriptor() {
+          throw new Error('hostile proxy')
+        },
+      }),
+    )
+  })
+  assert.equal(
+    await Promise.race([
+      changed.then(() => 'resolved'),
+      new Promise((resolve) => setImmediate(() => resolve('waiting'))),
+    ]),
+    'waiting',
+  )
+  assert.deepEqual(changedModes, [])
+
+  receive({ type: 'session.mode.changed', mode: 'video' })
+  await changed
+})
+
+test('mode changes time out deterministically and late acknowledgements are inert', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const changedModes: string[] = []
+  const { session, receive } = readySessionHarness({
+    modeChangeTimeoutMs: 5_000,
+    onModeChanged: (mode) => changedModes.push(mode),
+  })
+  const changed = session.setMode('video')
+  t.mock.timers.tick(5_000)
+  await assert.rejects(changed, /超时|timed out/i)
+
+  receive({ type: 'session.mode.changed', mode: 'video' })
+  assert.deepEqual(changedModes, ['video'])
+  await session.setMode('video')
+})
+
+test('close rejects a pending mode change and clears its timeout', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { session, receive } = readySessionHarness({ modeChangeTimeoutMs: 5_000 })
+  const changed = session.setMode('video')
+
+  await session.close()
+  await assert.rejects(changed, /关闭|closed/i)
+  t.mock.timers.tick(5_000)
+  receive({ type: 'session.mode.changed', mode: 'video' })
+})
+
+test('a correlated server error rejects only the pending mode change', async () => {
+  const { session, receive } = readySessionHarness()
+  const changed = session.setMode('video')
+
+  receive({
+    type: 'error',
+    code: 'invalid_mode',
+    mode: 'video',
+    message: 'mode rejected',
+  })
+
+  await assert.rejects(changed, /mode rejected/)
+})
+
+test('frame request state brackets capture and queueing without reentrant flicker', async () => {
+  const states: boolean[] = []
+  let session!: RealtimeSession
+  let nested = false
+  const harness = readySessionHarness({
+    onFrameRequestState: (active) => states.push(active),
+    onFrameRequested: () => {
+      if (!nested) {
+        nested = true
+        harness.receive({
+          type: 'input.frame.requested',
+          response_id: 'response-nested',
+        })
+      }
+      return 'jpeg-data'
+    },
+  })
+  session = harness.session
+
+  harness.receive({
+    type: 'input.frame.requested',
+    response_id: 'response-outer',
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(states, [true, false])
+  assert.deepEqual(
+    harness.sent.filter((event) => event.type === 'input.video.commit'),
+    [
+      { type: 'input.video.commit', response_id: 'response-nested' },
+      { type: 'input.video.commit', response_id: 'response-outer' },
+    ],
+  )
+  assert.equal(session instanceof RealtimeSession, true)
+})
+
+test('frame request state is restored when capture or callbacks throw', () => {
+  const states: boolean[] = []
+  const { receive, errors, sent } = readySessionHarness({
+    onFrameRequestState: (active) => {
+      states.push(active)
+      if (active) throw new Error('state consumer failed')
+    },
+    onFrameRequested: () => {
+      throw new Error('capture failed')
+    },
+  })
+
+  assert.doesNotThrow(() => {
+    receive({ type: 'input.frame.requested', response_id: 'response-1' })
+  })
+  assert.deepEqual(states, [true, false])
+  assert.deepEqual(errors, ['capture failed'])
+  assert.equal(sent.some((event) => event.type === 'input.video.commit'), false)
+})
 
 test('continue decision waits exactly 1.5 seconds before committing', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })

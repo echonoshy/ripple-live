@@ -89,7 +89,7 @@ test('mobile app keeps the service address out of visible forms', () => {
   assert.doesNotMatch(appSource, /htmlFor="server">服务地址/)
 })
 
-test('mobile uses protocol v4 semantic endpointing', () => {
+test('mobile uses protocol v5 semantic endpointing and mode changes', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const mediaSource = readFileSync(
     path.join(appRoot, 'src/media/LiveMedia.ts'),
@@ -124,7 +124,9 @@ test('mobile uses protocol v4 semantic endpointing', () => {
     appSource,
     /onInterrupted: \(\) => \{\s*if \(ownsSession\(\)\) media\.clearOutput\(\)/,
   )
-  assert.match(protocolSource, /REALTIME_PROTOCOL_VERSION = 4/)
+  assert.match(protocolSource, /REALTIME_PROTOCOL_VERSION = 5/)
+  assert.match(protocolSource, /type: 'session\.mode\.set'/)
+  assert.match(protocolSource, /mode !== 'audio' && mode !== 'video'/)
   assert.match(appSource, /void session\.speechPaused\(\)/)
   assert.doesNotMatch(appSource, /void session\.commitInput\(\)/)
   assert.match(realtimeSource, /setTimeout\(\(\) => \{[\s\S]*?\}, 1_500\)/)

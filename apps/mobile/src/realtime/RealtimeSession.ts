@@ -1,6 +1,7 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core'
 import type { Message as TauriMessage } from '@tauri-apps/plugin-websocket'
 import {
+  createModeSet,
   createRequestedFrameEvents,
   createSessionStart,
   createTurnId,
@@ -40,6 +41,7 @@ type RealtimeEvent = {
   turn_id?: string
   decision?: 'complete' | 'continue' | 'uncertain'
   command?: string
+  mode?: RealtimeMode
 }
 
 export type ResponseArtifact = {
@@ -81,8 +83,41 @@ export type SessionOptions = {
   onInterrupted: () => void
   onArtifact: (artifact: ResponseArtifact) => void
   onFrameRequested: () => string | null
+  onFrameRequestState?: (active: boolean) => void
+  onModeChanged?: (mode: RealtimeMode) => void
+  modeChangeTimeoutMs?: number
   onReady: () => Promise<void>
   onConversation: (conversationId: string) => void
+}
+
+type PendingModeChange = {
+  mode: RealtimeMode
+  promise: Promise<void>
+  resolve: () => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+function ownValue(value: unknown, key: string): unknown {
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
+    return undefined
+  }
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function ownString(value: unknown, key: string): string | undefined {
+  const candidate = ownValue(value, key)
+  return typeof candidate === 'string' ? candidate : undefined
+}
+
+function ownMode(value: unknown): RealtimeMode | undefined {
+  const mode = ownString(value, 'mode')
+  return mode === 'audio' || mode === 'video' ? mode : undefined
 }
 
 function float32ToBase64(samples: Float32Array) {
@@ -185,9 +220,13 @@ export class RealtimeSession {
   private pendingTurnId: string | null = null
   private endpointTimer: ReturnType<typeof setTimeout> | null = null
   private inputClearBarrier: Promise<void> | null = null
+  private currentMode: RealtimeMode
+  private pendingModeChange: PendingModeChange | null = null
+  private frameRequestsActive = 0
 
   constructor(options: SessionOptions) {
     this.options = options
+    this.currentMode = options.mode
     this.conversationId = isNonBlankString(options.conversationId)
       ? options.conversationId
       : null
@@ -218,7 +257,7 @@ export class RealtimeSession {
           await connection.transport.close().catch(() => {})
           return
         }
-        this.transport = connection.transport
+        this.replaceTransport(connection.transport)
         await this.startSession(generation)
         if (!this.isActiveConnection(generation)) return
         connection.activate()
@@ -238,7 +277,7 @@ export class RealtimeSession {
             void transport.close().then(resolve).catch(resolve)
             return
           }
-          this.transport = transport
+          this.replaceTransport(transport)
           void this.startSession(generation)
             .then(() => {
               if (!this.isActiveConnection(generation)) {
@@ -261,12 +300,17 @@ export class RealtimeSession {
           }
         }
         socket.onerror = () => {
-          if (this.isActiveConnection(generation)) reject(new Error(`无法连接 ${url}`))
+          if (this.isActiveConnection(generation)) {
+            const error = new Error(`无法连接 ${url}`)
+            this.rejectPendingModeChange(error)
+            reject(error)
+          }
           else resolve()
         }
         socket.onclose = () => {
           if (this.isActiveConnection(generation)) {
             this.clearEndpointState()
+            this.rejectPendingModeChange(new Error('实时会话已关闭'))
             this.closed = true
             this.connectionGeneration += 1
             this.ready = false
@@ -284,6 +328,13 @@ export class RealtimeSession {
 
   private isActiveConnection(generation: number) {
     return !this.closed && generation === this.connectionGeneration
+  }
+
+  private replaceTransport(transport: Transport) {
+    if (this.transport && this.transport !== transport) {
+      this.rejectPendingModeChange(new Error('实时连接已被替换'))
+    }
+    this.transport = transport
   }
 
   private async startSession(generation: number) {
@@ -377,6 +428,7 @@ export class RealtimeSession {
       this.handleText(message.data)
     } else if (message.type === 'Close' && !this.closed) {
       this.clearEndpointState()
+      this.rejectPendingModeChange(new Error('实时会话已关闭'))
       this.closed = true
       this.ready = false
       this.options.onState('ended')
@@ -385,14 +437,45 @@ export class RealtimeSession {
 
   private handleText(text: string) {
     if (this.closed) return
-    let event: RealtimeEvent
+    let event: unknown
     try {
-      event = JSON.parse(text) as RealtimeEvent
+      event = JSON.parse(text) as unknown
     } catch {
       return
     }
+    this.handleEvent(event)
+  }
 
-    switch (event.type) {
+  private handleEvent(value: unknown) {
+    if (this.closed) return
+    const type = ownString(value, 'type')
+    if (!type) return
+
+    if (type === 'session.mode.changed') {
+      const mode = ownMode(value)
+      if (!mode) return
+      this.currentMode = mode
+      const pending = this.pendingModeChange
+      if (pending?.mode === mode) {
+        this.pendingModeChange = null
+        clearTimeout(pending.timer)
+        pending.resolve()
+      }
+      try {
+        this.options.onModeChanged?.(mode)
+      } catch {
+        // UI callbacks cannot interrupt realtime event processing.
+      }
+      return
+    }
+
+    if (type === 'error') {
+      this.rejectModeChangeForServerError(value)
+    }
+
+    const event = value as RealtimeEvent
+
+    switch (type) {
       case 'session.created':
         if (isNonBlankString(event.conversation_id)) {
           this.conversationId = event.conversation_id
@@ -438,16 +521,25 @@ export class RealtimeSession {
         this.options.onState('listening')
         break
       case 'input.frame.requested': {
-        const frame = this.options.onFrameRequested()
         const responseId = event.response_id
         if (!isNonBlankString(responseId)) {
           this.options.onError('服务端没有提供画面请求标识')
           break
         }
-        void this.sendEvents(
-          createRequestedFrameEvents(responseId, frame, Date.now()),
-          'high',
-        )
+        this.beginFrameRequest()
+        try {
+          const frame = this.options.onFrameRequested()
+          void this.sendEvents(
+            createRequestedFrameEvents(responseId, frame, Date.now()),
+            'high',
+          )
+        } catch (error) {
+          this.options.onError(
+            error instanceof Error ? error.message : '无法捕获请求的画面',
+          )
+        } finally {
+          this.endFrameRequest()
+        }
         break
       }
       case 'input.transcript.final':
@@ -516,6 +608,48 @@ export class RealtimeSession {
         this.options.onError(event.message ?? 'Agent 服务返回错误')
         break
     }
+  }
+
+  private beginFrameRequest() {
+    this.frameRequestsActive += 1
+    if (this.frameRequestsActive !== 1) return
+    try {
+      this.options.onFrameRequestState?.(true)
+    } catch {
+      // UI feedback cannot prevent frame capture.
+    }
+  }
+
+  private endFrameRequest() {
+    this.frameRequestsActive = Math.max(0, this.frameRequestsActive - 1)
+    if (this.frameRequestsActive !== 0) return
+    try {
+      this.options.onFrameRequestState?.(false)
+    } catch {
+      // UI feedback cannot interrupt realtime event processing.
+    }
+  }
+
+  private rejectModeChangeForServerError(value: unknown) {
+    const pending = this.pendingModeChange
+    if (!pending) return
+    const responseId = ownString(value, 'response_id')
+    const mode = ownString(value, 'mode')
+    const code = ownString(value, 'code')
+    const correlated = mode === pending.mode
+    const modeError = code === 'invalid_mode' || code === 'unsupported_protocol'
+    const sessionError = responseId === undefined && mode === undefined
+    if (!correlated && !(modeError && mode === undefined) && !sessionError) return
+    const message = ownString(value, 'message') ?? '服务端拒绝切换会话模式'
+    this.rejectPendingModeChange(new Error(message))
+  }
+
+  private rejectPendingModeChange(error: Error) {
+    const pending = this.pendingModeChange
+    if (!pending) return
+    this.pendingModeChange = null
+    clearTimeout(pending.timer)
+    pending.reject(error)
   }
 
   private isCurrentResponse(event: RealtimeEvent) {
@@ -621,6 +755,9 @@ export class RealtimeSession {
   private async handleSendFailure(error: unknown) {
     if (this.closed) return
     this.clearEndpointState()
+    this.rejectPendingModeChange(
+      error instanceof Error ? error : new Error('实时音视频发送失败'),
+    )
     this.ready = false
     this.closed = true
     this.options.onError(
@@ -745,8 +882,49 @@ export class RealtimeSession {
     return hasActiveOutput
   }
 
+  setMode(mode: RealtimeMode): Promise<void> {
+    if (mode !== 'audio' && mode !== 'video') {
+      return Promise.reject(new TypeError('会话模式只支持 audio 或 video'))
+    }
+    const pending = this.pendingModeChange
+    if (pending) {
+      if (pending.mode === mode) return pending.promise
+      return Promise.reject(new Error('另一个模式切换正在进行'))
+    }
+    if (this.currentMode === mode) return Promise.resolve()
+    if (!this.transport || !this.ready || this.closed) {
+      return Promise.reject(new Error('实时会话尚未就绪或已关闭'))
+    }
+
+    let resolvePending!: () => void
+    let rejectPending!: (error: Error) => void
+    const promise = new Promise<void>((resolve, reject) => {
+      resolvePending = resolve
+      rejectPending = reject
+    })
+    const timeoutMs = this.options.modeChangeTimeoutMs ?? 5_000
+    const timer = setTimeout(() => {
+      this.rejectPendingModeChange(new Error('切换会话模式超时'))
+    }, timeoutMs)
+    this.pendingModeChange = {
+      mode,
+      promise,
+      resolve: resolvePending,
+      reject: rejectPending,
+      timer,
+    }
+    void this.sendEvent(createModeSet(mode), 'high', (error) => {
+      const failure =
+        error instanceof Error ? error : new Error('发送模式切换请求失败')
+      this.rejectPendingModeChange(failure)
+      void this.handleSendFailure(failure)
+    }).catch(() => {})
+    return promise
+  }
+
   async close() {
     this.clearEndpointState()
+    this.rejectPendingModeChange(new Error('实时会话已关闭'))
     this.connectionGeneration += 1
     if (this.closed) return
     this.closed = true
