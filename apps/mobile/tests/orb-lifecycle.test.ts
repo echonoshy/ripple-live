@@ -5,6 +5,7 @@ import {
   type OrbLifecycleState,
 } from '../src/live/orbLifecycle.ts'
 import type { OrbRenderer } from '../src/live/orbRenderer.ts'
+import type { RippleSignal } from '../src/live/ripple.ts'
 
 type GlobalKey =
   | 'window'
@@ -102,6 +103,7 @@ function createHarness() {
       outputLevel: 0,
       reducedMotion: false,
       qualityTier: 'high',
+      rippleSignal: null,
     },
   }
   return {
@@ -115,6 +117,36 @@ function createHarness() {
     onFallback: () => { fallbacks += 1 },
   }
 }
+
+test('dense speech signals start only the first outward ripple', () => {
+  const browser = installBrowserFakes(false, { captureFrames: true })
+  const harness = createHarness()
+  const updates: Parameters<OrbRenderer['update']>[0][] = []
+  harness.renderer.update = (frame) => updates.push(frame)
+  const signal = (id: number): RippleSignal => ({ id, kind: 'speech' } as RippleSignal)
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    harness.latestProps.current.rippleSignal = signal(1)
+    runNextFrame(browser, 1000)
+    harness.latestProps.current.rippleSignal = signal(2)
+    runNextFrame(browser, 1300)
+    runNextFrame(browser, 1701)
+
+    assert.equal(updates[0]?.rippleProgress, 0)
+    assert.ok((updates[1]?.rippleProgress ?? -1) > 0)
+    assert.equal(updates[2]?.rippleProgress, null)
+    assert.equal(updates.filter((frame) => frame.rippleProgress === 0).length, 1)
+    cleanup()
+  } finally {
+    browser.restore()
+  }
+})
 
 function runNextFrame(
   browser: ReturnType<typeof installBrowserFakes>,

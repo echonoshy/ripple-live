@@ -1,6 +1,11 @@
 import type { OrbRenderer } from './orbRenderer'
 import type { QualityTier, VisualState } from './motion'
 import { nextQualityTier } from './motion'
+import {
+  advanceRipple,
+  createRippleState,
+  type RippleSignal,
+} from './ripple'
 
 export type OrbLifecycleState = {
   current: {
@@ -9,6 +14,7 @@ export type OrbLifecycleState = {
     outputLevel: number
     reducedMotion: boolean
     qualityTier: QualityTier
+    rippleSignal: RippleSignal | null
   }
 }
 
@@ -64,6 +70,7 @@ export function startOrbLifecycle(
   let lastRenderedAt: number | null = null
   let nextRenderDeadline: number | null = null
   let lastAnimationFrameAt: number | null = null
+  let rippleState = createRippleState()
 
   const safely = (operation: () => void) => {
     try {
@@ -214,7 +221,20 @@ export function startOrbLifecycle(
       }
 
       if (resumed || shouldRender(nowMs)) {
-        renderer.update({ ...latestProps.current, nowMs })
+        const ripple = advanceRipple(rippleState, {
+          signal: latestProps.current.rippleSignal,
+          visualState: latestProps.current.state,
+          outputLevel: latestProps.current.outputLevel,
+          reducedMotion: latestProps.current.reducedMotion,
+        }, nowMs)
+        rippleState = ripple.state
+        renderer.update({
+          ...latestProps.current,
+          nowMs,
+          rippleProgress: ripple.frame.progress,
+          rippleAlpha: ripple.frame.alpha,
+          haloPulse: ripple.frame.haloPulse,
+        })
       }
       frame = requestAnimationFrame(draw)
     } catch {

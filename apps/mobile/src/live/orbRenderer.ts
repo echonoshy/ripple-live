@@ -27,47 +27,86 @@ uniform float uInput;
 uniform float uOutput;
 uniform float uEnergy;
 uniform float uGeometryEnergy;
+uniform float uRippleProgress;
+uniform float uRippleAlpha;
+uniform float uHaloPulse;
 uniform vec2 uResolution;
 uniform int uState;
 uniform int uQuality;
 uniform int uReducedMotion;
 out vec4 outColor;
 
-float ball(vec2 p, vec2 c, float r) {
-  return r * r / max(dot(p - c, p - c), 0.002);
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float noise(vec2 p) {
+  vec2 cell = floor(p);
+  vec2 local = fract(p);
+  vec2 blend = local * local * (3.0 - 2.0 * local);
+  return mix(
+    mix(hash(cell), hash(cell + vec2(1.0, 0.0)), blend.x),
+    mix(hash(cell + vec2(0.0, 1.0)), hash(cell + vec2(1.0)), blend.x),
+    blend.y
+  );
+}
+
+float fbm(vec2 p) {
+  float value = 0.0;
+  float amplitude = 0.5;
+  mat2 rotation = mat2(0.80, -0.60, 0.60, 0.80);
+  for (int octave = 0; octave < 5; octave++) {
+    if (uQuality == 0 && octave >= 3) break;
+    value += noise(p) * amplitude;
+    p = rotation * p * 2.03 + vec2(13.7, 7.9);
+    amplitude *= 0.5;
+  }
+  return value;
 }
 
 void main() {
-  vec2 p = (gl_FragCoord.xy * 2.0 - uResolution) / uResolution.y;
+  vec2 uv = (gl_FragCoord.xy * 2.0 - uResolution) / uResolution.y;
+  float radius = 0.52;
+  float distanceToCore = length(uv);
+  float coreMask = 1.0 - smoothstep(radius - 0.012, radius + 0.008, distanceToCore);
   float appearanceEnergy = clamp(uEnergy, 0.0, 1.0);
-  float motion = uReducedMotion == 1 ? 0.0 : 1.0;
   float geometryEnergy = uReducedMotion == 1 ? 0.0 : uGeometryEnergy;
-  float t = uTime * (0.42 + geometryEnergy * 1.2) * motion;
-  float field = ball(p, vec2(0.0), 0.48 + geometryEnergy * 0.05);
-  field += ball(p, vec2(cos(t), sin(t)) * 0.22, 0.25);
-  field += ball(p, vec2(cos(t + 2.1), sin(t + 2.1)) * 0.20, 0.23);
-  field += ball(p, vec2(cos(t + 4.2), sin(t + 4.2)) * 0.21, 0.24);
-  // High quality adds fine field detail; low quality evaluates only the core body.
-  if (uQuality == 1) {
-    field += ball(p, vec2(cos(t * 0.7 + 1.0), sin(t * 0.7 + 1.0)) * 0.27, 0.15);
-    field += ball(p, vec2(cos(t * 0.8 + 3.5), sin(t * 0.8 + 3.5)) * 0.26, 0.14);
-  }
-  float body = smoothstep(1.35, 1.65, field);
-  float edge = smoothstep(1.05, 1.45, field) - body;
-  float highlight = exp(-8.0 * dot(p - vec2(-0.18, 0.22), p - vec2(-0.18, 0.22)));
-  vec3 deep = vec3(0.063, 0.231, 0.38);
-  vec3 mid = vec3(0.298, 0.659, 0.886);
-  vec3 ice = vec3(0.88, 0.97, 1.0);
+  float slowTime = uReducedMotion == 1 ? 0.0 : uTime;
+  float stateSpeed = uState == 3 ? 1.04 : (uState == 5 ? 1.08 : 1.0);
+  slowTime *= mix(0.88, 1.12, geometryEnergy) * stateSpeed;
+  float cloud = fbm(uv * 2.7 + vec2(slowTime * 0.07, -slowTime * 0.05));
+  float ribbon = fbm(uv * 4.1 + vec2(-slowTime * 0.11, slowTime * 0.08));
+  float highlight = exp(-10.0 * dot(uv - vec2(-0.18, 0.22), uv - vec2(-0.18, 0.22)));
+  float dawnReflection = (1.0 - smoothstep(-0.44, 0.08, uv.y))
+    * (1.0 - smoothstep(0.12, radius, distanceToCore))
+    * smoothstep(0.48, 0.82, ribbon);
+  vec3 deep = vec3(0.039, 0.180, 0.459);
+  vec3 cobalt = vec3(0.184, 0.467, 0.902);
+  vec3 softBlue = vec3(0.608, 0.765, 1.0);
+  vec3 cream = vec3(1.0, 0.965, 0.914);
+  vec3 dawn = mix(vec3(1.0, 0.898, 0.863), vec3(0.753, 0.788, 1.0), 0.45);
+  vec3 color = mix(deep, cobalt, smoothstep(0.22, 0.82, cloud));
+  color = mix(color, softBlue, smoothstep(0.58, 0.92, ribbon) * 0.42);
+  color = mix(color, cream, highlight * 0.58);
+  color = mix(color, dawn, dawnReflection * 0.08);
   float brightness = mix(0.94, 1.06, appearanceEnergy);
-  float highlightStrength = mix(0.78, 0.88, appearanceEnergy);
-  float edgeIntensity = mix(0.40, 0.48, appearanceEnergy);
-  float edgeAlpha = mix(0.50, 0.58, appearanceEnergy);
-  vec3 color = mix(deep, mid, clamp(field - 1.2, 0.0, 1.0));
-  color = mix(color, ice, highlight * body * highlightStrength);
-  outColor = vec4(
-    (color * body + mid * edge * edgeIntensity) * brightness,
-    body + edge * edgeAlpha
-  );
+  float stateBrightness = uState == 1 ? 0.94 : (uState == 5 ? 1.04 : 1.0);
+
+  float halo = exp(-52.0 * pow(max(distanceToCore - radius, 0.0), 2.0));
+  float p = clamp(uRippleProgress, 0.0, 1.0);
+  float eased = 1.0 - pow(1.0 - p, 3.0);
+  float ringRadius = radius * mix(1.03, 1.28, eased);
+  float ringWidth = mix(0.010, 0.038, p);
+  float ring = exp(-pow((distanceToCore - ringRadius) / ringWidth, 2.0));
+  float haloAlpha = mix(0.04, 0.06, clamp(uEnergy + uHaloPulse, 0.0, 1.0));
+  float ringAlpha = uRippleProgress < 0.0 ? 0.0 : ring * uRippleAlpha;
+
+  float outerHaloAlpha = halo * haloAlpha * (1.0 - coreMask);
+  float alpha = clamp(coreMask + outerHaloAlpha + ringAlpha, 0.0, 1.0);
+  vec3 premultipliedColor = clamp(color * brightness * stateBrightness, 0.0, 1.0) * coreMask;
+  premultipliedColor += softBlue * outerHaloAlpha;
+  premultipliedColor += cream * ringAlpha;
+  outColor = vec4(premultipliedColor, alpha);
 }`
 
 export type OrbFrame = {
@@ -76,6 +115,9 @@ export type OrbFrame = {
   outputLevel: number
   reducedMotion: boolean
   qualityTier: QualityTier
+  rippleProgress: number | null
+  rippleAlpha: number
+  haloPulse: number
   nowMs: number
 }
 
@@ -148,6 +190,9 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
       output: gl.getUniformLocation(program, 'uOutput'),
       energy: gl.getUniformLocation(program, 'uEnergy'),
       geometryEnergy: gl.getUniformLocation(program, 'uGeometryEnergy'),
+      rippleProgress: gl.getUniformLocation(program, 'uRippleProgress'),
+      rippleAlpha: gl.getUniformLocation(program, 'uRippleAlpha'),
+      haloPulse: gl.getUniformLocation(program, 'uHaloPulse'),
       state: gl.getUniformLocation(program, 'uState'),
       quality: gl.getUniformLocation(program, 'uQuality'),
       reducedMotion: gl.getUniformLocation(program, 'uReducedMotion'),
@@ -190,6 +235,17 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
       gl.uniform1f(uniforms.output, clamp(frame.outputLevel, 0, 1))
       gl.uniform1f(uniforms.energy, energy)
       gl.uniform1f(uniforms.geometryEnergy, frame.reducedMotion ? 0 : energy)
+      gl.uniform1f(
+        uniforms.rippleProgress,
+        frame.reducedMotion || frame.rippleProgress === null
+          ? -1
+          : clamp(frame.rippleProgress, 0, 1),
+      )
+      gl.uniform1f(
+        uniforms.rippleAlpha,
+        frame.reducedMotion ? 0 : clamp(frame.rippleAlpha, 0, 1),
+      )
+      gl.uniform1f(uniforms.haloPulse, clamp(frame.haloPulse, 0, 1))
       gl.uniform1i(uniforms.state, STATE_INDEX[frame.state])
       gl.uniform1i(uniforms.quality, frame.qualityTier === 'high' ? 1 : 0)
       gl.uniform1i(uniforms.reducedMotion, frame.reducedMotion ? 1 : 0)

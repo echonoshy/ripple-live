@@ -67,6 +67,9 @@ const reducedFrame = (inputLevel: number, nowMs: number): OrbFrame => ({
   outputLevel: 0,
   reducedMotion: true,
   qualityTier: 'low',
+  rippleProgress: null,
+  rippleAlpha: 0,
+  haloPulse: 0,
   nowMs,
 })
 
@@ -78,12 +81,58 @@ test('reduced motion freezes geometry uniforms while brightness energy remains l
 
   assert.deepEqual(gl.floatUniforms.get('uTime'), [0, 0])
   assert.deepEqual(gl.floatUniforms.get('uGeometryEnergy'), [0, 0])
+  assert.deepEqual(gl.floatUniforms.get('uRippleProgress'), [-1, -1])
   const energy = gl.floatUniforms.get('uEnergy')
   assert.ok(energy)
   assert.notEqual(energy[0], energy[1])
 })
 
-test('fragment shader consumes clamped energy only through appearance output', () => {
+test('fragment shader uses the stable warm circular material instead of metaballs', () => {
+  const { gl } = createHarness()
+
+  assert.match(gl.fragmentSource, /uniform float uRippleProgress;/)
+  assert.match(gl.fragmentSource, /uniform float uRippleAlpha;/)
+  assert.match(gl.fragmentSource, /uniform float uHaloPulse;/)
+  assert.match(gl.fragmentSource, /float radius = 0\.52;/)
+  assert.match(
+    gl.fragmentSource,
+    /float coreMask = 1\.0 - smoothstep\(radius - 0\.012, radius \+ 0\.008, distanceToCore\);/,
+  )
+  assert.match(gl.fragmentSource, /vec3 deep = vec3\(0\.039, 0\.180, 0\.459\);/)
+  assert.match(gl.fragmentSource, /vec3 cobalt = vec3\(0\.184, 0\.467, 0\.902\);/)
+  assert.match(gl.fragmentSource, /vec3 softBlue = vec3\(0\.608, 0\.765, 1\.0\);/)
+  assert.match(gl.fragmentSource, /vec3 cream = vec3\(1\.0, 0\.965, 0\.914\);/)
+  assert.match(gl.fragmentSource, /color = mix\(color, dawn, dawnReflection \* 0\.08\);/)
+  assert.doesNotMatch(gl.fragmentSource, /float ball\(/)
+})
+
+test('fragment shader composites one eased outward ring and near halo', () => {
+  const { gl } = createHarness()
+
+  assert.match(gl.fragmentSource, /float halo = exp\(-52\.0 \* pow\(max\(distanceToCore - radius, 0\.0\), 2\.0\)\);/)
+  assert.match(gl.fragmentSource, /float eased = 1\.0 - pow\(1\.0 - p, 3\.0\);/)
+  assert.match(gl.fragmentSource, /float ringRadius = radius \* mix\(1\.03, 1\.28, eased\);/)
+  assert.match(gl.fragmentSource, /float ringWidth = mix\(0\.010, 0\.038, p\);/)
+  assert.match(gl.fragmentSource, /float ringAlpha = uRippleProgress < 0\.0 \? 0\.0 : ring \* uRippleAlpha;/)
+})
+
+test('renderer forwards ripple and halo frame values to the single shader pass', () => {
+  const { gl, renderer } = createHarness()
+
+  renderer.update({
+    ...reducedFrame(0.4, 1000),
+    reducedMotion: false,
+    rippleProgress: 0.35,
+    rippleAlpha: 0.08,
+    haloPulse: 0.6,
+  })
+
+  assert.deepEqual(gl.floatUniforms.get('uRippleProgress'), [0.35])
+  assert.deepEqual(gl.floatUniforms.get('uRippleAlpha'), [0.08])
+  assert.deepEqual(gl.floatUniforms.get('uHaloPulse'), [0.6])
+})
+
+test('fragment shader keeps energy-driven changes inside the fixed silhouette', () => {
   const { gl } = createHarness()
 
   assert.match(
@@ -94,14 +143,10 @@ test('fragment shader consumes clamped energy only through appearance output', (
     gl.fragmentSource,
     /float brightness = mix\(0\.94, 1\.06, appearanceEnergy\);/,
   )
-  assert.match(
-    gl.fragmentSource,
-    /outColor = vec4\([^;]*brightness,[^;]*edgeAlpha\s*\);/,
-  )
 
-  const geometry = gl.fragmentSource.slice(
-    gl.fragmentSource.indexOf('float geometryEnergy'),
-    gl.fragmentSource.indexOf('float body'),
+  const silhouette = gl.fragmentSource.slice(
+    gl.fragmentSource.indexOf('float radius'),
+    gl.fragmentSource.indexOf('float appearanceEnergy'),
   )
-  assert.doesNotMatch(geometry, /\buEnergy\b|\bappearanceEnergy\b/)
+  assert.doesNotMatch(silhouette, /\buEnergy\b|\bgeometryEnergy\b|\bappearanceEnergy\b/)
 })

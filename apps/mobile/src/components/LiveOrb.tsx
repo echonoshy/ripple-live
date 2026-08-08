@@ -9,12 +9,14 @@ import {
   type OrbRenderer,
 } from '../live/orbRenderer'
 import { startOrbLifecycle } from '../live/orbLifecycle'
+import type { RippleSignal } from '../live/ripple'
 import '../live/LiveCall.css'
 
 export type LiveOrbProps = {
   state: VisualState
   inputLevel: number
   outputLevel: number
+  rippleSignal?: RippleSignal | null
 }
 
 export function LiveOrb(props: LiveOrbProps) {
@@ -27,10 +29,12 @@ export function LiveOrb(props: LiveOrbProps) {
     outputLevel: props.outputLevel,
     reducedMotion: false,
     qualityTier: 'high' as QualityTier,
+    rippleSignal: props.rippleSignal ?? null,
   })
   latestProps.current.state = props.state
   latestProps.current.inputLevel = props.inputLevel
   latestProps.current.outputLevel = props.outputLevel
+  latestProps.current.rippleSignal = props.rippleSignal ?? null
 
   const previousState = previousVisualStateRef.current
   const interruptionRelease = isInterruptionRelease(previousState, props.state)

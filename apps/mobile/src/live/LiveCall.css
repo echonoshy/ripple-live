@@ -5,7 +5,7 @@
   max-width: 100%;
   aspect-ratio: 1;
   border-radius: 50%;
-  background: #07080c;
+  background: transparent;
   opacity: 1;
   transform: scale(0.94);
   transform-origin: center;
@@ -17,13 +17,22 @@
 }
 
 .live-orb-fallback {
+  position: relative;
+  isolation: isolate;
   background:
     radial-gradient(circle at 38% 32%, #fff6e9 0 4%, #9bc3ff 12%, transparent 31%),
-    radial-gradient(circle at 50% 45%, #9bc3ff 0 23%, #2f77e6 48%, #0a2e75 67%, transparent 69%),
-    #07080c;
+    radial-gradient(circle at 50% 50%, #9bc3ff 0 24%, #2f77e6 49%, #0a2e75 67%, transparent 68%);
   box-shadow:
-    0 0 36px rgb(76 168 226 / 36%),
-    inset -18px -22px 36px rgb(16 59 97 / 56%);
+    inset -18px -22px 36px rgb(10 46 117 / 56%);
+}
+
+.live-orb-fallback::after {
+  position: absolute;
+  z-index: -1;
+  inset: 13%;
+  border-radius: 50%;
+  box-shadow: 0 0 30px 14px rgb(155 195 255 / 18%);
+  content: '';
 }
 
 .live-orb-canvas.is-connecting,
