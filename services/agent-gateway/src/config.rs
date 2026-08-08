@@ -32,8 +32,6 @@ pub struct Settings {
     pub max_tool_rounds: usize,
     pub skills_dir: PathBuf,
     pub cli_max_output_bytes: usize,
-    pub meeting_max_chunk_bytes: u64,
-    pub ffmpeg_bin: PathBuf,
     pub search_proxy: String,
     pub invite_codes: Vec<String>,
     pub invite_max_uses: i64,
@@ -116,8 +114,6 @@ impl Settings {
             max_tool_rounds: parsed("MAX_TOOL_ROUNDS", 6),
             skills_dir: PathBuf::from(value("SKILLS_DIR", "skills")),
             cli_max_output_bytes: parsed("CLI_MAX_OUTPUT_BYTES", 256 * 1024),
-            meeting_max_chunk_bytes: parsed("MEETING_MAX_CHUNK_BYTES", 2 * 1024 * 1024),
-            ffmpeg_bin: PathBuf::from(value("FFMPEG_BIN", "ffmpeg")),
             search_proxy: value("SEARCH_PROXY", ""),
             invite_codes: value("INVITE_CODES", "")
                 .split(',')

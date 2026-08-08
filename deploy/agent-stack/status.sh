@@ -20,13 +20,6 @@ for name in asr agent tts gateway; do
 done
 
 echo
-if command -v "${RIPPLE_FFMPEG_BIN:-ffmpeg}" >/dev/null 2>&1; then
-  echo "ffmpeg: available"
-else
-  echo "ffmpeg: unavailable"
-fi
-
-echo
 if curl --silent --fail --max-time 2 "http://127.0.0.1:8700/health" >/dev/null; then
   echo "gateway liveness: ok"
 else

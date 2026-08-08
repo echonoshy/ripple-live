@@ -906,10 +906,6 @@ impl ContextStore {
         Ok(result.last_insert_rowid())
     }
 
-    pub fn pool_clone(&self) -> SqlitePool {
-        self.pool.clone()
-    }
-
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }

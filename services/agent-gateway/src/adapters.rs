@@ -1,13 +1,9 @@
 use std::{f32::consts::PI, pin::Pin};
 
 #[cfg(test)]
-use std::{
-    collections::VecDeque,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use anyhow::Context;
@@ -41,70 +37,6 @@ pub(crate) struct EndpointingTestAdapter {
     transcript: Result<String, String>,
     classifier: Result<String, String>,
     classifier_calls: Arc<AtomicUsize>,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-struct TranscriptionTestAdapter {
-    results: Arc<Mutex<VecDeque<Result<String, String>>>>,
-    delay: Duration,
-    probe: TranscriptionTestProbe,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-struct MeetingOrganizationTestAdapter {
-    results: Arc<Mutex<VecDeque<Result<ResponsesOutput, String>>>>,
-    requests: Arc<Mutex<Vec<Value>>>,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct MeetingOrganizationTestProbe {
-    requests: Arc<Mutex<Vec<Value>>>,
-}
-
-#[cfg(test)]
-impl MeetingOrganizationTestProbe {
-    pub(crate) fn requests(&self) -> Vec<Value> {
-        self.requests
-            .lock()
-            .expect("meeting organization request probe poisoned")
-            .clone()
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct TranscriptionTestProbe {
-    attempts: Arc<AtomicUsize>,
-    active: Arc<AtomicUsize>,
-    maximum_active: Arc<AtomicUsize>,
-}
-
-#[cfg(test)]
-impl TranscriptionTestProbe {
-    pub(crate) fn attempts(&self) -> usize {
-        self.attempts.load(Ordering::SeqCst)
-    }
-
-    pub(crate) fn active(&self) -> usize {
-        self.active.load(Ordering::SeqCst)
-    }
-
-    pub(crate) fn maximum_active(&self) -> usize {
-        self.maximum_active.load(Ordering::SeqCst)
-    }
-}
-
-#[cfg(test)]
-struct ActiveTranscriptionGuard(TranscriptionTestProbe);
-
-#[cfg(test)]
-impl Drop for ActiveTranscriptionGuard {
-    fn drop(&mut self) {
-        self.0.active.fetch_sub(1, Ordering::SeqCst);
-    }
 }
 
 fn agent_rejection_summary(body: &str) -> String {
@@ -333,10 +265,6 @@ pub struct ModelAdapters {
     client: reqwest::Client,
     #[cfg(test)]
     endpointing_test: Option<EndpointingTestAdapter>,
-    #[cfg(test)]
-    transcription_test: Option<TranscriptionTestAdapter>,
-    #[cfg(test)]
-    meeting_organization_test: Option<MeetingOrganizationTestAdapter>,
 }
 
 impl ModelAdapters {
@@ -351,10 +279,6 @@ impl ModelAdapters {
             client,
             #[cfg(test)]
             endpointing_test: None,
-            #[cfg(test)]
-            transcription_test: None,
-            #[cfg(test)]
-            meeting_organization_test: None,
         })
     }
 
@@ -374,152 +298,7 @@ impl ModelAdapters {
         Ok((adapters, classifier_calls))
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_transcription_test_results(
-        settings: Settings,
-        results: Vec<Result<String, String>>,
-        delay: Duration,
-    ) -> anyhow::Result<(Self, TranscriptionTestProbe)> {
-        let probe = TranscriptionTestProbe::default();
-        let mut adapters = Self::new(settings)?;
-        adapters.transcription_test = Some(TranscriptionTestAdapter {
-            results: Arc::new(Mutex::new(results.into())),
-            delay,
-            probe: probe.clone(),
-        });
-        Ok((adapters, probe))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_meeting_organization_test_results(
-        settings: Settings,
-        results: Vec<Result<ResponsesOutput, String>>,
-    ) -> anyhow::Result<(Self, MeetingOrganizationTestProbe)> {
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let probe = MeetingOrganizationTestProbe {
-            requests: Arc::clone(&requests),
-        };
-        let mut adapters = Self::new(settings)?;
-        adapters.meeting_organization_test = Some(MeetingOrganizationTestAdapter {
-            results: Arc::new(Mutex::new(results.into())),
-            requests,
-        });
-        Ok((adapters, probe))
-    }
-
-    pub async fn summarize_meeting_section(&self, section: &str) -> anyhow::Result<String> {
-        let body = responses_request_body(
-            &self.settings.agent_model,
-            &[json!({
-                "role": "user",
-                "content": [{"type": "input_text", "text": section}]
-            })],
-            &[],
-            json!("none"),
-            "概括这段带时间范围的会议逐字稿，保留决定、行动项及其时间范围。只输出简洁文本，不调用工具。",
-            0.0,
-            self.settings.agent_max_tokens.min(1024),
-            false,
-            Some("none"),
-        );
-        let output = self.execute_meeting_response(body).await?;
-        if !output.function_calls.is_empty() || output.text.trim().is_empty() {
-            anyhow::bail!("meeting section summary was not plain non-empty text");
-        }
-        Ok(output.text.trim().to_owned())
-    }
-
-    pub async fn organize_meeting_artifact(
-        &self,
-        organized_input: &str,
-    ) -> anyhow::Result<ResponsesOutput> {
-        let tool = meeting_artifact_tool();
-        let body = responses_request_body(
-            &self.settings.agent_model,
-            &[json!({
-                "role": "user",
-                "content": [{"type": "input_text", "text": organized_input}]
-            })],
-            &[tool],
-            json!({"type": "function", "name": "save_meeting_artifact"}),
-            "根据会议逐字稿或分段摘要生成会议标题、摘要和会议内待办。必须且只能调用 save_meeting_artifact 一次，不得输出文本，不得调用任何其他工具。",
-            0.0,
-            self.settings.agent_max_tokens.max(2048),
-            false,
-            Some("none"),
-        );
-        self.execute_meeting_response(body).await
-    }
-
-    async fn execute_meeting_response(&self, body: Value) -> anyhow::Result<ResponsesOutput> {
-        #[cfg(test)]
-        if let Some(test) = &self.meeting_organization_test {
-            test.requests
-                .lock()
-                .expect("meeting organization request probe poisoned")
-                .push(body);
-            return test
-                .results
-                .lock()
-                .expect("meeting organization result queue poisoned")
-                .pop_front()
-                .unwrap_or_else(|| Err("meeting organization test queue exhausted".to_owned()))
-                .map_err(anyhow::Error::msg);
-        }
-        if self.settings.agent_backend == "mock" {
-            if body.get("tool_choice") == Some(&json!("none")) {
-                return Ok(ResponsesOutput {
-                    text: "会议分段内容已整理。".to_owned(),
-                    function_calls: Vec::new(),
-                    output_items: Vec::new(),
-                });
-            }
-            return Ok(ResponsesOutput {
-                text: String::new(),
-                function_calls: vec![FunctionCall {
-                    call_id: "meeting-mock".to_owned(),
-                    name: "save_meeting_artifact".to_owned(),
-                    arguments: serde_json::to_string(&json!({
-                        "title": "会议记录",
-                        "summary": "会议内容已完成整理。",
-                        "todos": []
-                    }))?,
-                }],
-                output_items: Vec::new(),
-            });
-        }
-        let response = self
-            .client
-            .post(&self.settings.agent_url)
-            .bearer_auth(&self.settings.agent_api_key)
-            .json(&body)
-            .send()
-            .await?;
-        let response = require_agent_success(response).await?;
-        parse_responses_output(&response.json::<Value>().await?)
-    }
-
     pub async fn transcribe(&self, samples: &[f32]) -> anyhow::Result<String> {
-        #[cfg(test)]
-        if let Some(test) = &self.transcription_test {
-            test.probe.attempts.fetch_add(1, Ordering::SeqCst);
-            let active = test.probe.active.fetch_add(1, Ordering::SeqCst) + 1;
-            test.probe
-                .maximum_active
-                .fetch_max(active, Ordering::SeqCst);
-            let _active = ActiveTranscriptionGuard(test.probe.clone());
-            tokio::time::sleep(test.delay).await;
-            let result = test
-                .results
-                .lock()
-                .expect("transcription test queue poisoned")
-                .pop_front()
-                .unwrap_or_else(|| Err("transcription test queue exhausted".to_owned()));
-            if matches!(&result, Err(error) if error == "__panic__") {
-                panic!("injected transcription panic");
-            }
-            return result.map_err(anyhow::Error::msg);
-        }
         #[cfg(test)]
         if let Some(test) = &self.endpointing_test {
             return test.transcript.clone().map_err(anyhow::Error::msg);
@@ -734,38 +513,6 @@ impl ModelAdapters {
         });
         Ok(Box::pin(stream))
     }
-}
-
-fn meeting_artifact_tool() -> Value {
-    json!({
-        "type": "function",
-        "name": "save_meeting_artifact",
-        "description": "保存会议标题、摘要和仅属于当前会议的待办",
-        "strict": true,
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "minLength": 1},
-                "summary": {"type": "string", "minLength": 1},
-                "todos": {
-                    "type": "array",
-                    "maxItems": 50,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "text": {"type": "string", "minLength": 1},
-                            "source_start_ms": {"type": ["integer", "null"], "minimum": 0},
-                            "source_end_ms": {"type": ["integer", "null"], "minimum": 1}
-                        },
-                        "required": ["text", "source_start_ms", "source_end_ms"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["title", "summary", "todos"],
-            "additionalProperties": false
-        }
-    })
 }
 
 fn find_sse_boundary(buffer: &[u8]) -> Option<usize> {
