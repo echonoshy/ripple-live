@@ -790,6 +790,115 @@ test('transport replacement rejects pending mode work and closes the old transpo
   assert.equal(oldCloses, 1)
 })
 
+test('an old in-flight send failure cannot close or replace the new transport', async () => {
+  const { session, receive } = readySessionHarness()
+  let rejectOld!: (error: Error) => void
+  const oldPending = new Promise<void>((_resolve, reject) => {
+    rejectOld = reject
+  })
+  const newSent: Array<Record<string, unknown>> = []
+  const oldTransport = {
+    send: async () => oldPending,
+    close: async () => {},
+  }
+  const newTransport = {
+    send: async (message: string) => newSent.push(JSON.parse(message)),
+    close: async () => {},
+  }
+  const internals = session as unknown as {
+    transport: typeof oldTransport
+    connectionGeneration: number
+    replaceTransport(transport: typeof newTransport, generation: number): void
+  }
+  internals.transport = oldTransport
+
+  const oldSend = session.sendInput(new Float32Array([0.1]))
+  await new Promise((resolve) => setImmediate(resolve))
+  internals.replaceTransport(newTransport, internals.connectionGeneration)
+  rejectOld(new Error('old transport failed'))
+  await oldSend
+
+  assert.equal(internals.transport, newTransport)
+  const changed = session.setMode('video')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(newSent, [{ type: 'session.mode.set', mode: 'video' }])
+  receive({ type: 'session.mode.changed', mode: 'video' })
+  await changed
+})
+
+test('a multi-event batch never splits across a replacement transport', async () => {
+  const { session } = readySessionHarness()
+  let releaseFirst!: () => void
+  const firstPending = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  const oldSent: Array<Record<string, unknown>> = []
+  const newSent: Array<Record<string, unknown>> = []
+  const oldTransport = {
+    send: async (message: string) => {
+      oldSent.push(JSON.parse(message))
+      if (oldSent.length === 1) await firstPending
+    },
+    close: async () => {},
+  }
+  const newTransport = {
+    send: async (message: string) => newSent.push(JSON.parse(message)),
+    close: async () => {},
+  }
+  const internals = session as unknown as {
+    transport: typeof oldTransport
+    connectionGeneration: number
+    replaceTransport(transport: typeof newTransport, generation: number): void
+    sendEvents(events: Record<string, unknown>[]): Promise<void>
+  }
+  internals.transport = oldTransport
+  const batch = internals.sendEvents([
+    { type: 'test.first' },
+    { type: 'test.second' },
+  ])
+  await new Promise((resolve) => setImmediate(resolve))
+
+  internals.replaceTransport(newTransport, internals.connectionGeneration)
+  releaseFirst()
+  await assert.rejects(batch, /替换|旧连接|superseded/i)
+
+  assert.deepEqual(oldSent, [{ type: 'test.first' }])
+  assert.deepEqual(newSent, [])
+})
+
+test('an old successful send cannot settle or absorb a new transport queue item', async () => {
+  const { session } = readySessionHarness()
+  let releaseOld!: () => void
+  const oldPending = new Promise<void>((resolve) => {
+    releaseOld = resolve
+  })
+  const newSent: Array<Record<string, unknown>> = []
+  const oldTransport = {
+    send: async () => oldPending,
+    close: async () => {},
+  }
+  const newTransport = {
+    send: async (message: string) => newSent.push(JSON.parse(message)),
+    close: async () => {},
+  }
+  const internals = session as unknown as {
+    transport: typeof oldTransport
+    connectionGeneration: number
+    replaceTransport(transport: typeof newTransport, generation: number): void
+    sendEvent(event: Record<string, unknown>): Promise<void>
+  }
+  internals.transport = oldTransport
+  const oldSend = internals.sendEvent({ type: 'test.old' })
+  await new Promise((resolve) => setImmediate(resolve))
+  internals.replaceTransport(newTransport, internals.connectionGeneration)
+  const newSend = internals.sendEvent({ type: 'test.new' })
+
+  releaseOld()
+  await assert.rejects(oldSend, /替换|旧连接|superseded/i)
+  await newSend
+  assert.deepEqual(newSent, [{ type: 'test.new' }])
+})
+
 test('close rejects a pending mode change and clears its timeout', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const { session, receive } = readySessionHarness({ modeChangeTimeoutMs: 5_000 })

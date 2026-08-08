@@ -61,9 +61,19 @@ type SendPriority = 'normal' | 'high'
 
 type QueuedSend = {
   messages: string[]
+  transport: Transport
+  generation: number
+  superseded: boolean
   resolve: () => void
   reject: (error: unknown) => void
   onFailure?: (error: unknown) => void
+}
+
+class SupersededSendError extends Error {
+  constructor() {
+    super('发送任务属于已替换的旧连接')
+    this.name = 'SupersededSendError'
+  }
 }
 
 export type SessionOptions = {
@@ -268,6 +278,7 @@ export class RealtimeSession {
   private normalSends: QueuedSend[] = []
   private highPrioritySends: QueuedSend[] = []
   private sending = false
+  private activeSend: QueuedSend | null = null
   private sendIdleWaiters: Array<() => void> = []
   private currentTurnId: string | null = null
   private pendingTurnId: string | null = null
@@ -393,6 +404,7 @@ export class RealtimeSession {
     const previous = this.transport
     if (previous && previous !== transport) {
       this.rejectPendingModeChange(new Error('实时连接已被替换'))
+      this.supersedeTransportSends(previous)
       void previous.close().catch(() => {})
     }
     this.transport = transport
@@ -419,11 +431,16 @@ export class RealtimeSession {
     priority: SendPriority = 'normal',
     onFailure?: (error: unknown) => void,
   ) {
-    if (!this.transport || this.closed) return Promise.resolve()
+    const transport = this.transport
+    if (!transport || this.closed) return Promise.resolve()
+    const generation = this.connectionGeneration
     return new Promise<void>((resolve, reject) => {
       const queue = priority === 'high' ? this.highPrioritySends : this.normalSends
       queue.push({
         messages: events.map((event) => JSON.stringify(event)),
+        transport,
+        generation,
+        superseded: false,
         resolve,
         reject,
         onFailure,
@@ -439,20 +456,27 @@ export class RealtimeSession {
       while (this.highPrioritySends.length || this.normalSends.length) {
         const item = this.highPrioritySends.shift() ?? this.normalSends.shift()
         if (!item) continue
+        this.activeSend = item
         try {
-          if (this.transport) {
-            for (const message of item.messages) {
-              await this.transport.send(message)
+          if (!this.isSendBindingActive(item)) throw new SupersededSendError()
+          for (const message of item.messages) {
+            await item.transport.send(message)
+            if (!this.isSendBindingActive(item)) {
+              throw new SupersededSendError()
             }
           }
           item.resolve()
         } catch (error) {
-          item.onFailure?.(error)
-          item.reject(error)
-          if (item.onFailure) {
+          const stale = !this.isSendBindingActive(item)
+          const failure = stale ? new SupersededSendError() : error
+          if (!stale) item.onFailure?.(failure)
+          item.reject(failure)
+          if (!stale && item.onFailure) {
             this.rejectQueuedSends(error)
             return
           }
+        } finally {
+          if (this.activeSend === item) this.activeSend = null
         }
       }
     } finally {
@@ -465,11 +489,33 @@ export class RealtimeSession {
     }
   }
 
+  private isSendBindingActive(item: QueuedSend) {
+    return (
+      !item.superseded &&
+      !this.closed &&
+      item.generation === this.connectionGeneration &&
+      item.transport === this.transport
+    )
+  }
+
+  private supersedeTransportSends(transport: Transport) {
+    if (this.activeSend?.transport === transport) {
+      this.activeSend.superseded = true
+    }
+    for (const item of [...this.highPrioritySends, ...this.normalSends]) {
+      if (item.transport === transport) item.superseded = true
+    }
+  }
+
   private rejectQueuedSends(error: unknown) {
     const queued = [...this.highPrioritySends, ...this.normalSends]
     this.highPrioritySends = []
     this.normalSends = []
     queued.forEach((item) => item.reject(error))
+  }
+
+  private observeSendFailure(send: Promise<void>) {
+    void send.catch((error: unknown) => this.handleSendFailure(error))
   }
 
   private waitForSendIdle() {
@@ -591,9 +637,11 @@ export class RealtimeSession {
         this.beginFrameRequest()
         try {
           const frame = this.options.onFrameRequested()
-          void this.sendEvents(
-            createRequestedFrameEvents(responseId, frame, Date.now()),
-            'high',
+          this.observeSendFailure(
+            this.sendEvents(
+              createRequestedFrameEvents(responseId, frame, Date.now()),
+              'high',
+            ),
           )
         } catch (error) {
           this.options.onError(
@@ -842,7 +890,7 @@ export class RealtimeSession {
   }
 
   private async handleSendFailure(error: unknown) {
-    if (this.closed) return
+    if (this.closed || error instanceof SupersededSendError) return
     this.clearEndpointState()
     this.rejectPendingModeChange(
       error instanceof Error ? error : new Error('实时音视频发送失败'),
@@ -885,11 +933,13 @@ export class RealtimeSession {
     if (!this.currentResponseId || this.playbackStartedReported) return
     this.playbackActive = true
     this.playbackStartedReported = true
-    void this.sendEvent({
-      type: 'output.playback.started',
-      response_id: this.currentResponseId,
-      buffered_ms: bufferedMs,
-    })
+    this.observeSendFailure(
+      this.sendEvent({
+        type: 'output.playback.started',
+        response_id: this.currentResponseId,
+        buffered_ms: bufferedMs,
+      }),
+    )
   }
 
   async speechStarted() {
@@ -954,7 +1004,7 @@ export class RealtimeSession {
   discardInput() {
     this.clearEndpointState()
     if (!this.transport || !this.ready || this.closed) return
-    void this.sendEvent({ type: 'input.clear' })
+    this.observeSendFailure(this.sendEvent({ type: 'input.clear' }))
   }
 
   forceListen() {
@@ -966,7 +1016,9 @@ export class RealtimeSession {
     this.playbackActive = false
     this.options.onTool('')
     this.options.onState('listening')
-    void this.sendEvent({ type: 'response.cancel', clear_input: true }, 'high')
+    this.observeSendFailure(
+      this.sendEvent({ type: 'response.cancel', clear_input: true }, 'high'),
+    )
     this.scheduleInputClear()
     return hasActiveOutput
   }
