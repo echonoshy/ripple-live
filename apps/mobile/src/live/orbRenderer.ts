@@ -66,46 +66,99 @@ float fbm(vec2 p) {
 
 void main() {
   vec2 uv = (gl_FragCoord.xy * 2.0 - uResolution) / uResolution.y;
-  float radius = 0.52;
+  float radius = 0.76;
   float distanceToCore = length(uv);
-  float coreMask = 1.0 - smoothstep(radius - 0.012, radius + 0.008, distanceToCore);
+  float coreMask = 1.0 - smoothstep(radius - 0.010, radius + 0.006, distanceToCore);
   float appearanceEnergy = clamp(uEnergy, 0.0, 1.0);
   float geometryEnergy = uReducedMotion == 1 ? 0.0 : uGeometryEnergy;
+  float liveDrive = uReducedMotion == 1 ? 0.0 : clamp(max(uInput, uOutput), 0.0, 1.0);
+  float voiceDirection = uReducedMotion == 1 ? 0.0 : clamp(uOutput - uInput, -1.0, 1.0);
   float slowTime = uReducedMotion == 1 ? 0.0 : uTime;
-  float stateSpeed = uState == 3 ? 1.04 : (uState == 5 ? 1.08 : 1.0);
-  slowTime *= mix(0.88, 1.12, geometryEnergy) * stateSpeed;
-  float cloud = fbm(uv * 2.7 + vec2(slowTime * 0.07, -slowTime * 0.05));
-  float ribbon = fbm(uv * 4.1 + vec2(-slowTime * 0.11, slowTime * 0.08));
-  float highlight = exp(-10.0 * dot(uv - vec2(-0.18, 0.22), uv - vec2(-0.18, 0.22)));
-  float dawnReflection = (1.0 - smoothstep(-0.44, 0.08, uv.y))
-    * (1.0 - smoothstep(0.12, radius, distanceToCore))
-    * smoothstep(0.48, 0.82, ribbon);
-  vec3 deep = vec3(0.039, 0.180, 0.459);
-  vec3 cobalt = vec3(0.184, 0.467, 0.902);
-  vec3 softBlue = vec3(0.608, 0.765, 1.0);
-  vec3 cream = vec3(1.0, 0.965, 0.914);
-  vec3 dawn = mix(vec3(1.0, 0.898, 0.863), vec3(0.753, 0.788, 1.0), 0.45);
-  vec3 color = mix(deep, cobalt, smoothstep(0.22, 0.82, cloud));
-  color = mix(color, softBlue, smoothstep(0.58, 0.92, ribbon) * 0.42);
-  color = mix(color, cream, highlight * 0.58);
-  color = mix(color, dawn, dawnReflection * 0.08);
-  float brightness = mix(0.94, 1.06, appearanceEnergy);
+  float stateSpeed = uState == 3 ? 1.22 : (uState == 5 ? 1.16 : 1.0);
+  slowTime *= mix(0.78, 1.34, geometryEnergy) * stateSpeed;
+
+  vec2 sphereUv = uv / radius;
+  float sphereDepth = sqrt(max(0.0, 1.0 - dot(sphereUv, sphereUv)));
+  float rotationAngle = slowTime * (0.075 + 0.035 * voiceDirection)
+    + 0.12 * sin(slowTime * 0.19);
+  mat2 flowRotation = mat2(
+    cos(rotationAngle), -sin(rotationAngle),
+    sin(rotationAngle), cos(rotationAngle)
+  );
+  vec2 flowUv = flowRotation * sphereUv;
+  vec2 drift = vec2(
+    slowTime * (0.080 + 0.025 * voiceDirection),
+    -slowTime * (0.052 - 0.018 * voiceDirection)
+  );
+  vec2 domainWarp = vec2(
+    fbm(flowUv * 1.34 + drift + vec2(2.4, 5.1)),
+    fbm(flowUv * 1.47 - drift * 0.76 + vec2(7.2, 1.6))
+  ) - 0.5;
+  flowUv += domainWarp * mix(0.38, 0.64, geometryEnergy);
+  flowUv += vec2(
+    sin(slowTime * 1.7 + sphereUv.y * 2.2),
+    cos(slowTime * 1.3 - sphereUv.x * 2.0)
+  ) * liveDrive * 0.085;
+
+  float cloudA = fbm(flowUv * 1.38 + drift * 0.42 + vec2(0.8, 4.6));
+  float cloudB = fbm(flowRotation * flowUv * 1.82 - drift * 0.58 + vec2(6.7, 2.3));
+  float cloudC = fbm(flowUv * 2.46 + domainWarp * 1.15 + vec2(3.4, 8.1));
+  float ribbon = 0.5 + 0.5 * sin(
+    flowUv.x * 2.55
+    - flowUv.y * 1.35
+    + cloudA * 4.4
+    + slowTime * 0.36
+  );
+  float whiteMass = smoothstep(
+    0.50,
+    0.78,
+    cloudA * 0.58 + cloudB * 0.24 + ribbon * 0.18
+  );
+  float cyanMass = smoothstep(
+    0.30,
+    0.72,
+    cloudB * 0.58 + cloudC * 0.28 + (1.0 - ribbon) * 0.14
+  );
+  float bluePocket = smoothstep(
+    0.43,
+    0.78,
+    cloudC * 0.66 + (1.0 - cloudA) * 0.34
+  );
+
+  vec3 deepBlue = vec3(0.015, 0.185, 0.780);
+  vec3 electricBlue = vec3(0.025, 0.405, 1.000);
+  vec3 clearCyan = vec3(0.360, 0.890, 1.000);
+  vec3 pearlWhite = vec3(0.965, 1.000, 0.985);
+  vec3 color = mix(deepBlue, electricBlue, 0.48 + cloudB * 0.42);
+  color = mix(color, clearCyan, cyanMass * 0.76);
+  color = mix(color, electricBlue, bluePocket * 0.42);
+  color = mix(color, pearlWhite, whiteMass * 0.92);
+
+  vec3 normal = normalize(vec3(sphereUv, sphereDepth));
+  vec3 lightDirection = normalize(vec3(-0.36, 0.52, 0.78));
+  float diffuse = 0.80 + 0.20 * max(dot(normal, lightDirection), 0.0);
+  float fresnel = pow(1.0 - sphereDepth, 2.2);
+  float specular = pow(max(dot(normal, lightDirection), 0.0), 18.0);
+  color *= diffuse;
+  color += pearlWhite * specular * (0.10 + whiteMass * 0.10);
+  color += clearCyan * fresnel * 0.16;
+  float brightness = mix(0.98, 1.12, appearanceEnergy);
   float stateBrightness = uState == 1 ? 0.94 : (uState == 5 ? 1.04 : 1.0);
 
-  float halo = exp(-52.0 * pow(max(distanceToCore - radius, 0.0), 2.0));
+  float halo = exp(-110.0 * pow(max(distanceToCore - radius, 0.0), 2.0));
   float p = clamp(uRippleProgress, 0.0, 1.0);
   float eased = 1.0 - pow(1.0 - p, 3.0);
   float ringRadius = radius * mix(1.03, 1.28, eased);
   float ringWidth = mix(0.010, 0.038, p);
   float ring = exp(-pow((distanceToCore - ringRadius) / ringWidth, 2.0));
-  float haloAlpha = mix(0.04, 0.06, clamp(uEnergy + uHaloPulse, 0.0, 1.0));
+  float haloAlpha = mix(0.01, 0.025, clamp(uEnergy + uHaloPulse, 0.0, 1.0));
   float ringAlpha = uRippleProgress < 0.0 ? 0.0 : ring * uRippleAlpha;
 
   float outerHaloAlpha = halo * haloAlpha * (1.0 - coreMask);
   float alpha = clamp(coreMask + outerHaloAlpha + ringAlpha, 0.0, 1.0);
   vec3 premultipliedColor = clamp(color * brightness * stateBrightness, 0.0, 1.0) * coreMask;
-  premultipliedColor += softBlue * outerHaloAlpha;
-  premultipliedColor += cream * ringAlpha;
+  premultipliedColor += clearCyan * outerHaloAlpha;
+  premultipliedColor += pearlWhite * ringAlpha;
   outColor = vec4(premultipliedColor, alpha);
 }`
 

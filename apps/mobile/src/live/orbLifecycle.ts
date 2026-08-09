@@ -1,6 +1,6 @@
 import type { OrbRenderer } from './orbRenderer'
 import type { QualityTier, VisualState } from './motion'
-import { nextQualityTier } from './motion'
+import { nextQualityTier, smoothLevel } from './motion'
 import {
   advanceRippleSignals,
   createRippleState,
@@ -44,6 +44,13 @@ const frameIntervalFor = (qualityTier: QualityTier) => (
 )
 const MAX_FRAME_GAP_MS = 1000
 const PACING_EPSILON_MS = 0.01
+const LEVEL_FRAME_MS = 1000 / 60
+const LEVEL_ATTACK_ALPHA = 0.14
+const LEVEL_RELEASE_ALPHA = 0.065
+
+const levelAlphaForFrame = (baseAlpha: number, elapsedMs: number) => (
+  1 - Math.pow(1 - baseAlpha, Math.max(0.25, Math.min(4, elapsedMs / LEVEL_FRAME_MS)))
+)
 
 export function startOrbLifecycle(
   renderer: OrbRenderer,
@@ -74,6 +81,38 @@ export function startOrbLifecycle(
   let nextRenderDeadline: number | null = null
   let lastAnimationFrameAt: number | null = null
   let rippleState = createRippleState()
+  let smoothedInputLevel = 0
+  let smoothedOutputLevel = 0
+  let lastLevelUpdateAt: number | null = null
+
+  const smoothVisualLevel = (previous: number, target: number, elapsedMs: number) => {
+    const alpha = levelAlphaForFrame(
+      target > previous ? LEVEL_ATTACK_ALPHA : LEVEL_RELEASE_ALPHA,
+      elapsedMs,
+    )
+    return smoothLevel(previous, target, alpha)
+  }
+
+  const visualLevelsAt = (nowMs: number) => {
+    const elapsedMs = lastLevelUpdateAt === null
+      ? LEVEL_FRAME_MS
+      : Math.max(0, nowMs - lastLevelUpdateAt)
+    lastLevelUpdateAt = nowMs
+    smoothedInputLevel = smoothVisualLevel(
+      smoothedInputLevel,
+      latestProps.current.inputLevel,
+      elapsedMs,
+    )
+    smoothedOutputLevel = smoothVisualLevel(
+      smoothedOutputLevel,
+      latestProps.current.outputLevel,
+      elapsedMs,
+    )
+    return {
+      inputLevel: smoothedInputLevel,
+      outputLevel: smoothedOutputLevel,
+    }
+  }
 
   const safely = (operation: () => void) => {
     try {
@@ -224,6 +263,7 @@ export function startOrbLifecycle(
       }
 
       if (resumed || shouldRender(nowMs)) {
+        const visualLevels = visualLevelsAt(nowMs)
         const priorConsumedSignalId = rippleState.lastConsumedSignalId
         const pendingSignals = latestProps.current.rippleSignals
           ?? (latestProps.current.rippleSignal
@@ -238,6 +278,7 @@ export function startOrbLifecycle(
         rippleState = ripple.state
         renderer.update({
           ...latestProps.current,
+          ...visualLevels,
           nowMs,
           rippleProgress: ripple.frame.progress,
           rippleAlpha: ripple.frame.alpha,

@@ -87,29 +87,35 @@ test('reduced motion freezes geometry uniforms while brightness energy remains l
   assert.notEqual(energy[0], energy[1])
 })
 
-test('fragment shader uses the stable warm circular material instead of metaballs', () => {
+test('fragment shader uses a domain-warped volumetric fluid material', () => {
   const { gl } = createHarness()
 
   assert.match(gl.fragmentSource, /uniform float uRippleProgress;/)
   assert.match(gl.fragmentSource, /uniform float uRippleAlpha;/)
   assert.match(gl.fragmentSource, /uniform float uHaloPulse;/)
-  assert.match(gl.fragmentSource, /float radius = 0\.52;/)
+  assert.match(gl.fragmentSource, /float radius = 0\.76;/)
   assert.match(
     gl.fragmentSource,
-    /float coreMask = 1\.0 - smoothstep\(radius - 0\.012, radius \+ 0\.008, distanceToCore\);/,
+    /float coreMask = 1\.0 - smoothstep\(radius - 0\.010, radius \+ 0\.006, distanceToCore\);/,
   )
-  assert.match(gl.fragmentSource, /vec3 deep = vec3\(0\.039, 0\.180, 0\.459\);/)
-  assert.match(gl.fragmentSource, /vec3 cobalt = vec3\(0\.184, 0\.467, 0\.902\);/)
-  assert.match(gl.fragmentSource, /vec3 softBlue = vec3\(0\.608, 0\.765, 1\.0\);/)
-  assert.match(gl.fragmentSource, /vec3 cream = vec3\(1\.0, 0\.965, 0\.914\);/)
-  assert.match(gl.fragmentSource, /color = mix\(color, dawn, dawnReflection \* 0\.08\);/)
+  assert.match(gl.fragmentSource, /float liveDrive =[^;]*max\(uInput, uOutput\)/)
+  assert.match(gl.fragmentSource, /vec2 domainWarp = vec2\(/)
+  assert.match(gl.fragmentSource, /float whiteMass = smoothstep\(/)
+  assert.match(gl.fragmentSource, /float cyanMass = smoothstep\(/)
+  assert.match(gl.fragmentSource, /float bluePocket = smoothstep\(/)
+  assert.match(gl.fragmentSource, /vec3 deepBlue = vec3\(0\.015, 0\.185, 0\.780\);/)
+  assert.match(gl.fragmentSource, /vec3 clearCyan = vec3\(0\.360, 0\.890, 1\.000\);/)
+  assert.match(gl.fragmentSource, /vec3 pearlWhite = vec3\(0\.965, 1\.000, 0\.985\);/)
+  assert.match(gl.fragmentSource, /float sphereDepth = sqrt\(/)
+  assert.match(gl.fragmentSource, /float fresnel = pow\(/)
+  assert.doesNotMatch(gl.fragmentSource, /float surface = flowUv\.y/)
   assert.doesNotMatch(gl.fragmentSource, /float ball\(/)
 })
 
 test('fragment shader composites one eased outward ring and near halo', () => {
   const { gl } = createHarness()
 
-  assert.match(gl.fragmentSource, /float halo = exp\(-52\.0 \* pow\(max\(distanceToCore - radius, 0\.0\), 2\.0\)\);/)
+  assert.match(gl.fragmentSource, /float halo = exp\(-110\.0 \* pow\(max\(distanceToCore - radius, 0\.0\), 2\.0\)\);/)
   assert.match(gl.fragmentSource, /float eased = 1\.0 - pow\(1\.0 - p, 3\.0\);/)
   assert.match(gl.fragmentSource, /float ringRadius = radius \* mix\(1\.03, 1\.28, eased\);/)
   assert.match(gl.fragmentSource, /float ringWidth = mix\(0\.010, 0\.038, p\);/)
@@ -141,7 +147,7 @@ test('fragment shader keeps energy-driven changes inside the fixed silhouette', 
   )
   assert.match(
     gl.fragmentSource,
-    /float brightness = mix\(0\.94, 1\.06, appearanceEnergy\);/,
+    /float brightness = mix\(0\.98, 1\.12, appearanceEnergy\);/,
   )
 
   const silhouette = gl.fragmentSource.slice(

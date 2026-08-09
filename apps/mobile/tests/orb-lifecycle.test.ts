@@ -181,6 +181,36 @@ test('a batched barge-in is consumed once without losing speech or looping acks'
   }
 })
 
+test('raw audio spikes are smoothed before they reach the orb renderer', () => {
+  const browser = installBrowserFakes(false, { captureFrames: true })
+  const harness = createHarness()
+  const updates: Parameters<OrbRenderer['update']>[0][] = []
+  harness.renderer.update = (frame) => updates.push(frame)
+  harness.latestProps.current.inputLevel = 1
+
+  try {
+    const cleanup = startOrbLifecycle(
+      harness.renderer,
+      harness.canvas,
+      harness.latestProps,
+      harness.onFallback,
+    )
+    runNextFrame(browser, 0)
+    harness.latestProps.current.inputLevel = 0
+    runNextFrame(browser, 17)
+    runNextFrame(browser, 34)
+
+    assert.ok((updates[0]?.inputLevel ?? 0) > 0)
+    assert.ok((updates[0]?.inputLevel ?? 1) < 0.2)
+    assert.ok((updates[1]?.inputLevel ?? 0) < (updates[0]?.inputLevel ?? 0))
+    assert.ok((updates[1]?.inputLevel ?? 0) > 0.1)
+    assert.ok((updates[2]?.inputLevel ?? 0) < (updates[1]?.inputLevel ?? 0))
+    cleanup()
+  } finally {
+    browser.restore()
+  }
+})
+
 function runNextFrame(
   browser: ReturnType<typeof installBrowserFakes>,
   nowMs: number,
