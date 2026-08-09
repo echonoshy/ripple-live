@@ -23,7 +23,6 @@ export const MOTION_TIMING = {
   stateMs: 280,
   interruptMs: 160,
   cameraMs: 420,
-  captionHoldMs: 1800,
 } as const
 
 const visualState: Record<SessionState, VisualState> = {

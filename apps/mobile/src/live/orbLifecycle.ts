@@ -45,8 +45,8 @@ const frameIntervalFor = (qualityTier: QualityTier) => (
 const MAX_FRAME_GAP_MS = 1000
 const PACING_EPSILON_MS = 0.01
 const LEVEL_FRAME_MS = 1000 / 60
-const LEVEL_ATTACK_ALPHA = 0.14
-const LEVEL_RELEASE_ALPHA = 0.065
+const LEVEL_ATTACK_ALPHA = 0.085
+const LEVEL_RELEASE_ALPHA = 0.035
 
 const levelAlphaForFrame = (baseAlpha: number, elapsedMs: number) => (
   1 - Math.pow(1 - baseAlpha, Math.max(0.25, Math.min(4, elapsedMs / LEVEL_FRAME_MS)))

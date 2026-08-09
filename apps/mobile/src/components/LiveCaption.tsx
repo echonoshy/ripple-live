@@ -1,9 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
-  captionTextForState,
-  nextCaptionText,
-  scheduleCaptionClear,
-  type CaptionSnapshot,
+  emptyUserCaption,
+  nextUserCaption,
 } from '../live/caption'
 import type { SessionState } from '../realtime/RealtimeSession'
 
@@ -13,31 +11,21 @@ export type LiveCaptionProps = {
   state: SessionState
 }
 
-export function LiveCaption({ userText, assistantText, state }: LiveCaptionProps) {
-  const source: CaptionSnapshot['source'] = state === 'speaking' ? 'assistant' : 'user'
-  const text = captionTextForState(state, userText, assistantText)
-  const [visible, setVisible] = useState('')
-  const previous = useRef({ source, userText, assistantText })
+export function LiveCaption({ userText, state }: LiveCaptionProps) {
+  const [caption, setCaption] = useState(emptyUserCaption)
 
   useEffect(() => {
-    const current = { source, userText, assistantText }
-    const next = source === previous.current.source
-      ? text
-      : nextCaptionText(previous.current, current)
-    previous.current = current
-    setVisible(next)
-    if (!next) return
-    return scheduleCaptionClear(() => setVisible(''))
-  }, [assistantText, source, text, userText])
+    setCaption((current) => nextUserCaption(current, state, userText))
+  }, [state, userText])
 
   return (
     <p
       className="live-caption"
-      data-caption-source={visible ? source : undefined}
+      data-caption-source={caption.text ? 'user' : undefined}
       aria-live="polite"
       aria-atomic="true"
     >
-      {visible}
+      {caption.text}
     </p>
   )
 }

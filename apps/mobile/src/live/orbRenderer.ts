@@ -1,14 +1,14 @@
 import type { QualityTier, VisualState } from './motion'
 
-const STATE_INDEX: Record<VisualState, number> = {
-  idle: 0,
-  connecting: 1,
-  listening: 2,
-  thinking: 3,
-  tool: 4,
-  speaking: 5,
-  ended: 6,
-  error: 7,
+const STATE_SPEED: Record<VisualState, number> = {
+  idle: 0.52,
+  connecting: 0.38,
+  listening: 0.54,
+  thinking: 0.66,
+  tool: 0.60,
+  speaking: 0.70,
+  ended: 0.30,
+  error: 0.24,
 }
 
 const MAX_RENDER_DIMENSION = 8192
@@ -31,7 +31,6 @@ uniform float uRippleProgress;
 uniform float uRippleAlpha;
 uniform float uHaloPulse;
 uniform vec2 uResolution;
-uniform int uState;
 uniform int uQuality;
 uniform int uReducedMotion;
 out vec4 outColor;
@@ -74,13 +73,10 @@ void main() {
   float liveDrive = uReducedMotion == 1 ? 0.0 : clamp(max(uInput, uOutput), 0.0, 1.0);
   float voiceDirection = uReducedMotion == 1 ? 0.0 : clamp(uOutput - uInput, -1.0, 1.0);
   float slowTime = uReducedMotion == 1 ? 0.0 : uTime;
-  float stateSpeed = uState == 3 ? 1.22 : (uState == 5 ? 1.16 : 1.0);
-  slowTime *= mix(0.78, 1.34, geometryEnergy) * stateSpeed;
 
   vec2 sphereUv = uv / radius;
   float sphereDepth = sqrt(max(0.0, 1.0 - dot(sphereUv, sphereUv)));
-  float rotationAngle = slowTime * (0.075 + 0.035 * voiceDirection)
-    + 0.12 * sin(slowTime * 0.19);
+  float rotationAngle = slowTime * 0.080;
   mat2 flowRotation = mat2(
     cos(rotationAngle), -sin(rotationAngle),
     sin(rotationAngle), cos(rotationAngle)
@@ -98,10 +94,10 @@ void main() {
   flowUv += vec2(
     sin(slowTime * 1.7 + sphereUv.y * 2.2),
     cos(slowTime * 1.3 - sphereUv.x * 2.0)
-  ) * liveDrive * 0.085;
+  ) * liveDrive * 0.045;
 
   float cloudA = fbm(flowUv * 1.38 + drift * 0.42 + vec2(0.8, 4.6));
-  float cloudB = fbm(flowRotation * flowUv * 1.82 - drift * 0.58 + vec2(6.7, 2.3));
+  float cloudB = fbm(flowUv * 1.82 - drift * 0.58 + vec2(6.7, 2.3));
   float cloudC = fbm(flowUv * 2.46 + domainWarp * 1.15 + vec2(3.4, 8.1));
   float ribbon = 0.5 + 0.5 * sin(
     flowUv.x * 2.55
@@ -142,8 +138,7 @@ void main() {
   color *= diffuse;
   color += pearlWhite * specular * (0.10 + whiteMass * 0.10);
   color += clearCyan * fresnel * 0.16;
-  float brightness = mix(0.98, 1.12, appearanceEnergy);
-  float stateBrightness = uState == 1 ? 0.94 : (uState == 5 ? 1.04 : 1.0);
+  float brightness = mix(0.98, 1.10, appearanceEnergy);
 
   float halo = exp(-110.0 * pow(max(distanceToCore - radius, 0.0), 2.0));
   float p = clamp(uRippleProgress, 0.0, 1.0);
@@ -156,7 +151,7 @@ void main() {
 
   float outerHaloAlpha = halo * haloAlpha * (1.0 - coreMask);
   float alpha = clamp(coreMask + outerHaloAlpha + ringAlpha, 0.0, 1.0);
-  vec3 premultipliedColor = clamp(color * brightness * stateBrightness, 0.0, 1.0) * coreMask;
+  vec3 premultipliedColor = clamp(color * brightness, 0.0, 1.0) * coreMask;
   premultipliedColor += clearCyan * outerHaloAlpha;
   premultipliedColor += pearlWhite * ringAlpha;
   outColor = vec4(premultipliedColor, alpha);
@@ -189,10 +184,10 @@ function frameEnergy(frame: OrbFrame) {
   switch (frame.state) {
     case 'idle': return 0.08
     case 'connecting': return 0.18
-    case 'listening': return 0.08 + clamp(frame.inputLevel, 0, 1) * 0.92
+    case 'listening': return 0.08 + clamp(frame.inputLevel, 0, 1) * 0.64
     case 'thinking': return 0.24
     case 'tool': return 0.14
-    case 'speaking': return 0.08 + clamp(frame.outputLevel, 0, 1) * 0.92
+    case 'speaking': return 0.08 + clamp(frame.outputLevel, 0, 1) * 0.72
     case 'ended': return 0.04
     case 'error': return 0.12
   }
@@ -246,7 +241,6 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
       rippleProgress: gl.getUniformLocation(program, 'uRippleProgress'),
       rippleAlpha: gl.getUniformLocation(program, 'uRippleAlpha'),
       haloPulse: gl.getUniformLocation(program, 'uHaloPulse'),
-      state: gl.getUniformLocation(program, 'uState'),
       quality: gl.getUniformLocation(program, 'uQuality'),
       reducedMotion: gl.getUniformLocation(program, 'uReducedMotion'),
       resolution: gl.getUniformLocation(program, 'uResolution'),
@@ -275,19 +269,35 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
 
     resize(canvas.clientWidth, canvas.clientHeight, 1)
 
+    let lastNowMs: number | null = null
+    let motionTime = 0
+    let motionSpeed = STATE_SPEED.idle
+    let visualEnergy = 0.08
+
     const update = (frame: OrbFrame) => {
       if (disposed) return
-      const energy = frameEnergy(frame)
+      const nowMs = clamp(frame.nowMs, 0, Number.MAX_SAFE_INTEGER)
+      const elapsedMs = lastNowMs === null
+        ? 1000 / 60
+        : clamp(nowMs - lastNowMs, 0, 100)
+      lastNowMs = nowMs
+      const speedBlend = 1 - Math.exp(-elapsedMs / 700)
+      const energyBlend = 1 - Math.exp(-elapsedMs / 420)
+      const targetEnergy = frameEnergy(frame)
+      motionSpeed += (STATE_SPEED[frame.state] - motionSpeed) * speedBlend
+      visualEnergy += (targetEnergy - visualEnergy) * energyBlend
+      if (!frame.reducedMotion) {
+        const energySpeed = 0.72 + visualEnergy * 0.20
+        motionTime += elapsedMs / 1000 * motionSpeed * energySpeed
+      }
       gl.uniform1f(
         uniforms.time,
-        frame.reducedMotion
-          ? 0
-          : clamp(frame.nowMs, 0, Number.MAX_SAFE_INTEGER) / 1000,
+        frame.reducedMotion ? 0 : motionTime,
       )
       gl.uniform1f(uniforms.input, clamp(frame.inputLevel, 0, 1))
       gl.uniform1f(uniforms.output, clamp(frame.outputLevel, 0, 1))
-      gl.uniform1f(uniforms.energy, energy)
-      gl.uniform1f(uniforms.geometryEnergy, frame.reducedMotion ? 0 : energy)
+      gl.uniform1f(uniforms.energy, visualEnergy)
+      gl.uniform1f(uniforms.geometryEnergy, frame.reducedMotion ? 0 : visualEnergy)
       gl.uniform1f(
         uniforms.rippleProgress,
         frame.reducedMotion || frame.rippleProgress === null
@@ -299,7 +309,6 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
         frame.reducedMotion ? 0 : clamp(frame.rippleAlpha, 0, 1),
       )
       gl.uniform1f(uniforms.haloPulse, clamp(frame.haloPulse, 0, 1))
-      gl.uniform1i(uniforms.state, STATE_INDEX[frame.state])
       gl.uniform1i(uniforms.quality, frame.qualityTier === 'high' ? 1 : 0)
       gl.uniform1i(uniforms.reducedMotion, frame.reducedMotion ? 1 : 0)
       gl.drawArrays(gl.TRIANGLES, 0, 3)

@@ -1,44 +1,35 @@
-import { MOTION_TIMING } from './motion'
 import type { SessionState } from '../realtime/RealtimeSession'
 
-type CaptionTimer = {
-  setTimeout(callback: () => void, delay: number): number
-  clearTimeout(timer: number): void
+export type UserCaptionState = {
+  text: string
+  responseActive: boolean
 }
 
-export type CaptionSnapshot = {
-  source: 'user' | 'assistant'
-  userText: string
-  assistantText: string
+export const emptyUserCaption: UserCaptionState = {
+  text: '',
+  responseActive: false,
 }
 
-export function captionTextForState(
+export function nextUserCaption(
+  current: UserCaptionState,
   state: SessionState,
   userText: string,
-  assistantText: string,
-) {
-  return state === 'speaking' ? assistantText : userText
-}
+): UserCaptionState {
+  if (state === 'thinking' || state === 'using_tool') {
+    return {
+      text: userText || current.text,
+      responseActive: true,
+    }
+  }
 
-export function scheduleCaptionClear(
-  callback: () => void,
-  timer: CaptionTimer = window,
-) {
-  const timerId = timer.setTimeout(callback, MOTION_TIMING.captionHoldMs)
-  return () => timer.clearTimeout(timerId)
-}
+  if (state === 'speaking') {
+    return { text: '', responseActive: true }
+  }
 
-export function nextCaptionText(
-  previous: CaptionSnapshot,
-  current: CaptionSnapshot,
-) {
-  const text = current.source === 'assistant'
-    ? current.assistantText
-    : current.userText
-  if (current.source === previous.source) return text
+  if (state === 'listening') {
+    if (current.responseActive) return emptyUserCaption
+    return { text: userText, responseActive: false }
+  }
 
-  const sourceTextChanged = current.source === 'assistant'
-    ? current.assistantText !== previous.assistantText
-    : current.userText !== previous.userText
-  return sourceTextChanged ? text : ''
+  return emptyUserCaption
 }

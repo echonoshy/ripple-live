@@ -112,6 +112,41 @@ test('fragment shader uses a domain-warped volumetric fluid material', () => {
   assert.doesNotMatch(gl.fragmentSource, /float ball\(/)
 })
 
+test('keeps listening motion calm and dampens microphone-driven warping', () => {
+  const { gl } = createHarness()
+
+  assert.doesNotMatch(gl.fragmentSource, /stateSpeed|uniform int uState/)
+  assert.match(gl.fragmentSource, /liveDrive \* 0\.045/)
+})
+
+test('integrates motion time continuously across state changes', () => {
+  const { gl, renderer } = createHarness()
+
+  renderer.update({
+    ...reducedFrame(0.2, 1000),
+    reducedMotion: false,
+    state: 'listening',
+  })
+  renderer.update({
+    ...reducedFrame(0.2, 1016),
+    reducedMotion: false,
+    state: 'thinking',
+  })
+
+  const times = gl.floatUniforms.get('uTime') ?? []
+  assert.equal(times.length, 2)
+  assert.ok(times[1] > times[0])
+  assert.ok(times[1] - times[0] < 0.02)
+})
+
+test('rotates the orb slowly in one direction without oscillating', () => {
+  const { gl } = createHarness()
+
+  assert.match(gl.fragmentSource, /float rotationAngle = slowTime \* 0\.080;/)
+  assert.match(gl.fragmentSource, /vec2 flowUv = flowRotation \* sphereUv;/)
+  assert.doesNotMatch(gl.fragmentSource, /float rotationAngle\s*=\s*[^;\n]*sin\(/)
+})
+
 test('fragment shader composites one eased outward ring and near halo', () => {
   const { gl } = createHarness()
 
@@ -147,7 +182,7 @@ test('fragment shader keeps energy-driven changes inside the fixed silhouette', 
   )
   assert.match(
     gl.fragmentSource,
-    /float brightness = mix\(0\.98, 1\.12, appearanceEnergy\);/,
+    /float brightness = mix\(0\.98, 1\.10, appearanceEnergy\);/,
   )
 
   const silhouette = gl.fragmentSource.slice(

@@ -89,8 +89,8 @@
 
 .home-orb {
   display: grid;
-  width: clamp(108px, 29vw, 132px);
-  height: clamp(108px, 29vw, 132px);
+  width: clamp(176px, 52vw, 220px);
+  height: clamp(176px, 52vw, 220px);
   place-items: center;
 }
 
@@ -462,8 +462,8 @@
   }
 
   .home-orb {
-    width: 94px;
-    height: 94px;
+    width: 136px;
+    height: 136px;
   }
 
   .conversation-home h1 {

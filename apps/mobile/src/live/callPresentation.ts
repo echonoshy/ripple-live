@@ -5,7 +5,7 @@ const stateLabels: Record<SessionState, string> = {
   idle: '准备就绪',
   connecting: '正在连接',
   preparing: '准备中',
-  listening: '我在听',
+  listening: '',
   thinking: '想一想',
   using_tool: '处理中',
   speaking: '',

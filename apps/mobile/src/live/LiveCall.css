@@ -17,8 +17,18 @@
 }
 
 .live-orb-canvas.is-idle,
-.live-orb-fallback.is-idle {
-  animation: live-orb-idle-breath 4.2s ease-in-out infinite alternate;
+.live-orb-fallback.is-idle,
+.live-orb-canvas.is-connecting,
+.live-orb-fallback.is-connecting,
+.live-orb-canvas.is-listening,
+.live-orb-fallback.is-listening,
+.live-orb-canvas.is-thinking,
+.live-orb-fallback.is-thinking,
+.live-orb-canvas.is-tool,
+.live-orb-fallback.is-tool,
+.live-orb-canvas.is-speaking,
+.live-orb-fallback.is-speaking {
+  animation: live-orb-idle-breath 7.2s ease-in-out infinite alternate;
 }
 
 .live-orb-fallback {
@@ -51,7 +61,6 @@
 .live-orb-canvas.is-connecting,
 .live-orb-fallback.is-connecting {
   opacity: 0.82;
-  animation: live-orb-connecting 1.8s ease-in-out infinite alternate;
 }
 
 .live-orb-canvas.is-listening,
@@ -68,20 +77,17 @@
 
 .live-orb-canvas.is-thinking,
 .live-orb-fallback.is-thinking {
-  filter: brightness(0.92);
-  animation: live-orb-thinking 2.2s ease-in-out infinite alternate;
+  filter: brightness(0.96);
 }
 
 .live-orb-canvas.is-tool,
 .live-orb-fallback.is-tool {
-  filter: brightness(0.88);
-  animation: live-orb-tool 1.4s ease-in-out infinite alternate;
+  filter: brightness(0.94);
 }
 
 .live-orb-canvas.is-speaking,
 .live-orb-fallback.is-speaking {
-  filter: brightness(1.12);
-  transform: scale(1.015);
+  filter: brightness(1.08);
 }
 
 .live-orb-canvas.is-ended,
@@ -98,51 +104,21 @@
 
 @keyframes live-orb-idle-breath {
   from {
-    transform: scale(0.985);
+    transform: scale(0.992);
   }
 
   to {
-    transform: scale(1.015);
-  }
-}
-
-@keyframes live-orb-connecting {
-  from {
-    transform: scale(0.92);
-  }
-
-  to {
-    transform: scale(0.96);
-  }
-}
-
-@keyframes live-orb-thinking {
-  from {
-    transform: scale(0.94);
-  }
-
-  to {
-    transform: scale(0.98);
-  }
-}
-
-@keyframes live-orb-tool {
-  from {
-    transform: translateY(-32px) scale(0.68);
-  }
-
-  to {
-    transform: translateY(-32px) scale(0.72);
+    transform: scale(1.008);
   }
 }
 
 @keyframes live-orb-interrupt-release {
   0% {
-    transform: scale(1.04);
+    transform: scale(1.012);
   }
 
   55% {
-    transform: scale(0.92);
+    transform: scale(0.985);
   }
 
   100% {
@@ -305,7 +281,9 @@
 }
 
 .live-call-screen.has-results .live-stage {
-  transform: translateY(-32px);
+  min-height: 220px;
+  padding-bottom: 8px;
+  transform: none;
 }
 
 .live-call-screen.has-results .live-orb-canvas,
@@ -366,16 +344,20 @@
 }
 
 .live-caption {
+  display: -webkit-box;
   min-height: 26px;
+  max-height: 50px;
   margin: 7px 0 0;
   overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   color: #f5f4f0;
   font-size: clamp(15px, 4.2vw, 17px);
   font-weight: 620;
   line-height: 1.45;
-  text-overflow: ellipsis;
+  text-wrap: balance;
   text-shadow: 0 2px 18px rgb(0 0 0 / 72%);
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .has-video .live-feedback {
@@ -399,17 +381,17 @@
 }
 
 .live-output-tray {
-  position: absolute;
+  position: relative;
   z-index: 4;
-  top: calc(max(18px, env(safe-area-inset-top)) + 74px);
-  right: 18px;
-  bottom: calc(max(14px, env(safe-area-inset-bottom)) + 72px);
-  left: 18px;
   display: flex;
+  flex: 0 1 auto;
   flex-direction: column;
   justify-content: flex-end;
+  align-self: center;
   gap: 8px;
-  max-height: 42dvh;
+  width: min(100%, 430px);
+  max-height: min(34dvh, 300px);
+  margin: 0 0 calc(70px + max(14px, env(safe-area-inset-bottom)));
   overflow-y: auto;
   overscroll-behavior-y: contain;
   pointer-events: none;
@@ -427,7 +409,7 @@
   flex: 0 1 auto;
   gap: 8px;
   min-height: 0;
-  max-height: min(42dvh, 320px);
+  max-height: min(25dvh, 224px);
   overflow-y: auto;
   pointer-events: auto;
   scrollbar-width: none;
@@ -441,10 +423,10 @@
   overflow: hidden;
   padding: 14px 8px 14px 14px;
   border: 1px solid var(--line);
-  border-radius: 20px;
-  background: var(--surface-raised);
-  box-shadow: 0 14px 42px rgb(0 0 0 / 32%);
-  backdrop-filter: blur(18px);
+  border-radius: 18px;
+  background: rgb(24 24 24 / 94%);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 26%);
+  backdrop-filter: blur(22px);
 }
 
 .live-result-card.is-error {
@@ -622,20 +604,20 @@
 
 .live-artifact-sheet {
   flex: 0 0 auto;
-  max-height: 136px;
+  max-height: 112px;
   overflow: hidden;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 20px;
-  background: var(--surface-raised);
-  box-shadow: 0 14px 42px rgb(0 0 0 / 36%);
+  border-radius: 18px;
+  background: rgb(24 24 24 / 94%);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 26%);
   pointer-events: auto;
   backdrop-filter: blur(18px);
 }
 
 .live-artifact-strip {
   display: grid;
-  grid-auto-columns: minmax(116px, 42%);
+  grid-auto-columns: minmax(104px, 36%);
   grid-auto-flow: column;
   gap: 8px;
   overflow-x: auto;
@@ -753,6 +735,19 @@
   .live-stage {
     padding-bottom: 76px;
   }
+
+  .live-call-screen.has-results .live-stage {
+    min-height: 150px;
+    padding-bottom: 4px;
+  }
+
+  .live-output-tray {
+    max-height: min(30dvh, 220px);
+  }
+
+  .live-result-sheet {
+    max-height: min(21dvh, 164px);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -771,7 +766,7 @@
   }
 
   .live-call-screen.has-results .live-stage {
-    transform: translateY(-32px);
+    transform: none;
     transition: none;
   }
 

@@ -227,6 +227,7 @@ test('mobile home presents voice as the primary call entry with explicit camera 
   const apiSource = readFileSync(path.join(appRoot, 'src/api.ts'), 'utf8')
   const homePath = path.join(appRoot, 'src/components/ConversationHome.tsx')
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
+  const navigationCssSource = readFileSync(path.join(appRoot, 'src/components/AppNavigation.css'), 'utf8')
 
   assert.equal(existsSync(homePath), true, 'ConversationHome.tsx should exist')
   const homeSource = readFileSync(homePath, 'utf8')
@@ -251,6 +252,7 @@ test('mobile home presents voice as the primary call entry with explicit camera 
   assert.doesNotMatch(homeSource, /统计|最近对话|自动保存/)
   assert.doesNotMatch(homeSource, /conversation-core/)
   assert.doesNotMatch(cssSource, /\.conversation-core/)
+  assert.match(navigationCssSource, /\.home-orb\s*\{[^}]*width:\s*clamp\(176px, 52vw, 220px\);[^}]*height:\s*clamp\(176px, 52vw, 220px\);/s)
   assert.doesNotMatch(cssSource, /#9046ff|--ripple-violet|--voice-accent:\s*#b98aff/)
 })
 
@@ -450,7 +452,7 @@ test('mobile live call uses the immersive presentation contract', () => {
   assert.doesNotMatch(callSource, /PhoneDisconnect/)
   assert.doesNotMatch(callSource, /className="call-status"|className="call-mode"/)
   assert.doesNotMatch(presentationSource, /正在回答|正在聆听|正在思考|连接异常/)
-  assert.match(presentationSource, /listening: '我在听'/)
+  assert.match(presentationSource, /listening: ''/)
   assert.match(presentationSource, /thinking: '想一想'/)
   assert.match(presentationSource, /speaking: ''/)
   assert.match(presentationSource, /error: '连接断开'/)
@@ -599,11 +601,12 @@ test('mobile live call renders typed result receipts without unsafe HTML', () =>
     callCssSource.indexOf('.live-output-tray'),
     callCssSource.indexOf('@keyframes camera-focus-in'),
   )
-  assert.match(resultStyles, /\.live-output-tray\s*\{[^}]*max-height:\s*42dvh;/s)
-  assert.match(resultStyles, /\.live-output-tray\s*\{[^}]*bottom:\s*calc\(max\(14px, env\(safe-area-inset-bottom\)\) \+ 72px\);/s)
+  assert.match(resultStyles, /\.live-output-tray\s*\{[^}]*position:\s*relative;/s)
+  assert.match(resultStyles, /\.live-output-tray\s*\{[^}]*max-height:\s*min\(34dvh, 300px\);/s)
+  assert.match(resultStyles, /\.live-output-tray\s*\{[^}]*margin:\s*0 0 calc\(70px \+ max\(14px, env\(safe-area-inset-bottom\)\)\);/s)
   assert.match(resultStyles, /\.live-output-tray\s*\{[^}]*animation:\s*live-result-enter 280ms/s)
   assert.match(resultStyles, /\.live-result-sheet\s*\{[^}]*overflow-y:\s*auto;/s)
-  assert.match(resultStyles, /\.live-result-card\s*\{[^}]*padding:\s*14px 8px 14px 14px;[^}]*border:\s*1px solid var\(--line\);[^}]*border-radius:\s*(?:18|20)px;[^}]*background:\s*var\(--surface-raised\);/s)
+  assert.match(resultStyles, /\.live-result-card\s*\{[^}]*padding:\s*14px 8px 14px 14px;[^}]*border:\s*1px solid var\(--line\);[^}]*border-radius:\s*18px;[^}]*background:\s*rgb\(24 24 24 \/ 94%\);/s)
   assert.doesNotMatch(resultStyles, /rgb\(158 220 255|rgb\(10 23 32/)
   assert.match(resultStyles, /\.live-result-dismiss\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;[^}]*font-size:\s*18px;/s)
   assert.match(resultStyles, /\.live-result-icon\s*\{[^}]*font-size:\s*20px;/s)
@@ -612,7 +615,7 @@ test('mobile live call renders typed result receipts without unsafe HTML', () =>
   assert.match(resultStyles, /\.live-result-icon\.is-failure\s*\{[^}]*color:\s*var\(--danger\);/s)
   assert.match(resultStyles, /font-size:\s*14px;/)
   assert.match(resultStyles, /font-size:\s*(?:10|11|12)px;/)
-  assert.match(callCssSource, /\.live-call-screen\.has-results \.live-stage\s*\{[^}]*transform:\s*translateY\(-32px\);/s)
+  assert.match(callCssSource, /\.live-call-screen\.has-results \.live-stage\s*\{[^}]*min-height:\s*220px;[^}]*transform:\s*none;/s)
   assert.match(callCssSource, /\.live-call-screen\.has-results \.live-orb-canvas,[\s\S]*?\.live-call-screen\.has-results \.live-orb-fallback\s*\{[^}]*animation:\s*none;[^}]*transform:\s*scale\(0\.70\);/s)
   assert.doesNotMatch(callCssSource, /\.live-call-screen\.has-results \.call-controls/)
 })
@@ -628,7 +631,7 @@ test('reduced motion preserves static result geometry without transitions or key
 
   assert.match(
     reducedMotionSource,
-    /\.live-call-screen\.has-results \.live-stage\s*\{[^}]*transform:\s*translateY\(-32px\);[^}]*transition:\s*none;/s,
+    /\.live-call-screen\.has-results \.live-stage\s*\{[^}]*transform:\s*none;[^}]*transition:\s*none;/s,
   )
   assert.match(
     reducedMotionSource,
