@@ -1,7 +1,7 @@
 .live-orb-canvas,
 .live-orb-fallback {
   display: block;
-  width: 188px;
+  width: 232px;
   max-width: calc(100vw - 64px);
   aspect-ratio: 1;
   border-radius: 50%;
@@ -24,20 +24,27 @@
 .live-orb-fallback {
   position: relative;
   isolation: isolate;
+  background: transparent;
+  box-shadow: none;
+}
+
+.live-orb-fallback::before {
+  position: absolute;
+  inset: 12.5%;
+  border-radius: 50%;
   background:
-    radial-gradient(circle at 33% 27%, #fff6e9 0%, #9bc3ff 11%, transparent 32%),
-    radial-gradient(circle at 72% 38%, rgb(155 195 255 / 72%) 0%, rgb(47 119 230 / 38%) 44%, transparent 76%),
-    radial-gradient(circle at 38% 67%, #2f77e6 0%, #0a2e75 74%);
-  box-shadow:
-    inset -18px -22px 36px rgb(10 46 117 / 56%);
+    radial-gradient(circle at 38% 15%, #f4fff9 0%, #b7f2ff 32%, transparent 68%),
+    radial-gradient(circle at 60% 38%, rgb(112 225 255 / 92%) 0%, transparent 62%),
+    radial-gradient(circle at 52% 88%, #0870ff 0%, #1194ff 72%);
+  content: '';
 }
 
 .live-orb-fallback::after {
   position: absolute;
   z-index: -1;
-  inset: 13%;
+  inset: 12.5%;
   border-radius: 50%;
-  box-shadow: 0 0 30px 14px rgb(155 195 255 / 6%);
+  box-shadow: 0 0 36px 16px rgb(155 195 255 / 5%);
   content: '';
 }
 
@@ -50,7 +57,7 @@
 .live-orb-canvas.is-listening,
 .live-orb-fallback.is-listening {
   filter: brightness(1.06);
-  transform: scale(var(--live-input-scale));
+  transform: scale(1);
 }
 
 .live-orb-canvas.is-interruption-release,
@@ -74,7 +81,7 @@
 .live-orb-canvas.is-speaking,
 .live-orb-fallback.is-speaking {
   filter: brightness(1.12);
-  transform: scale(var(--live-output-scale));
+  transform: scale(1.015);
 }
 
 .live-orb-canvas.is-ended,
@@ -91,11 +98,11 @@
 
 @keyframes live-orb-idle-breath {
   from {
-    transform: scale(0.965);
+    transform: scale(0.985);
   }
 
   to {
-    transform: scale(1.025);
+    transform: scale(1.015);
   }
 }
 
@@ -259,6 +266,12 @@
   color: rgb(238 237 232 / 62%);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
+}
+
+.live-call-screen .call-header-spacer {
+  display: block;
+  width: 44px;
+  height: 44px;
 }
 
 .live-call-screen .call-icon {
@@ -778,4 +791,78 @@
   .live-call-screen .call-icon {
     transition: none;
   }
+}
+
+/* Quiet, conversation-first shell. Ripple's orb remains the only vivid brand surface. */
+.call-screen.live-call-screen {
+  background:
+    radial-gradient(circle at 50% 43%, rgb(52 91 142 / 16%), transparent 38%),
+    var(--live-bg);
+}
+
+.live-call-screen .call-icon {
+  border-color: transparent;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 6%);
+  box-shadow: none;
+}
+
+.live-call-screen .call-controls {
+  right: auto;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  left: 50%;
+  width: max-content;
+  min-height: 0;
+  gap: 22px;
+  padding: 0;
+  box-shadow: none;
+  transform: translateX(-50%);
+}
+
+.live-call-screen .control-button {
+  width: 56px;
+  height: 56px;
+  border-color: rgb(166 187 213 / 15%);
+  background: rgb(25 30 38 / 90%);
+  color: #d4deea;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
+  backdrop-filter: blur(16px);
+}
+
+.live-call-screen .control-button:hover {
+  border-color: rgb(177 204 237 / 25%);
+  background: rgb(34 41 51 / 94%);
+}
+
+.live-call-screen .control-button.is-active {
+  border-color: rgb(177 207 243 / 30%);
+  background: #d7e6f8;
+  color: #111820;
+}
+
+.live-call-screen .end-button {
+  width: 56px;
+  height: 56px;
+  background: #e25763;
+  color: #fff;
+  box-shadow: 0 10px 28px rgb(143 29 43 / 30%);
+}
+
+.live-call-screen .end-button:hover {
+  background: #ec626d;
+}
+
+.live-call-screen .control-button > svg {
+  width: 23px;
+  height: 23px;
+}
+
+.live-call-screen .end-button > svg {
+  width: 23px;
+  height: 23px;
+  transform: rotate(135deg);
+}
+
+.live-call-screen .live-error {
+  color: #e6c58d;
 }

@@ -1,4 +1,4 @@
-import { Archive, ArrowCounterClockwise, NotePencil, PushPin, Trash } from '@phosphor-icons/react'
+import { Archive, RotateCcw as ArrowCounterClockwise, SquarePen as NotePencil, Pin as PushPin, Trash2 as Trash } from 'lucide-react'
 import type { LibraryAction } from '../library'
 
 export type LibraryActionsProps = {
@@ -18,7 +18,7 @@ export function LibraryActions({ pinned, archived, onAction, onRename }: Library
       )}
       {!archived && (
         <button className="library-item-action" type="button" onClick={() => onAction(pinned ? 'unpin' : 'pin')}>
-          <PushPin weight={pinned ? 'fill' : 'regular'} aria-hidden="true" />
+          <PushPin aria-hidden="true" />
           {pinned ? '取消置顶' : '置顶'}
         </button>
       )}

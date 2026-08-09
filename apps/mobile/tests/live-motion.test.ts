@@ -123,10 +123,10 @@ test('live orb uses the compact state scale ranges and RMS inputs', () => {
     'utf8',
   )
 
-  assert.match(cssSource, /width:\s*188px/)
+  assert.match(cssSource, /width:\s*232px/)
   assert.match(
     cssSource,
-    /@keyframes live-orb-idle-breath\s*\{\s*from\s*\{[^}]*scale\(0\.965\)[^}]*\}\s*to\s*\{[^}]*scale\(1\.025\)/,
+    /@keyframes live-orb-idle-breath\s*\{\s*from\s*\{[^}]*scale\(0\.985\)[^}]*\}\s*to\s*\{[^}]*scale\(1\.015\)/,
   )
   assert.match(cssSource, /animation:\s*live-orb-idle-breath 4\.2s/)
   assert.match(
@@ -141,16 +141,16 @@ test('live orb uses the compact state scale ranges and RMS inputs', () => {
     cssSource,
     /@keyframes live-orb-tool\s*\{\s*from\s*\{[^}]*translateY\(-32px\) scale\(0\.68\)[^}]*\}\s*to\s*\{[^}]*translateY\(-32px\) scale\(0\.72\)/,
   )
-  assert.match(cssSource, /is-listening[^}]*scale\(var\(--live-input-scale\)\)/)
-  assert.match(cssSource, /is-speaking[^}]*scale\(var\(--live-output-scale\)\)/)
+  assert.match(cssSource, /is-listening[^}]*scale\(1\)/)
+  assert.match(cssSource, /is-speaking[^}]*scale\(1\.015\)/)
+  assert.doesNotMatch(callSource, /--live-(?:input|output)-scale/)
   assert.match(
     cssSource,
     /@keyframes live-orb-interrupt-release\s*\{\s*0%\s*\{[^}]*scale\(1\.04\)[^}]*\}\s*55%\s*\{[^}]*scale\(0\.92\)[^}]*\}\s*100%\s*\{[^}]*scale\(1\)/,
   )
   assert.match(cssSource, /is-interruption-release[^}]*160ms/)
   assert.match(cssSource, /is-error[^}]*saturate\([^)]*\)[^}]*scale\(0\.92\)/)
-  assert.match(callSource, /0\.98 \+ clampLevel\(inputLevel\) \* 0\.065/)
-  assert.match(callSource, /0\.96 \+ clampLevel\(outputLevel\) \* 0\.115/)
+  assert.doesNotMatch(callSource, /clampLevel|--live-(?:input|output)-scale/)
 })
 
 test('uses the interruption release only for speaking-to-listening', () => {

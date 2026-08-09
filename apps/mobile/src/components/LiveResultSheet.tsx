@@ -1,11 +1,11 @@
 import {
-  CheckCircle,
+  CircleCheck as CheckCircle,
   CloudSun,
-  ListChecks,
-  MagnifyingGlass,
-  WarningCircle,
+  ListTodo as ListChecks,
+  Search as MagnifyingGlass,
+  CircleAlert as WarningCircle,
   X,
-} from '@phosphor-icons/react'
+} from 'lucide-react'
 import type { ReactNode } from 'react'
 import { openExternalUrl } from '../live/externalLinks'
 import type { LiveResult } from '../realtime/toolResults'
@@ -35,14 +35,14 @@ function ResultBody({ result }: { result: LiveResult }) {
   switch (result.kind) {
     case 'memory_receipt':
       return (
-        <Receipt icon={<CheckCircle weight="regular" />} label="记忆已保存">
+        <Receipt icon={<CheckCircle />} label="记忆已保存">
           {result.title}
         </Receipt>
       )
     case 'todo_receipt': {
       const due = dueLabel(result.dueAt)
       return (
-        <Receipt icon={<ListChecks weight="regular" />} label="待办已创建">
+        <Receipt icon={<ListChecks />} label="待办已创建">
           <span>{result.title}</span>
           {due && <small>{due}</small>}
         </Receipt>
@@ -68,7 +68,7 @@ function ResultBody({ result }: { result: LiveResult }) {
         <div className="live-result-detail">
           <strong className="live-result-heading">
             <span className="live-result-icon is-brand" aria-hidden="true">
-              <MagnifyingGlass weight="regular" />
+              <MagnifyingGlass />
             </span>
             搜索结果
           </strong>
@@ -94,7 +94,7 @@ function ResultBody({ result }: { result: LiveResult }) {
       return (
         <div className="live-result-weather">
           <span className="live-result-icon is-brand" aria-hidden="true">
-            <CloudSun weight="regular" />
+            <CloudSun />
           </span>
           <div>
             <strong>{result.location}</strong>
@@ -113,8 +113,8 @@ function ResultBody({ result }: { result: LiveResult }) {
             aria-hidden="true"
           >
             {result.status === 'success'
-              ? <CheckCircle weight="regular" />
-              : <WarningCircle weight="regular" />}
+              ? <CheckCircle />
+              : <WarningCircle />}
           </span>
           <span>{result.label}</span>
         </div>
@@ -165,7 +165,7 @@ export function LiveResultSheet({ results, onDismiss }: LiveResultSheetProps) {
             aria-label={`关闭此结果：${result.kind === 'generic' ? result.label : result.kind}`}
             onClick={() => onDismiss(result.callId)}
           >
-            <X weight="regular" aria-hidden="true" />
+            <X aria-hidden="true" />
           </button>
         </article>
       ))}

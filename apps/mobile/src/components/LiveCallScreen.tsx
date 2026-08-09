@@ -1,18 +1,17 @@
 import {
-  ArrowClockwise,
-  CameraRotate,
-  CaretDown,
-  Microphone,
-  MicrophoneSlash,
-  VideoCamera,
-  VideoCameraSlash,
+  SwitchCamera as CameraRotate,
+  Mic as Microphone,
+  MicOff as MicrophoneSlash,
+  Phone,
+  Video as VideoCamera,
+  VideoOff as VideoCameraSlash,
   X,
-} from '@phosphor-icons/react'
-import { useEffect, useState, type CSSProperties, type RefObject } from 'react'
+} from 'lucide-react'
+import { useEffect, useState, type RefObject } from 'react'
 import { assetBlob } from '../api'
 import { mapSessionState } from '../live/motion'
 import type { CameraPhase } from '../live/cameraOrchestration'
-import { cameraHeaderAction, liveCallLabels } from '../live/callPresentation'
+import { liveCallLabels } from '../live/callPresentation'
 import type { RippleSignal, RippleSignalId } from '../live/ripple'
 import type {
   RealtimeMode,
@@ -29,11 +28,6 @@ function formatDuration(seconds: number) {
   const minutes = Math.floor(seconds / 60)
   const rest = seconds % 60
   return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
-}
-
-function clampLevel(level: number) {
-  if (!Number.isFinite(level)) return 0
-  return Math.min(1, Math.max(0, level))
 }
 
 function AuthenticatedArtifact({
@@ -135,15 +129,9 @@ export function LiveCallScreen({
   const cameraBusy = cameraPhase === 'opening' || cameraPhase === 'closing'
   const hasOutput = results.length > 0 || artifacts.length > 0
   const labels = liveCallLabels(state, cameraPhase, toolStatus)
-  const headerAction = cameraHeaderAction(
-    cameraPhase,
-    cameraPreviewVisible,
-    cameraControlReady,
-  )
-  const orbStyle = {
-    '--live-input-scale': 0.98 + clampLevel(inputLevel) * 0.065,
-    '--live-output-scale': 0.96 + clampLevel(outputLevel) * 0.115,
-  } as CSSProperties
+  const visibleErrorMessage = errorMessage === 'Permission dismissed'
+    ? '未授予麦克风或摄像头权限'
+    : errorMessage
   return (
     <section
       className={`call-screen live-call-screen ${videoMode ? 'has-video' : 'has-audio'} server-${mode} camera-phase-${cameraPhase} ${hasOutput ? 'has-results' : ''}`}
@@ -166,44 +154,30 @@ export function LiveCallScreen({
       )}
 
       <header className="call-header">
-        <button
-          className="icon-button call-icon call-collapse"
-          type="button"
-          aria-label="收起通话"
-          onClick={() => void onLeave()}
-        >
-          <CaretDown aria-hidden="true" />
-        </button>
+        <span className="call-header-spacer" />
         <div className="call-title">
           <strong>Ripple</strong>
           <span aria-label={`通话时长 ${formatDuration(elapsed)}`}>
             {formatDuration(elapsed)}
           </span>
         </div>
-        <button
-          className="icon-button call-icon"
-          type="button"
-          aria-label={headerAction.label}
-          disabled={headerAction.disabled}
-          onClick={() => {
-            const action = headerAction.kind === 'flip'
-              ? onFlipCamera
-              : onToggleCamera
-            void action().catch(() => {})
-          }}
-        >
-          {headerAction.kind === 'flip'
-            ? <CameraRotate aria-hidden="true" />
-            : cameraPhase === 'error'
-              ? <ArrowClockwise aria-hidden="true" />
-              : videoMode
-                ? <VideoCameraSlash aria-hidden="true" />
-                : <VideoCamera aria-hidden="true" />}
-        </button>
+        {videoMode ? (
+          <button
+            className="icon-button call-icon"
+            type="button"
+            aria-label="切换前后摄像头"
+            disabled={!cameraControlReady || cameraBusy}
+            onClick={() => void onFlipCamera().catch(() => {})}
+          >
+            <CameraRotate aria-hidden="true" />
+          </button>
+        ) : (
+          <span className="call-header-spacer" />
+        )}
       </header>
 
       <div className="live-stage">
-        <div className="live-orb-wrap" style={orbStyle}>
+        <div className="live-orb-wrap">
           <LiveOrb
             state={mapSessionState(state)}
             inputLevel={inputLevel}
@@ -227,10 +201,10 @@ export function LiveCallScreen({
             assistantText={assistantText}
             state={state}
           />
-          {errorMessage && (
+          {visibleErrorMessage && (
             <div className="live-error" role="alert">
-              <X weight="bold" aria-hidden="true" />
-              <span>{errorMessage}</span>
+              <X aria-hidden="true" />
+              <span>{visibleErrorMessage}</span>
             </div>
           )}
         </div>
@@ -296,7 +270,7 @@ export function LiveCallScreen({
           aria-label="结束通话"
           onClick={() => void onLeave()}
         >
-          <X weight="bold" aria-hidden="true" />
+          <Phone aria-hidden="true" />
         </button>
       </footer>
     </section>

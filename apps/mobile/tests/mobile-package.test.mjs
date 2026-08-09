@@ -197,6 +197,11 @@ test('mobile todos retain completed items in a dedicated view', () => {
   assert.match(appSource, /\n\s*已完成\n\s*<\/button>/)
   assert.doesNotMatch(appSource, /className="todo-intro"/)
   assert.match(appSource, /完成：\$\{formatHistoryTime\(todo\.completed_at\)\}/)
+  assert.match(appSource, /onPointerMove=\{moveTodoGesture\}/)
+  assert.match(appSource, /baseOffset: revealedTodo === id \? 74 : 0/)
+  assert.match(appSource, /setRevealedTodo\(offset >= 37 \? start\.id : null\)/)
+  assert.match(appSource, /aria-label=\{`删除：\$\{todo\.title\}`\}/)
+  assert.match(cssSource, /\.todo-swipe-shell\.is-dragging \.todo-card-surface/)
   assert.match(cssSource, /\.todo-view-switch/)
 })
 
@@ -226,16 +231,16 @@ test('mobile home presents voice as the primary call entry with explicit camera 
   assert.equal(existsSync(homePath), true, 'ConversationHome.tsx should exist')
   const homeSource = readFileSync(homePath, 'utf8')
   assert.match(appSource, /<ConversationHome/)
-  assert.match(homeSource, /有什么想聊的？/)
-  assert.match(homeSource, /可以直接说/)
-  assert.match(homeSource, /开始对话/)
+  assert.match(homeSource, /有什么可以帮你？/)
+  assert.match(homeSource, /开始语音对话/)
+  assert.match(homeSource, /aria-label="开始语音对话"/)
   assert.equal((homeSource.match(/<LiveOrb\b/g) ?? []).length, 1)
   assert.match(homeSource, /<LiveOrb\s+state="idle"/)
-  assert.doesNotMatch(homeSource, /<span>历史<\/span>/)
-  assert.match(homeSource, /aria-label="打开镜头"/)
-  assert.match(homeSource, /onClick=\{onStartAudio\}/)
+  assert.doesNotMatch(homeSource, /继续上次对话|打开记忆|看看今天的待办/)
+  assert.match(homeSource, /aria-label="开启视频对话"/)
+  assert.equal((homeSource.match(/onClick=\{onStartAudio\}/g) ?? []).length, 1)
   assert.match(homeSource, /onClick=\{onStartVideo\}/)
-  assert.match(homeSource, /onClick=\{onOpenHistory\}/)
+  assert.doesNotMatch(homeSource, /onOpenHistory|onOpenMemories|onOpenTodos/)
   assert.match(appSource, /onStartAudio=\{\(\) => openCall\('audio'\)\}/)
   assert.match(appSource, /onStartVideo=\{\(\) => openCall\('video'\)\}/)
   assert.match(apiSource, /export async function conversation\(/)
@@ -249,35 +254,35 @@ test('mobile home presents voice as the primary call entry with explicit camera 
   assert.doesNotMatch(cssSource, /#9046ff|--ripple-violet|--voice-accent:\s*#b98aff/)
 })
 
-test('mobile uses the approved warm shared tokens and typography', () => {
+test('mobile uses the approved quiet shared tokens and typography', () => {
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
   const indexSource = readFileSync(path.join(appRoot, 'src/index.css'), 'utf8')
 
   for (const token of [
-    '--live-bg: #07080C',
-    '--app-bg: #09090B',
-    '--surface: #101014',
-    '--surface-raised: #151821',
-    '--text-primary: #F5F4F0',
+    '--live-bg: #090909',
+    '--app-bg: #0d0d0d',
+    '--surface: #0d0d0d',
+    '--surface-raised: #181818',
+    '--text-primary: #f4f4f4',
     '--danger: #ED687A',
     '--success: #69D49D',
-    '--line: rgb(255 255 255 / 8%)',
-    '--text-secondary: rgb(238 237 232 / 58%)',
-    '--text-tertiary: rgb(238 237 232 / 36%)',
+    '--line: rgb(255 255 255 / 9%)',
+    '--text-secondary: rgb(244 244 244 / 62%)',
+    '--text-tertiary: rgb(244 244 244 / 38%)',
     '--orb-deep: #0a2e75',
     '--orb-cobalt: #2f77e6',
     '--orb-soft-blue: #9bc3ff',
     '--orb-cream: #fff6e9',
-    '--focus-ring: rgb(155 195 255 / 58%)',
+    '--focus-ring: rgb(255 255 255 / 42%)',
   ]) {
     assert.match(cssSource, new RegExp(token.replace(/[()]/g, '\\$&')))
   }
   assert.match(
     cssSource,
-    /font-family:\s*Inter, "SF Pro Display", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;/,
+    /font-family:\s*-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans SC", Helvetica, Arial, system-ui, sans-serif;/,
   )
   assert.doesNotMatch(cssSource, /body\s*\{[^}]*letter-spacing:\s*-/s)
-  assert.match(indexSource, /background:\s*#09090B/)
+  assert.match(indexSource, /background:\s*#0d0d0d/)
 })
 
 test('live call owns camera transitions explicitly and renders truthful camera states', () => {
@@ -320,42 +325,49 @@ test('live call owns camera transitions explicitly and renders truthful camera s
   assert.match(callSource, /disabled=\{!cameraControlReady \|\| cameraBusy\}/)
   assert.match(presentationSource, /case 'closing':[\s\S]*'正在关闭镜头'/)
   assert.match(presentationSource, /case 'error':[\s\S]*'重试镜头'/)
-  assert.match(callSource, /cameraHeaderAction\(/)
-  assert.match(callSource, /aria-label=\{headerAction\.label\}/)
-  assert.match(callSource, /headerAction\.kind === 'flip'/)
-  assert.doesNotMatch(callSource, /<span className="header-spacer"/)
+  assert.doesNotMatch(callSource, /cameraHeaderAction\(|headerAction/)
+  assert.match(callSource, /videoMode \? \([\s\S]*aria-label="切换前后摄像头"/)
+  assert.match(callSource, /onFlipCamera\(\)\.catch/)
+  assert.match(callSource, /<span className="call-header-spacer"/)
   assert.match(callCssSource, /opacity 420ms/)
   assert.match(callCssSource, /prefers-reduced-motion: reduce/)
 })
 
-test('mobile navigation exposes four tabs with screen-derived selection', () => {
+test('mobile navigation uses a screen-derived side drawer without a bottom bar', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
-  const navPath = path.join(appRoot, 'src/components/BottomNav.tsx')
+  const navPath = path.join(appRoot, 'src/components/AppDrawer.tsx')
   const navCssPath = path.join(appRoot, 'src/components/AppNavigation.css')
 
-  assert.equal(existsSync(navPath), true, 'BottomNav.tsx should exist')
+  assert.equal(existsSync(navPath), true, 'AppDrawer.tsx should exist')
   assert.equal(existsSync(navCssPath), true, 'AppNavigation.css should exist')
   const navSource = readFileSync(navPath, 'utf8')
   const navCssSource = readFileSync(navCssPath, 'utf8')
-  for (const label of ['对话', '记忆', '待办', '我的']) {
+  for (const label of ['开始', '对话历史', '记忆', '待办', '设置']) {
     assert.match(navSource, new RegExp(label))
   }
-  assert.match(navSource, /export type AppTab = 'chat' \| 'memories' \| 'todos' \| 'profile'/)
-  assert.match(navSource, /aria-label="主导航"/)
-  assert.match(navSource, /aria-current=\{active === tab \? 'page' : undefined\}/)
-  assert.match(appSource, /case 'history':\s*case 'conversation':\s*return 'chat'/)
+  assert.match(navSource, /export type AppDestination/)
+  assert.match(navSource, /aria-label="Ripple 功能"/)
+  assert.match(navSource, /aria-current=\{active === destination \? 'page' : undefined\}/)
+  assert.match(appSource, /case 'conversation':\s*return 'home'/)
+  assert.match(appSource, /case 'history':\s*return 'history'/)
   assert.match(appSource, /case 'memories':\s*return 'memories'/)
   assert.match(appSource, /case 'todos':\s*return 'todos'/)
-  assert.match(appSource, /case 'settings':\s*return 'profile'/)
-  assert.match(appSource, /<BottomNav active=\{tabForScreen\(screen\)\}/)
-  assert.match(appSource, /\{screen !== 'call' && \(\s*<BottomNav/s)
-  assert.equal((appSource.match(/<BottomNav /g) ?? []).length, 1)
-  assert.match(navCssSource, /min-height:\s*44px/)
+  assert.match(appSource, /case 'settings':\s*return 'settings'/)
+  assert.equal((appSource.match(/library-sticky-header/g) ?? []).length, 3)
+  assert.match(appSource, /<AppDrawer/)
+  assert.doesNotMatch(appSource, /<BottomNav/)
+  assert.doesNotMatch(appSource, /with-bottom-nav/)
+  assert.match(appSource, /window\.requestAnimationFrame\(\(\) => window\.scrollTo\(0, 0\)\)/)
+  assert.equal((appSource.match(/<AppDrawer/g) ?? []).length, 1)
+  assert.match(navCssSource, /\.app-drawer\s*\{/)
+  assert.match(navCssSource, /height:\s*100dvh/)
   assert.match(navCssSource, /env\(safe-area-inset-bottom\)/)
-  assert.match(navSource, /<IconComponent aria-hidden="true" weight="regular" \/>/)
-  assert.doesNotMatch(navSource, /weight=\{active === tab \? 'fill' : 'regular'\}/)
-  assert.match(navCssSource, /\.bottom-nav button\.is-active::after\s*\{[^}]*width:\s*3px;[^}]*height:\s*3px;/s)
-  assert.match(navCssSource, /\.bottom-nav button > svg\s*\{[^}]*width:\s*20px;[^}]*height:\s*20px;/s)
+  assert.match(navSource, /type LucideIcon/)
+  assert.match(navSource, /<Icon aria-hidden="true" \/>/)
+  assert.doesNotMatch(navSource, /weight=/)
+  assert.match(navCssSource, /\.drawer-navigation > button\.is-active/)
+  assert.match(navSource, /event\.key === 'Escape'/)
+  assert.doesNotMatch(navSource, /drawer-new-conversation|onNewConversation/)
 })
 
 test('mobile live orb uses a single canvas renderer with a static fallback', () => {
@@ -384,7 +396,7 @@ test('mobile live orb fallback uses only off-center color fields', () => {
     path.join(appRoot, 'src/live/LiveCall.css'),
     'utf8',
   )
-  const fallbackRule = [...cssSource.matchAll(/^\.live-orb-fallback\s*\{([^}]*)\}/gm)]
+  const fallbackRule = [...cssSource.matchAll(/^\.live-orb-fallback::before\s*\{([^}]*)\}/gm)]
     .map((match) => match[1])
     .find((body) => body.includes('radial-gradient'))
 
@@ -442,11 +454,11 @@ test('mobile live call uses the immersive presentation contract', () => {
   assert.match(presentationSource, /thinking: '想一想'/)
   assert.match(presentationSource, /speaking: ''/)
   assert.match(presentationSource, /error: '连接断开'/)
-  assert.match(callSource, /aria-label="收起通话"/)
-  assert.match(callSource, /<CaretDown[^>]*\/>/)
+  assert.doesNotMatch(callSource, /aria-label="收起通话"|<CaretDown/)
+  assert.match(callSource, /className="call-header-spacer"/)
   assert.match(callSource, /<strong>Ripple<\/strong>/)
   assert.match(callSource, /\{formatDuration\(elapsed\)\}/)
-  assert.match(callSource, /aria-label=\{headerAction\.label\}/)
+  assert.match(callSource, /aria-label="切换前后摄像头"/)
   assert.match(callSource, /aria-label=\{muted \? '取消静音' : '静音'\}/)
   assert.match(callSource, /aria-label="结束通话"/)
   const controlsStart = callSource.indexOf('<footer className="call-controls">')
@@ -457,14 +469,17 @@ test('mobile live call uses the immersive presentation contract', () => {
     controlsSource,
     /aria-label=[\s\S]*开启镜头[\s\S]*aria-label=\{muted \? '取消静音' : '静音'\}[\s\S]*aria-label="结束通话"/,
   )
-  assert.match(controlsSource, /className="end-button"[\s\S]*<X weight="bold"/)
+  assert.match(controlsSource, /className="end-button"[\s\S]*<Phone aria-hidden="true"/)
   assert.doesNotMatch(callSource, /className="control-item"/)
   assert.doesNotMatch(callSource, /<span>\{muted \? '取消静音' : '静音'\}<\/span>/)
-  const controlsRule = callCssSource.match(
-    /\.live-call-screen \.call-controls\s*\{([^}]*)\}/,
-  )?.[1] ?? ''
+  const controlsRule = [...callCssSource.matchAll(
+    /\.live-call-screen \.call-controls\s*\{([^}]*)\}/g,
+  )].at(-1)?.[1] ?? ''
   assert.doesNotMatch(controlsRule, /background:|border:|backdrop-filter:/)
   assert.match(callCssSource, /\.live-call-screen \.control-button,\s*\.live-call-screen \.end-button\s*\{[^}]*width:\s*50px;[^}]*height:\s*50px;/)
+  assert.match(callCssSource, /\.live-call-screen \.control-button\s*\{[^}]*width:\s*56px;[^}]*height:\s*56px;/s)
+  assert.match(callCssSource, /\.live-call-screen \.end-button\s*\{[^}]*width:\s*56px;[^}]*height:\s*56px;/s)
+  assert.match(callCssSource, /\.live-call-screen \.end-button > svg\s*\{[^}]*rotate\(135deg\)/s)
   assert.match(
     appSource,
     /setUserText\(''\)\s*setAssistantText\(''\)\s*const signal = createRippleSignal\('speech'\)\s*setRippleSignals\(\(current\) => enqueueRippleSignal\(current, signal\)\)\s*void session\.speechStarted\(\)/,
@@ -563,12 +578,12 @@ test('mobile live call renders typed result receipts without unsafe HTML', () =>
   assert.match(resultSource, /WarningCircle/)
   assert.match(resultSource, /live-result-icon is-receipt/)
   assert.match(resultSource, /is-failure/)
-  assert.doesNotMatch(resultSource, /weight="fill"|weight="bold"/)
+  assert.doesNotMatch(resultSource, /weight=/)
   for (const icon of ['CheckCircle', 'CloudSun', 'ListChecks', 'MagnifyingGlass', 'WarningCircle', 'X']) {
     assert.match(
       resultSource,
-      new RegExp(`<${icon}[^>]*weight="regular"`),
-      `${icon} should use the regular icon weight`,
+      new RegExp(`<${icon}(?:\\s|\\/|>)`),
+      `${icon} should use the shared Lucide outline style`,
     )
   }
   assert.doesNotMatch(resultSource, /<a\b|href=|target=/)
@@ -807,9 +822,10 @@ test('supporting screens use truthful content and the shared warm hierarchy', ()
     'utf8',
   )
 
-  assert.match(toolbarSource, /const memoryScopes[\s\S]*?label:\s*'全部'[\s\S]*?label:\s*'置顶'[\s\S]*?label:\s*'图片'/)
-  assert.match(toolbarSource, /aria-label="更多记忆管理"/)
-  assert.match(toolbarSource, /onScopeChange\('archived'\)/)
+  assert.match(toolbarSource, /const memoryScopes[\s\S]*?label:\s*'全部'[\s\S]*?label:\s*'图片'/)
+  assert.doesNotMatch(toolbarSource, /const memoryScopes[\s\S]*?label:\s*'置顶'/)
+  assert.match(toolbarSource, /aria-label=\{`更多\$\{kind\}操作`\}/)
+  assert.match(toolbarSource, /scope === 'archived' \? 'all' : 'archived'/)
   assert.match(appSource, /hasCover:\s*Boolean\(item\.cover\)/)
   assert.match(appSource, /className="memory-card-note"/)
   assert.match(
@@ -822,7 +838,8 @@ test('supporting screens use truthful content and the shared warm hierarchy', ()
   )
 
   assert.match(appSource, /className=\{`todo-card todo-card-surface \$\{todoView === 'completed' \? 'is-completed' : ''\}`\}/)
-  assert.match(appSource, /className="todo-row-meta"/)
+  assert.match(appSource, /className="todo-copy"/)
+  assert.doesNotMatch(appSource, /className="todo-row-meta"|className="todo-edit"/)
   assert.match(
     cssSource,
     /\.todo-swipe-shell\s*{[^}]*border:\s*0;[^}]*border-bottom:\s*1px solid var\(--line\);[^}]*border-radius:\s*0;/s,
@@ -835,8 +852,7 @@ test('supporting screens use truthful content and the shared warm hierarchy', ()
   assert.match(cssSource, /\.todo-card\.is-completed strong\s*{[^}]*text-decoration:\s*line-through;/s)
 
   for (const copy of [
-    '当前账号',
-    '连接服务',
+    '系统状态',
     '通知权限',
     '实时字幕',
     '视觉记忆',
@@ -847,7 +863,8 @@ test('supporting screens use truthful content and the shared warm hierarchy', ()
   }
   assert.match(appSource, /notificationPermissionLabel\(\)/)
   assert.match(appSource, /navigateTo\('memories'\)/)
-  assert.match(appSource, /\{server\}/)
+  assert.match(appSource, /className="profile-identity"/)
+  assert.doesNotMatch(appSource, /<dt>连接服务<\/dt>|<dd>\{server\}<\/dd>/)
   assert.doesNotMatch(appSource, /type="checkbox"|role="switch"/)
 
   assert.match(
@@ -872,13 +889,11 @@ test('history and conversation detail use a compact voice-first hierarchy', () =
     'utf8',
   )
 
-  assert.match(appSource, /className="screen-header history-page-header"/)
+  assert.match(appSource, /className="screen-header history-page-header library-sticky-header"/)
   assert.match(appSource, /className="history-screen history-library-screen"/)
-  assert.match(
-    appSource,
-    /className="icon-button history-search-button"[\s\S]*?document\.getElementById\('history-search'\)\?\.focus\(\)/,
-  )
+  assert.doesNotMatch(appSource, /history-search-button|document\.getElementById\('history-search'\)/)
   assert.match(toolbarSource, /className="library-search-affordance"/)
+  assert.match(toolbarSource, /aria-label=\{`更多\$\{kind\}操作`\}/)
   assert.match(
     cssSource,
     /\.history-page-header h1\s*{[^}]*font-size:\s*23px;/s,
@@ -908,15 +923,9 @@ test('history and conversation detail use a compact voice-first hierarchy', () =
     cssSource,
     /\.library-row-preview\s*{[^}]*color:\s*var\(--text-secondary\);[^}]*-webkit-line-clamp:\s*1;/s,
   )
-  assert.match(appSource, /className="history-voice-fab"/)
-  assert.match(
-    appSource,
-    /className="history-voice-fab"[\s\S]*?onClick=\{\(\) => openCall\('audio'\)\}/,
-  )
-  assert.match(
-    navigationSource,
-    /\.history-voice-fab\s*{[^}]*width:\s*48px;[^}]*height:\s*48px;/s,
-  )
+  assert.doesNotMatch(appSource, /className="history-voice-fab"/)
+  assert.doesNotMatch(navigationSource, /\.history-voice-fab\s*\{/)
+  assert.match(appSource, /item\.preview\.trim\(\)/)
   assert.match(
     cssSource,
     /\.message-history article\.is-assistant\s*{[^}]*border:\s*0;[^}]*background:\s*transparent;/s,
@@ -926,10 +935,13 @@ test('history and conversation detail use a compact voice-first hierarchy', () =
     /\.message-history article\.is-user\s*{[^}]*border:\s*0;[^}]*border-radius:\s*18px;[^}]*background:\s*var\(--surface\);/s,
   )
   assert.match(appSource, /className="conversation-continuation-bar"/)
+  assert.match(appSource, /className="conversation-header-title"/)
+  assert.doesNotMatch(appSource, /<div className="conversation-title">/)
   assert.match(
     appSource,
     /className="conversation-continuation-bar"[\s\S]*?onClick=\{\(\) => openCall\('audio', selectedConversation\.id\)\}/,
   )
+  assert.match(appSource, /if \(!hasConversationContent\(messages\)\)/)
   assert.match(
     cssSource,
     /\.conversation-actions button\s*{[^}]*border-radius:\s*10px;[^}]*font-size:\s*11px;/s,
@@ -941,4 +953,9 @@ test('history and conversation detail use a compact voice-first hierarchy', () =
   const continuationSource = appSource.slice(continuationStart, continuationEnd)
   assert.ok(continuationStart >= 0 && continuationEnd > continuationStart)
   assert.doesNotMatch(continuationSource, /<input|<textarea|Paperclip|attachment/i)
+  assert.doesNotMatch(continuationSource, /continuation-voice|AudioWaveform/)
+  assert.equal(
+    continuationSource.match(/openCall\('audio', selectedConversation\.id\)/g)?.length,
+    1,
+  )
 })

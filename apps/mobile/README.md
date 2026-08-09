@@ -47,6 +47,35 @@ Realtime sessions use protocol v4. Wake words and manual wake state are not part
 of the client protocol; the server model decides whether each speech turn needs
 a response.
 
+## Web UI debugging
+
+The browser preview runs the same React UI and media code as the Android
+WebView, so most layout and interaction changes can be checked without building
+or installing an APK.
+
+From `apps/mobile`, run:
+
+```bash
+npm ci
+npm run web:dev
+```
+
+Then open <http://127.0.0.1:1420>. Use the browser's responsive device toolbar
+to select an Android viewport (for example, 360 x 800 or 412 x 915). The preview
+connects to the configured Ripple server directly, including its HTTP APIs and
+WebSocket realtime endpoint.
+
+To open the preview from another device on the same network, run:
+
+```bash
+npm run web:dev:lan
+```
+
+Then visit `http://YOUR_COMPUTER_LAN_IP:1420`. A LAN page served over plain HTTP
+is useful for visual layout checks, but mobile browsers normally block microphone
+and camera access outside a secure context. Use `127.0.0.1`/`localhost` on the
+development computer when testing realtime audio or video.
+
 Every time the user starts a call, the client creates a fresh UUID and sends it
 as the WebSocket `session_id`. Reconnecting by starting another call therefore
 creates an empty conversation instead of restoring the previous call.

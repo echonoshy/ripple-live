@@ -1,10 +1,13 @@
 html {
-  background: #09090B;
+  background: #0d0d0d;
   font-family:
-    Inter,
-    "SF Pro Display",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
     "PingFang SC",
     "Noto Sans SC",
+    Helvetica,
+    Arial,
     system-ui,
     sans-serif;
   font-synthesis: none;
@@ -29,6 +32,6 @@ button {
 
 @media (prefers-color-scheme: dark) {
   html {
-    background: #09090B;
+    background: #0d0d0d;
   }
 }

@@ -1,4 +1,4 @@
-import { Brain, ListChecks } from '@phosphor-icons/react'
+import { Brain, ListTodo as ListChecks } from 'lucide-react'
 import React from 'react'
 import type { ConversationAction } from '../api'
 import { recognizedConversationActions } from '../conversationActions'

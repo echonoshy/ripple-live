@@ -1,23 +1,25 @@
 import {
-  ArrowCounterClockwise,
+  RotateCcw as ArrowCounterClockwise,
   ArrowLeft,
-  ChatCircleDots,
-  CheckCircle,
+  MessageCircle as ChatCircleDots,
   Circle,
-  EnvelopeSimple,
-  ImagesSquare,
-  LockKey,
-  ListChecks,
-  MagnifyingGlass,
-  Microphone,
-  PushPin,
-  SignOut,
-  NotePencil,
+  Mail as EnvelopeSimple,
+  Image as ImagesSquare,
+  LockKeyhole as LockKey,
+  ListTodo as ListChecks,
+  Menu,
+  Mic as Microphone,
+  MoreVertical as DotsThreeVertical,
+  Pin as PushPin,
+  LogOut as SignOut,
+  SquarePen as NotePencil,
   Plus,
-  Trash,
+  Search,
+  Trash2 as Trash,
   Ticket,
-  X,
-} from '@phosphor-icons/react'
+  ChevronRight,
+  Video,
+} from 'lucide-react'
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
 import './components/AppNavigation.css'
@@ -52,7 +54,7 @@ import {
   type VisualMemory,
 } from './api'
 import { LibraryActions } from './components/LibraryActions'
-import { BottomNav, type AppTab } from './components/BottomNav'
+import { AppDrawer, type AppDestination } from './components/AppDrawer'
 import { ConversationHome } from './components/ConversationHome'
 import {
   activateConversationAction,
@@ -115,20 +117,38 @@ type Screen =
   | 'memories'
   | 'todos'
 
-function tabForScreen(screen: Screen): AppTab {
+function destinationForScreen(screen: Screen): AppDestination {
   switch (screen) {
     case 'home':
     case 'call':
-    case 'history':
     case 'conversation':
-      return 'chat'
+      return 'home'
+    case 'history':
+      return 'history'
     case 'memories':
       return 'memories'
     case 'todos':
       return 'todos'
     case 'settings':
-      return 'profile'
+      return 'settings'
   }
+}
+
+function hasConversationContent(messages: ConversationMessage[]) {
+  return messages.some(
+    (message) =>
+      message.content.trim().length > 0 ||
+      message.attachments.length > 0 ||
+      message.actions.length > 0,
+  )
+}
+
+function memoryDisplayTitle(memory: VisualMemory) {
+  const note = memory.user_note?.trim() ?? ''
+  if (note.startsWith('系统附带了') && memory.visual_summary?.trim()) {
+    return memory.visual_summary.trim()
+  }
+  return note || '未命名记忆'
 }
 
 function AuthenticatedImage({
@@ -192,6 +212,12 @@ function todoDueLabel(dueAt: number | null) {
   return `提醒：${formatHistoryTime(dueAt)}`
 }
 
+function todoSummaryLabel(summary: string) {
+  return summary
+    .replace(/[，,]\s*当前时间为\d{4}-\d{2}-\d{2}T[^。]+。?$/u, '。')
+    .replace(/。{2,}$/u, '。')
+}
+
 function todoDateInputValue(dueAt: number | null) {
   if (!dueAt) return ''
   const date = new Date(dueAt * 1000)
@@ -212,6 +238,7 @@ function notificationPermissionLabel() {
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home')
+  const [navigationOpen, setNavigationOpen] = useState(false)
   const [mode, setMode] = useState<RealtimeMode>('audio')
   const server = DEFAULT_SERVER
   const [sessionState, setSessionState] = useState<SessionState>('idle')
@@ -271,6 +298,7 @@ export default function App() {
   const [todoBusy, setTodoBusy] = useState(false)
   const [todoError, setTodoError] = useState('')
   const [revealedTodo, setRevealedTodo] = useState<string | null>(null)
+  const [todoDrag, setTodoDrag] = useState<{ id: string; offset: number } | null>(null)
   const [revealedItem, setRevealedItem] = useState<string | null>(null)
   const [deleteRequest, setDeleteRequest] = useState<{
     kind: 'history' | 'memory' | 'todo'
@@ -304,7 +332,14 @@ export default function App() {
   const preloadedConversationIdRef = useRef<string | null>(null)
   const longPressTimerRef = useRef<number | null>(null)
   const pointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
-  const todoPointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
+  const todoPointerStartRef = useRef<{
+    id: string
+    x: number
+    y: number
+    baseOffset: number
+    dragging: boolean
+  } | null>(null)
+  const suppressTodoClickRef = useRef(false)
   const suppressClickRef = useRef(false)
   const actionMemoryTargetRef = useRef<string | null>(null)
   const actionTodoTargetRef = useRef<string | null>(null)
@@ -312,7 +347,9 @@ export default function App() {
 
   const navigateTo = useCallback((nextScreen: Screen) => {
     const owner = navigationGuardRef.current.begin()
+    setNavigationOpen(false)
     setScreen(nextScreen)
+    window.requestAnimationFrame(() => window.scrollTo(0, 0))
     return owner
   }, [])
 
@@ -661,6 +698,13 @@ export default function App() {
               if (!navigationGuardRef.current.owns(routeOwner)) return
               setHistoryError('')
               setHistoryBusy(false)
+              if (!hasConversationContent(messages)) {
+                setSelectedConversation(null)
+                setHistoryMessages([])
+                preloadedConversationIdRef.current = null
+                setScreen('home')
+                return
+              }
               setSelectedConversation(summary)
               setHistoryMessages(messages)
               preloadedConversationIdRef.current = summary.id
@@ -1055,10 +1099,13 @@ export default function App() {
       openTodo: openConversationTodo,
     })
 
-  const selectTab = (tab: AppTab) => {
-    switch (tab) {
-      case 'chat':
+  const selectDestination = (destination: AppDestination) => {
+    switch (destination) {
+      case 'home':
         navigateTo('home')
+        break
+      case 'history':
+        navigateTo('history')
         break
       case 'memories':
         actionMemoryTargetRef.current = null
@@ -1068,7 +1115,7 @@ export default function App() {
         actionTodoTargetRef.current = null
         navigateTo('todos')
         break
-      case 'profile':
+      case 'settings':
         navigateTo('settings')
         break
     }
@@ -1224,6 +1271,7 @@ export default function App() {
     try {
       await updateTodo(server, accessToken, todo.id, { completed: todoView === 'active' })
       setTodoItems((items) => items.filter((item) => item.id !== todo.id))
+      setRevealedTodo(null)
     } catch (error) {
       setTodoError(error instanceof Error ? error.message : '无法更新待办')
     }
@@ -1261,17 +1309,57 @@ export default function App() {
   }
 
   const beginTodoGesture = (event: React.PointerEvent<HTMLElement>, id: string) => {
-    if ((event.target as HTMLElement).closest('button, input, textarea, select, label')) return
-    todoPointerStartRef.current = { id, x: event.clientX, y: event.clientY }
+    if ((event.target as HTMLElement).closest('.todo-swipe-delete, input, textarea, select, label')) return
+    todoPointerStartRef.current = {
+      id,
+      x: event.clientX,
+      y: event.clientY,
+      baseOffset: revealedTodo === id ? 74 : 0,
+      dragging: false,
+    }
+  }
+
+  const moveTodoGesture = (event: React.PointerEvent<HTMLElement>) => {
+    const start = todoPointerStartRef.current
+    if (!start) return
+    const deltaX = event.clientX - start.x
+    const deltaY = event.clientY - start.y
+    if (!start.dragging) {
+      if (Math.abs(deltaX) < 7 && Math.abs(deltaY) < 7) return
+      if (Math.abs(deltaY) > Math.abs(deltaX)) {
+        todoPointerStartRef.current = null
+        return
+      }
+      start.dragging = true
+      event.currentTarget.setPointerCapture?.(event.pointerId)
+    }
+    event.preventDefault()
+    const offset = Math.min(74, Math.max(0, start.baseOffset + deltaX))
+    setTodoDrag({ id: start.id, offset })
   }
 
   const endTodoGesture = (event: React.PointerEvent<HTMLElement>) => {
     const start = todoPointerStartRef.current
     todoPointerStartRef.current = null
     if (!start) return
-    const distance = event.clientX - start.x
-    if (distance > 44) setRevealedTodo(start.id)
-    else if (distance < -32) setRevealedTodo(null)
+    const offset = Math.min(74, Math.max(0, start.baseOffset + event.clientX - start.x))
+    if (start.dragging) {
+      suppressTodoClickRef.current = true
+      window.setTimeout(() => { suppressTodoClickRef.current = false }, 0)
+    }
+    setRevealedTodo(offset >= 37 ? start.id : null)
+    setTodoDrag(null)
+  }
+
+  const cancelTodoGesture = () => {
+    todoPointerStartRef.current = null
+    setTodoDrag(null)
+  }
+
+  const consumeSuppressedTodoClick = () => {
+    if (!suppressTodoClickRef.current) return false
+    suppressTodoClickRef.current = false
+    return true
   }
 
   const visibleTodos = useMemo(() => {
@@ -1285,6 +1373,14 @@ export default function App() {
   const historyLibraryItems = useMemo(
     () =>
       historyItems
+        .filter((item) => {
+          const title = item.title.trim()
+          return Boolean(
+            item.preview.trim() ||
+            item.is_pinned ||
+            (title && title !== '新对话' && title !== '未命名对话'),
+          )
+        })
         .map((item): LibraryItem => ({
           id: item.id,
           title: item.title || '未命名对话',
@@ -1556,127 +1652,129 @@ export default function App() {
             <img src={appIcon} alt="" />
             <div>
               <strong>Ripple Live</strong>
-              <span>登录你的私人实时 Agent</span>
+              <span>让每一次开口，都有回响</span>
             </div>
           </header>
 
-          <div className="auth-intro">
-            <p>{authMode === 'login' ? '欢迎回来' : '接受邀请'}</p>
-            <h1>{authMode === 'login' ? '继续你的对话' : '创建私人账号'}</h1>
-            <span>
-              {authMode === 'login'
-                ? '历史聊天只保存在你连接的 Ripple 服务中。'
-                : '首次注册需要有效邀请码，邀请码受次数和有效期限制。'}
-            </span>
-          </div>
-
-          <form
-            className="auth-form"
-            onSubmit={(event) => {
-              event.preventDefault()
-              void submitAuth()
-            }}
-          >
-            <label htmlFor="auth-email">邮箱</label>
-            <div className="field-control">
-              <EnvelopeSimple aria-hidden="true" />
-              <input
-                id="auth-email"
-                type="email"
-                autoComplete="email"
-                value={authEmail}
-                onChange={(event) => setAuthEmail(event.target.value)}
-                placeholder="you@example.com"
-                required
-              />
+          <div className="auth-content">
+            <div className="auth-intro">
+              <p>{authMode === 'login' ? '欢迎回来' : '接受邀请'}</p>
+              <h1>{authMode === 'login' ? '继续你的对话' : '创建私人账号'}</h1>
+              <span>
+                {authMode === 'login'
+                  ? '历史聊天只保存在你连接的 Ripple 服务中。'
+                  : '首次注册需要有效邀请码，邀请码受次数和有效期限制。'}
+              </span>
             </div>
 
-            <label htmlFor="auth-password">密码</label>
-            <div className="field-control">
-              <LockKey aria-hidden="true" />
-              <input
-                id="auth-password"
-                type="password"
-                autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
-                value={authPassword}
-                onChange={(event) => setAuthPassword(event.target.value)}
-                placeholder="至少 8 个字符"
-                minLength={8}
-                required
-              />
-            </div>
+            <form
+              className="auth-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void submitAuth()
+              }}
+            >
+              <label htmlFor="auth-email">邮箱</label>
+              <div className="field-control">
+                <EnvelopeSimple aria-hidden="true" />
+                <input
+                  id="auth-email"
+                  type="email"
+                  autoComplete="email"
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  required
+                />
+              </div>
 
-            {authMode === 'register' && (
-              <>
-                <label htmlFor="invitation-code">邀请码</label>
-                <div className="field-control">
-                  <Ticket aria-hidden="true" />
-                  <input
-                    id="invitation-code"
-                    value={invitationCode}
-                    onChange={(event) => setInvitationCode(event.target.value)}
-                    placeholder="输入邀请码"
-                    required
-                  />
-                </div>
-              </>
-            )}
+              <label htmlFor="auth-password">密码</label>
+              <div className="field-control">
+                <LockKey aria-hidden="true" />
+                <input
+                  id="auth-password"
+                  type="password"
+                  autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  placeholder="至少 8 个字符"
+                  minLength={8}
+                  required
+                />
+              </div>
 
-            {authError && <p className="form-error">{authError}</p>}
-            <button className="primary-button" type="submit" disabled={authBusy}>
-              {authBusy
-                ? '正在连接'
-                : authMode === 'login'
-                  ? '登录'
-                  : '创建账号'}
+              {authMode === 'register' && (
+                <>
+                  <label htmlFor="invitation-code">邀请码</label>
+                  <div className="field-control">
+                    <Ticket aria-hidden="true" />
+                    <input
+                      id="invitation-code"
+                      value={invitationCode}
+                      onChange={(event) => setInvitationCode(event.target.value)}
+                      placeholder="输入邀请码"
+                      required
+                    />
+                  </div>
+                </>
+              )}
+
+              {authError && <p className="form-error">{authError}</p>}
+              <button className="primary-button" type="submit" disabled={authBusy}>
+                {authBusy
+                  ? '正在连接'
+                  : authMode === 'login'
+                    ? '登录'
+                    : '创建账号'}
+              </button>
+            </form>
+
+            <button
+              className="auth-switch"
+              type="button"
+              onClick={() => {
+                setAuthMode(authMode === 'login' ? 'register' : 'login')
+                setAuthError('')
+              }}
+            >
+              {authMode === 'login' ? '有邀请码？创建账号' : '已有账号？返回登录'}
             </button>
-          </form>
-
-          <button
-            className="auth-switch"
-            type="button"
-            onClick={() => {
-              setAuthMode(authMode === 'login' ? 'register' : 'login')
-              setAuthError('')
-            }}
-          >
-            {authMode === 'login' ? '有邀请码？创建账号' : '已有账号？返回登录'}
-          </button>
+          </div>
         </section>
       </main>
     )
   }
 
   return (
-    <main className={`app-shell ${screen !== 'call' ? 'with-bottom-nav' : ''}`}>
+    <main className="app-shell">
       {screen === 'home' && (
         <ConversationHome
           onStartAudio={() => openCall('audio')}
           onStartVideo={() => openCall('video')}
-          onOpenHistory={() => navigateTo('history')}
+          onOpenMenu={() => setNavigationOpen(true)}
           historyError={historyError}
         />
       )}
 
       {screen === 'history' && (
         <section className="history-screen history-library-screen">
-          <header className="screen-header history-page-header">
+          <header className="screen-header history-page-header library-sticky-header">
             <button
               className="icon-button"
               type="button"
-              aria-label="返回"
-              onClick={() => navigateTo('home')}
+              aria-label="打开导航"
+              onClick={() => setNavigationOpen(true)}
             >
-              <ArrowLeft />
+              <Menu />
             </button>
             <h1>聊天历史</h1>
             <button
-              className="icon-button history-search-button"
+              className="icon-button"
               type="button"
-              aria-label="搜索聊天历史"
-              onClick={() => document.getElementById('history-search')?.focus()}
+              aria-label="开始新对话"
+              onClick={() => openCall('audio')}
             >
-              <MagnifyingGlass aria-hidden="true" />
+              <NotePencil />
             </button>
           </header>
 
@@ -1789,7 +1887,6 @@ export default function App() {
                             <span className="library-row-copy">
                               <span className="library-row-title">
                                 <strong>{item.title || '未命名对话'}</strong>
-                                {item.is_pinned && <PushPin weight="fill" aria-label="已置顶" />}
                                 <time>{formatHistoryTime(item.updated_at)}</time>
                               </span>
                               <span className="library-row-preview">{item.preview || '这次对话还没有文本内容'}</span>
@@ -1809,28 +1906,21 @@ export default function App() {
               ))}
             </div>
           )}
-          {!historySelectionMode && (
-            <button
-              className="history-voice-fab"
-              type="button"
-              aria-label="开始新的语音对话"
-              onClick={() => openCall('audio')}
-            >
-              <Microphone aria-hidden="true" />
-            </button>
-          )}
         </section>
       )}
 
       {screen === 'todos' && (
         <section className="history-screen todo-screen">
-          <header className="screen-header">
-            <button className="icon-button" type="button" aria-label="返回" onClick={() => navigateTo('home')}>
-              <ArrowLeft />
+          <header className="screen-header history-page-header library-sticky-header todo-header">
+            <button className="icon-button" type="button" aria-label="打开导航" onClick={() => setNavigationOpen(true)}>
+              <Menu />
             </button>
-            <h1>待办</h1>
+            <div className="todo-heading">
+              <h1>待办</h1>
+              <p>{todoView === 'active' ? `${visibleTodos.length} 项待处理` : `${visibleTodos.length} 项已完成`}</p>
+            </div>
             <button
-              className="icon-button"
+              className="icon-button todo-add-button"
               type="button"
               aria-label="新建待办"
               onClick={() => setTodoEditor({ title: '', dueAt: '' })}
@@ -1845,7 +1935,10 @@ export default function App() {
                 type="button"
                 role="tab"
                 aria-selected={todoView === 'active'}
-                onClick={() => setTodoView('active')}
+                onClick={() => {
+                  setRevealedTodo(null)
+                  setTodoView('active')
+                }}
               >
                 进行中
               </button>
@@ -1854,12 +1947,16 @@ export default function App() {
                 type="button"
                 role="tab"
                 aria-selected={todoView === 'completed'}
-                onClick={() => setTodoView('completed')}
+                onClick={() => {
+                  setRevealedTodo(null)
+                  setTodoView('completed')
+                }}
               >
                 已完成
               </button>
             </div>
             <label className="todo-search">
+              <Search aria-hidden="true" />
               <input aria-label="搜索待办" value={todoQuery} onChange={(event) => setTodoQuery(event.target.value)} placeholder="搜索待办" />
             </label>
           </div>
@@ -1887,13 +1984,15 @@ export default function App() {
                 <article
                   id={`todo-action-${encodeURIComponent(todo.id)}`}
                   tabIndex={-1}
-                  className={`todo-swipe-shell ${revealedTodo === todo.id ? 'is-revealed' : ''}`}
+                  className={`todo-swipe-shell ${revealedTodo === todo.id ? 'is-revealed' : ''} ${todoDrag?.id === todo.id ? 'is-dragging' : ''}`}
                   key={todo.id}
+                  style={todoDrag?.id === todo.id ? { '--todo-drag-offset': `${todoDrag.offset}px` } as React.CSSProperties : undefined}
                   onPointerDown={(event) => beginTodoGesture(event, todo.id)}
+                  onPointerMove={moveTodoGesture}
                   onPointerUp={endTodoGesture}
-                  onPointerCancel={() => { todoPointerStartRef.current = null }}
+                  onPointerCancel={cancelTodoGesture}
                 >
-                  <button className="todo-swipe-delete danger-action" type="button" onClick={() => setDeleteRequest({ kind: 'todo', ids: [todo.id] })}>
+                  <button className="todo-swipe-delete danger-action" type="button" aria-label={`删除：${todo.title}`} onClick={() => setDeleteRequest({ kind: 'todo', ids: [todo.id] })}>
                     <Trash aria-hidden="true" /> 删除
                   </button>
                   <div className={`todo-card todo-card-surface ${todoView === 'completed' ? 'is-completed' : ''}`}>
@@ -1901,27 +2000,28 @@ export default function App() {
                       className="todo-complete"
                       type="button"
                       aria-label={todoView === 'active' ? `完成：${todo.title}` : `恢复：${todo.title}`}
-                      onClick={() => void setTodoCompleted(todo)}
+                      onClick={() => {
+                        if (consumeSuppressedTodoClick()) return
+                        void setTodoCompleted(todo)
+                      }}
                     >
                       {todoView === 'active' ? <Circle /> : <ArrowCounterClockwise />}
                     </button>
-                    {todo.cover ? (
-                      <AuthenticatedImage server={server} token={accessToken} artifact={todo.cover} className="todo-cover" />
-                    ) : (
-                      <span className="todo-cover todo-text-cover"><CheckCircle /></span>
-                    )}
-                    <div className="todo-copy">
+                    <button
+                      className="todo-copy"
+                      type="button"
+                      aria-label={`编辑：${todo.title}`}
+                      onClick={() => {
+                        if (consumeSuppressedTodoClick()) return
+                        setTodoEditor({ todo, title: todo.title, dueAt: todoDateInputValue(todo.due_at) })
+                      }}
+                    >
                       <strong>{todo.title}</strong>
-                      {todo.visual_summary && <p>{todo.visual_summary}</p>}
-                    </div>
-                    <div className="todo-row-meta">
+                      {todo.visual_summary && <p>{todoSummaryLabel(todo.visual_summary)}</p>}
                       <time className={todo.due_at && todo.due_at < Date.now() / 1000 && todoView === 'active' ? 'is-overdue' : ''}>
                         {todoView === 'completed' && todo.completed_at ? `完成：${formatHistoryTime(todo.completed_at)}` : todoDueLabel(todo.due_at)}
                       </time>
-                      <button className="todo-edit" type="button" aria-label={`编辑：${todo.title}`} onClick={() => setTodoEditor({ todo, title: todo.title, dueAt: todoDateInputValue(todo.due_at) })}>
-                        <NotePencil />
-                      </button>
-                    </div>
+                    </button>
                   </div>
                 </article>
               ))}
@@ -1954,22 +2054,17 @@ export default function App() {
 
       {screen === 'memories' && (
         <section className="history-screen memory-screen">
-          <header className="screen-header">
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="返回"
-              onClick={() => navigateTo('home')}
-            >
-              <ArrowLeft />
+          <header className="screen-header history-page-header library-sticky-header">
+            <button className="icon-button" type="button" aria-label="打开导航" onClick={() => setNavigationOpen(true)}>
+              <Menu />
             </button>
-            <h1>视觉记忆</h1>
+            <h1>记忆</h1>
             <span className="header-spacer" />
           </header>
 
           <div className="library-region" aria-label="搜索视觉记忆">
             <LibraryToolbar
-              kind="视觉记忆"
+              kind="记忆"
               query={memoryQuery}
               scope={memoryScope}
               selectionCount={memorySelection.size}
@@ -2030,7 +2125,7 @@ export default function App() {
                       return (
                         <article
                           key={memory.id}
-                          className={`memory-card library-swipe-shell has-rename ${revealedItem === memory.id ? 'is-revealed' : ''}`}
+                          className={`memory-card library-swipe-shell has-rename ${memory.cover ? 'has-cover' : 'is-text-memory'} ${revealedItem === memory.id ? 'is-revealed' : ''}`}
                           onPointerDown={(event) =>
                             beginLibraryGesture(event, memory.id, () =>
                               {
@@ -2070,9 +2165,9 @@ export default function App() {
                             {memorySelectionMode && (
                               <span className={`selection-check card-check ${selected ? 'is-selected' : ''}`} aria-hidden="true" />
                             )}
-                            {memory.is_pinned && <PushPin className="memory-pin" weight="fill" aria-label="已置顶" />}
+                            {memory.is_pinned && <PushPin className="memory-pin" aria-label="已置顶" />}
                             <span className="memory-card-body">
-                              <strong>{memory.user_note || '未命名记忆'}</strong>
+                              <strong>{memoryDisplayTitle(memory)}</strong>
                               {memory.visual_summary && <span className="memory-card-note">{memory.visual_summary}</span>}
                               <time>{formatHistoryTime(memory.captured_at ?? memory.created_at)}</time>
                             </span>
@@ -2098,8 +2193,9 @@ export default function App() {
             }}>
               <section className="memory-detail-sheet" role="dialog" aria-modal="true" aria-labelledby="memory-detail-title">
                 <header>
+                  <button type="button" aria-label="返回记忆列表" onClick={() => setSelectedMemoryId(null)}><ArrowLeft /></button>
                   <h2 id="memory-detail-title">记忆详情</h2>
-                  <button type="button" aria-label="关闭记忆详情" onClick={() => setSelectedMemoryId(null)}><X /></button>
+                  <span className="header-spacer" aria-hidden="true" />
                 </header>
                 {selectedMemory.cover ? (
                   <AuthenticatedImage server={server} token={accessToken} artifact={selectedMemory.cover} className="memory-detail-cover" />
@@ -2141,19 +2237,16 @@ export default function App() {
             >
               <ArrowLeft />
             </button>
-            <h1>聊天内容</h1>
-            <span className="header-spacer" />
+            <h1 className="conversation-header-title">{selectedConversation.title || '未命名对话'}</h1>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="重命名对话"
+              onClick={() => beginRenameConversation(selectedConversation)}
+            >
+              <DotsThreeVertical aria-hidden="true" />
+            </button>
           </header>
-
-          <div className="conversation-title">
-            <div>
-              <h2>{selectedConversation.title || '未命名对话'}</h2>
-              <button className="conversation-rename" type="button" onClick={() => beginRenameConversation(selectedConversation)}>
-                <NotePencil aria-hidden="true" /> 重命名
-              </button>
-            </div>
-            <time>{formatHistoryTime(selectedConversation.updated_at)}</time>
-          </div>
 
           {historyBusy && (
             <div className="message-skeleton" aria-label="正在加载聊天内容">
@@ -2197,17 +2290,21 @@ export default function App() {
             </div>
           )}
           <aside className="conversation-continuation-bar" aria-label="继续这段对话">
-            <span>
-              <strong>继续这段对话</strong>
-              <small>沿用当前聊天记录</small>
-            </span>
             <button
+              className="continuation-video"
               type="button"
-              aria-label="继续语音"
+              aria-label="用视频继续"
+              onClick={() => openCall('video', selectedConversation.id)}
+            >
+              <Video aria-hidden="true" />
+            </button>
+            <button
+              className="continuation-compose"
+              type="button"
               onClick={() => openCall('audio', selectedConversation.id)}
             >
               <Microphone aria-hidden="true" />
-              <span>继续语音</span>
+              <span>继续语音对话</span>
             </button>
           </aside>
         </section>
@@ -2216,30 +2313,24 @@ export default function App() {
       {screen === 'settings' && (
         <section className="settings-screen profile-screen">
           <header className="screen-header">
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="返回"
-              onClick={() => navigateTo('home')}
-            >
-              <ArrowLeft />
+            <button className="icon-button" type="button" aria-label="打开导航" onClick={() => setNavigationOpen(true)}>
+              <Menu />
             </button>
-            <h1>我的</h1>
+            <h1>设置</h1>
             <span className="header-spacer" />
           </header>
 
           <div className="profile-groups">
+            <div className="profile-identity">
+              <span aria-hidden="true">R</span>
+              <div>
+                <strong>{user.email}</strong>
+                <small>Ripple Live</small>
+              </div>
+            </div>
             <section className="profile-section" aria-labelledby="profile-account-heading">
-              <h2 id="profile-account-heading">账户与连接</h2>
+              <h2 id="profile-account-heading">系统状态</h2>
               <dl className="profile-info-list">
-                <div className="profile-info-row">
-                  <dt>当前账号</dt>
-                  <dd>{user.email}</dd>
-                </div>
-                <div className="profile-info-row">
-                  <dt>连接服务</dt>
-                  <dd>{server}</dd>
-                </div>
                 <div className="profile-info-row">
                   <dt>通知权限</dt>
                   <dd>{notificationPermissionLabel()}</dd>
@@ -2258,7 +2349,7 @@ export default function App() {
                   <strong>视觉记忆</strong>
                   <small>查看通话中保存的画面与备注</small>
                 </span>
-                <ImagesSquare aria-hidden="true" />
+                <ChevronRight aria-hidden="true" />
               </button>
             </section>
 
@@ -2313,7 +2404,13 @@ export default function App() {
       )}
 
       {screen !== 'call' && (
-        <BottomNav active={tabForScreen(screen)} onSelect={selectTab} />
+        <AppDrawer
+          open={navigationOpen}
+          active={destinationForScreen(screen)}
+          accountLabel={user.email}
+          onClose={() => setNavigationOpen(false)}
+          onSelect={selectDestination}
+        />
       )}
 
       {deleteRequest && (

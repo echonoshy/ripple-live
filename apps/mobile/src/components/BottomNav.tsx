@@ -1,18 +1,18 @@
 import {
-  ChatCircleDots,
-  ImagesSquare,
+  Images,
   ListChecks,
-  UserCircle,
-  type Icon,
-} from '@phosphor-icons/react'
+  MessageCircleMore,
+  UserRound,
+  type LucideIcon,
+} from 'lucide-react'
 
 export type AppTab = 'chat' | 'memories' | 'todos' | 'profile'
 
-const items: Array<{ tab: AppTab; label: string; icon: Icon }> = [
-  { tab: 'chat', label: '对话', icon: ChatCircleDots },
-  { tab: 'memories', label: '记忆', icon: ImagesSquare },
+const items: Array<{ tab: AppTab; label: string; icon: LucideIcon }> = [
+  { tab: 'chat', label: '对话', icon: MessageCircleMore },
+  { tab: 'memories', label: '记忆', icon: Images },
   { tab: 'todos', label: '待办', icon: ListChecks },
-  { tab: 'profile', label: '我的', icon: UserCircle },
+  { tab: 'profile', label: '我的', icon: UserRound },
 ]
 
 export function BottomNav({
@@ -34,7 +34,7 @@ export function BottomNav({
             aria-label={label}
             onClick={() => onSelect(tab)}
           >
-            <IconComponent aria-hidden="true" weight="regular" />
+            <IconComponent aria-hidden="true" />
             <span>{label}</span>
           </button>
         ))}
