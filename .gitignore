@@ -35,6 +35,9 @@ __pycache__/
 .idea/
 .vscode/
 *.log
+/.playwright-cli/
+/.superpowers/brainstorm/
+/output/
 
 # Local Git worktrees
 .worktrees/
