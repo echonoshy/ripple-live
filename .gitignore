@@ -35,6 +35,10 @@ __pycache__/
 .idea/
 .vscode/
 *.log
+/.playwright-cli/
+/.superpowers/
+/.codex-tmp-*/
+/output/
 
 # Local Git worktrees
 .worktrees/

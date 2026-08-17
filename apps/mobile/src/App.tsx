@@ -1,36 +1,34 @@
 import {
-  ArrowCounterClockwise,
+  RotateCcw as ArrowCounterClockwise,
   ArrowLeft,
-  CameraRotate,
-  ChatCircleDots,
-  CheckCircle,
-  ClockCounterClockwise,
+  MessageCircle as ChatCircleDots,
   Circle,
-  EnvelopeSimple,
-  GearSix,
-  HandPalm,
-  ImagesSquare,
-  LockKey,
-  ListChecks,
-  Microphone,
-  MicrophoneSlash,
-  PhoneDisconnect,
-  PushPin,
-  SignOut,
-  NotePencil,
+  Mail as EnvelopeSimple,
+  Image as ImagesSquare,
+  LockKeyhole as LockKey,
+  ListTodo as ListChecks,
+  Menu,
+  Mic as Microphone,
+  MoreVertical as DotsThreeVertical,
+  Pin as PushPin,
+  LogOut as SignOut,
+  SquarePen as NotePencil,
   Plus,
-  Trash,
+  Search,
+  Trash2 as Trash,
   Ticket,
-  VideoCamera,
-  X,
-} from '@phosphor-icons/react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+  ChevronRight,
+  Video,
+} from 'lucide-react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
+import './components/AppNavigation.css'
 import appIcon from '../src-tauri/icons/icon.png'
 import {
   assetBlob,
   batchConversations,
   batchMemories,
+  conversation,
   conversationMessages,
   conversationMutation,
   conversations,
@@ -40,6 +38,7 @@ import {
   login,
   logout as logoutApi,
   memories,
+  memory,
   memoryMutation,
   renameConversation,
   register,
@@ -47,6 +46,7 @@ import {
   todos,
   updateTodo,
   type AuthUser,
+  type ConversationAction,
   type ConversationMessage,
   type ConversationSummary,
   type MemoryArtifact,
@@ -54,6 +54,13 @@ import {
   type VisualMemory,
 } from './api'
 import { LibraryActions } from './components/LibraryActions'
+import { AppDrawer, type AppDestination } from './components/AppDrawer'
+import { ConversationHome } from './components/ConversationHome'
+import {
+  activateConversationAction,
+} from './conversationActions'
+import { ConversationActions } from './components/ConversationActions'
+import { LiveCallScreen } from './components/LiveCallScreen'
 import { LibrarySection } from './components/LibrarySection'
 import { LibraryToolbar } from './components/LibraryToolbar'
 import { MarkdownContent } from './components/MarkdownContent'
@@ -65,6 +72,28 @@ import {
   type LibraryItem,
   type LibraryView,
 } from './library'
+import { cameraErrorAfterSwitch, visibleCallError } from './live/callErrors'
+import { createCameraActivationGuard } from './live/cameraActivation'
+import {
+  createCameraOrchestrator,
+  type CameraPhase,
+} from './live/cameraOrchestration'
+import {
+  closeCallBeforeDetachedRefresh,
+  createCallLifecycleGuard,
+  createConversationOwnership,
+  createLatestNavigationGuard,
+  createSingleFlight,
+} from './live/callLifecycle'
+import { liveResultsReducer } from './live/liveResults'
+import { createMinimumVisibleSignal } from './live/frameRequestVisibility'
+import {
+  consumeRippleSignalsThrough,
+  createRippleSignal,
+  enqueueRippleSignal,
+  type RippleSignal,
+  type RippleSignalId,
+} from './live/ripple'
 import { LiveMedia } from './media/LiveMedia'
 import { notifyDueTodos } from './reminders'
 import {
@@ -73,6 +102,7 @@ import {
   type RealtimeMode,
   type SessionState,
 } from './realtime/RealtimeSession'
+import { parseLiveResult } from './realtime/toolResults'
 
 const DEFAULT_SERVER = '140.143.229.103:8700'
 const DEFAULT_VIEWPORT = 'width=device-width, initial-scale=1.0'
@@ -86,6 +116,40 @@ type Screen =
   | 'conversation'
   | 'memories'
   | 'todos'
+
+function destinationForScreen(screen: Screen): AppDestination {
+  switch (screen) {
+    case 'home':
+    case 'call':
+    case 'conversation':
+      return 'home'
+    case 'history':
+      return 'history'
+    case 'memories':
+      return 'memories'
+    case 'todos':
+      return 'todos'
+    case 'settings':
+      return 'settings'
+  }
+}
+
+function hasConversationContent(messages: ConversationMessage[]) {
+  return messages.some(
+    (message) =>
+      message.content.trim().length > 0 ||
+      message.attachments.length > 0 ||
+      message.actions.length > 0,
+  )
+}
+
+function memoryDisplayTitle(memory: VisualMemory) {
+  const note = memory.user_note?.trim() ?? ''
+  if (note.startsWith('系统附带了') && memory.visual_summary?.trim()) {
+    return memory.visual_summary.trim()
+  }
+  return note || '未命名记忆'
+}
 
 function AuthenticatedImage({
   server,
@@ -128,24 +192,6 @@ function AuthenticatedImage({
   )
 }
 
-const stateLabels: Record<SessionState, string> = {
-  idle: '准备就绪',
-  connecting: '正在连接',
-  preparing: '正在准备模型',
-  listening: '正在聆听',
-  thinking: '正在思考',
-  using_tool: '正在使用工具',
-  speaking: '正在回答',
-  ended: '通话已结束',
-  error: '连接异常',
-}
-
-function formatDuration(seconds: number) {
-  const minutes = Math.floor(seconds / 60)
-  const rest = seconds % 60
-  return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
-}
-
 function formatHistoryTime(timestamp: number) {
   return new Intl.DateTimeFormat('zh-CN', {
     month: 'short',
@@ -166,6 +212,12 @@ function todoDueLabel(dueAt: number | null) {
   return `提醒：${formatHistoryTime(dueAt)}`
 }
 
+function todoSummaryLabel(summary: string) {
+  return summary
+    .replace(/[，,]\s*当前时间为\d{4}-\d{2}-\d{2}T[^。]+。?$/u, '。')
+    .replace(/。{2,}$/u, '。')
+}
+
 function todoDateInputValue(dueAt: number | null) {
   if (!dueAt) return ''
   const date = new Date(dueAt * 1000)
@@ -173,16 +225,35 @@ function todoDateInputValue(dueAt: number | null) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
+function notificationPermissionLabel() {
+  try {
+    if (typeof Notification === 'undefined') return '当前环境不可查询'
+    if (Notification.permission === 'granted') return '已允许'
+    if (Notification.permission === 'denied') return '已拒绝'
+    return '尚未询问'
+  } catch {
+    return '当前环境不可查询'
+  }
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home')
+  const [navigationOpen, setNavigationOpen] = useState(false)
   const [mode, setMode] = useState<RealtimeMode>('audio')
   const server = DEFAULT_SERVER
   const [sessionState, setSessionState] = useState<SessionState>('idle')
   const [errorMessage, setErrorMessage] = useState('')
+  const [cameraErrorMessage, setCameraErrorMessage] = useState('')
+  const [cameraPhase, setCameraPhase] = useState<CameraPhase>('off')
+  const [cameraPreviewVisible, setCameraPreviewVisible] = useState(false)
+  const [cameraControlReady, setCameraControlReady] = useState(false)
+  const [frameRequestActive, setFrameRequestActive] = useState(false)
   const [assistantText, setAssistantText] = useState('')
   const [userText, setUserText] = useState('')
   const [toolStatus, setToolStatus] = useState('')
   const [muted, setMuted] = useState(false)
+  const [inputLevel, setInputLevel] = useState(0)
+  const [outputLevel, setOutputLevel] = useState(0)
   const [elapsed, setElapsed] = useState(0)
   const [cameraFacing, setCameraFacing] = useState<'user' | 'environment'>(
     'environment',
@@ -208,6 +279,7 @@ export default function App() {
   const [historySelection, setHistorySelection] = useState<Set<string>>(new Set())
   const [historySelectionMode, setHistorySelectionMode] = useState(false)
   const [selectedConversation, setSelectedConversation] = useState<ConversationSummary | null>(null)
+  const [activeConversationId, setActiveConversationIdState] = useState<string | null>(null)
   const [memoryItems, setMemoryItems] = useState<VisualMemory[]>([])
   const [memoryBusy, setMemoryBusy] = useState(false)
   const [memoryError, setMemoryError] = useState('')
@@ -226,6 +298,7 @@ export default function App() {
   const [todoBusy, setTodoBusy] = useState(false)
   const [todoError, setTodoError] = useState('')
   const [revealedTodo, setRevealedTodo] = useState<string | null>(null)
+  const [todoDrag, setTodoDrag] = useState<{ id: string; offset: number } | null>(null)
   const [revealedItem, setRevealedItem] = useState<string | null>(null)
   const [deleteRequest, setDeleteRequest] = useState<{
     kind: 'history' | 'memory' | 'todo'
@@ -236,16 +309,53 @@ export default function App() {
   const [renameBusy, setRenameBusy] = useState(false)
   const [renameError, setRenameError] = useState('')
   const [liveArtifacts, setLiveArtifacts] = useState<ResponseArtifact[]>([])
+  const [liveResults, dispatchLiveResults] = useReducer(liveResultsReducer, [])
+  const [rippleSignals, setRippleSignals] = useState<readonly RippleSignal[]>([])
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sessionRef = useRef<RealtimeSession | null>(null)
   const mediaRef = useRef<LiveMedia | null>(null)
-  const visualizerRef = useRef<HTMLDivElement>(null)
+  const cameraOrchestratorRef = useRef<ReturnType<
+    typeof createCameraOrchestrator
+  > | null>(null)
+  const frameRequestVisibilityRef = useRef<ReturnType<
+    typeof createMinimumVisibleSignal
+  > | null>(null)
+  const cameraControlReadyRef = useRef(false)
+  const cameraActivationInvalidatorRef = useRef<(() => void) | null>(null)
+  const initialCameraRequestRef = useRef(false)
+  const cameraFlipGenerationRef = useRef(0)
+  const callLifecycleRef = useRef(createCallLifecycleGuard())
+  const conversationOwnershipRef = useRef(createConversationOwnership())
+  const navigationGuardRef = useRef(createLatestNavigationGuard())
+  const preloadedConversationIdRef = useRef<string | null>(null)
   const longPressTimerRef = useRef<number | null>(null)
   const pointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
-  const todoPointerStartRef = useRef<{ id: string; x: number; y: number } | null>(null)
+  const todoPointerStartRef = useRef<{
+    id: string
+    x: number
+    y: number
+    baseOffset: number
+    dragging: boolean
+  } | null>(null)
+  const suppressTodoClickRef = useRef(false)
   const suppressClickRef = useRef(false)
+  const actionMemoryTargetRef = useRef<string | null>(null)
+  const actionTodoTargetRef = useRef<string | null>(null)
+  const todoScrollTargetRef = useRef<string | null>(null)
+
+  const navigateTo = useCallback((nextScreen: Screen) => {
+    const owner = navigationGuardRef.current.begin()
+    setNavigationOpen(false)
+    setScreen(nextScreen)
+    window.requestAnimationFrame(() => window.scrollTo(0, 0))
+    return owner
+  }, [])
+
+  const onRippleSignalsConsumed = useCallback((signalId: RippleSignalId) => {
+    setRippleSignals((current) => consumeRippleSignalsThrough(current, signalId))
+  }, [])
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedHistoryQuery(historyQuery), 250)
@@ -296,6 +406,29 @@ export default function App() {
       .catch(() => {
         if (!active) return
         localStorage.removeItem('ripple-access-token')
+        callLifecycleRef.current.invalidate()
+        navigationGuardRef.current.invalidate()
+        conversationOwnershipRef.current.invalidate()
+        cameraOrchestratorRef.current?.invalidate()
+        cameraOrchestratorRef.current = null
+        cameraActivationInvalidatorRef.current?.()
+        cameraActivationInvalidatorRef.current = null
+        frameRequestVisibilityRef.current?.dispose()
+        frameRequestVisibilityRef.current = null
+        cameraControlReadyRef.current = false
+        cameraFlipGenerationRef.current += 1
+        mediaRef.current?.stop()
+        mediaRef.current = null
+        const liveSession = sessionRef.current
+        sessionRef.current = null
+        void liveSession?.close()
+        initialCameraRequestRef.current = false
+        setCameraPhase('off')
+        setCameraPreviewVisible(false)
+        setCameraControlReady(false)
+        setFrameRequestActive(false)
+        setActiveConversationIdState(null)
+        setSelectedConversation(null)
         setAccessToken('')
         setUser(null)
       })
@@ -335,6 +468,10 @@ export default function App() {
 
   useEffect(() => {
     if (screen !== 'conversation' || !accessToken || !selectedConversation) return
+    if (preloadedConversationIdRef.current === selectedConversation.id) {
+      preloadedConversationIdRef.current = null
+      return
+    }
     let active = true
     setHistoryBusy(true)
     setHistoryError('')
@@ -367,7 +504,16 @@ export default function App() {
       libraryOptionsForView(memoryScope, debouncedMemoryQuery, 100),
     )
       .then((items) => {
-        if (active) setMemoryItems(items)
+        if (!active) return
+        const targetId = actionMemoryTargetRef.current
+        setMemoryItems((current) => {
+          const focused = targetId
+            ? current.find((item) => item.id === targetId)
+            : null
+          return focused && !items.some((item) => item.id === focused.id)
+            ? [focused, ...items]
+            : items
+        })
       })
       .catch((error: unknown) => {
         if (active) {
@@ -388,9 +534,31 @@ export default function App() {
     setTodoBusy(true)
     setTodoError('')
     setTodoItems([])
-    void todos(server, accessToken, todoView === 'completed')
+    const targetId = actionTodoTargetRef.current
+    const load = async () => {
+      if (!targetId) return todos(server, accessToken, todoView === 'completed')
+      const activeItems = await todos(server, accessToken, false)
+      if (activeItems.some((item) => item.id === targetId)) {
+        return activeItems
+      }
+      const completedItems = await todos(server, accessToken, true)
+      if (completedItems.some((item) => item.id === targetId)) {
+        if (active) setTodoView('completed')
+        return completedItems
+      }
+      if (active) setTodoError('该待办已不存在或无法打开')
+      return activeItems
+    }
+    void load()
       .then((items) => {
-        if (active) setTodoItems(items)
+        if (!active) return
+        if (targetId) {
+          actionTodoTargetRef.current = null
+          if (items.some((item) => item.id === targetId)) {
+            todoScrollTargetRef.current = targetId
+          }
+        }
+        setTodoItems(items)
       })
       .catch((error: unknown) => {
         if (active) setTodoError(error instanceof Error ? error.message : '无法加载待办')
@@ -402,6 +570,20 @@ export default function App() {
       active = false
     }
   }, [accessToken, screen, server, todoView])
+
+  useEffect(() => {
+    const targetId = todoScrollTargetRef.current
+    if (screen !== 'todos' || !targetId) return
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById(`todo-action-${encodeURIComponent(targetId)}`)
+      if (!target) return
+      todoScrollTargetRef.current = null
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      target.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'center' })
+      target.focus({ preventScroll: true })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [screen, todoItems])
 
   useEffect(() => {
     if (!accessToken) return
@@ -432,122 +614,511 @@ export default function App() {
 
   useEffect(() => {
     if (sessionState !== 'ended' && sessionState !== 'error') return
+    cameraOrchestratorRef.current?.invalidate()
+    cameraOrchestratorRef.current = null
+    cameraActivationInvalidatorRef.current?.()
+    cameraActivationInvalidatorRef.current = null
+    frameRequestVisibilityRef.current?.dispose()
+    frameRequestVisibilityRef.current = null
+    cameraControlReadyRef.current = false
+    cameraFlipGenerationRef.current += 1
     mediaRef.current?.stop()
     mediaRef.current = null
+    setCameraPhase('off')
+    setCameraPreviewVisible(false)
+    setCameraControlReady(false)
+    setFrameRequestActive(false)
+    setCameraErrorMessage('')
+    setInputLevel(0)
+    setOutputLevel(0)
   }, [sessionState])
 
   const stopCall = useCallback(async () => {
+    cameraOrchestratorRef.current?.invalidate()
+    cameraOrchestratorRef.current = null
+    cameraActivationInvalidatorRef.current?.()
+    cameraActivationInvalidatorRef.current = null
+    frameRequestVisibilityRef.current?.dispose()
+    frameRequestVisibilityRef.current = null
+    cameraControlReadyRef.current = false
+    cameraFlipGenerationRef.current += 1
     mediaRef.current?.stop()
     mediaRef.current = null
-    await sessionRef.current?.close()
+    initialCameraRequestRef.current = false
+    setCameraPhase('off')
+    setCameraPreviewVisible(false)
+    setCameraControlReady(false)
+    setFrameRequestActive(false)
+    setCameraErrorMessage('')
+    setInputLevel(0)
+    setOutputLevel(0)
+    setRippleSignals([])
+    const session = sessionRef.current
     sessionRef.current = null
-    setSessionState('ended')
+    dispatchLiveResults({ type: 'clear' })
+    await session?.close()
   }, [])
 
+  const leaveCall = useMemo(
+    () =>
+      createSingleFlight(async () => {
+        if (!callLifecycleRef.current.beginLeave()) return
+        const conversationOwner = conversationOwnershipRef.current.current()
+        const routeOwner = navigateTo('home')
+        const token = accessToken
+        await closeCallBeforeDetachedRefresh({
+          close: async () => {
+            try {
+              await stopCall()
+            } finally {
+              if (
+                conversationOwnershipRef.current.release(
+                  conversationOwner.owner,
+                )
+              ) {
+                setActiveConversationIdState(null)
+              }
+            }
+          },
+          finishClose: () => {
+            callLifecycleRef.current.finishLeave()
+            setSessionState('idle')
+          },
+          refresh: async () => {
+            if (!conversationOwner.conversationId || !token) return
+            try {
+              const [summary, messages] = await Promise.all([
+                conversation(server, token, conversationOwner.conversationId),
+                conversationMessages(
+                  server,
+                  token,
+                  conversationOwner.conversationId,
+                ),
+              ])
+              if (!navigationGuardRef.current.owns(routeOwner)) return
+              setHistoryError('')
+              setHistoryBusy(false)
+              if (!hasConversationContent(messages)) {
+                setSelectedConversation(null)
+                setHistoryMessages([])
+                preloadedConversationIdRef.current = null
+                setScreen('home')
+                return
+              }
+              setSelectedConversation(summary)
+              setHistoryMessages(messages)
+              preloadedConversationIdRef.current = summary.id
+              setScreen('conversation')
+            } catch (error) {
+              if (!navigationGuardRef.current.owns(routeOwner)) return
+              setSelectedConversation(null)
+              setHistoryMessages([])
+              setHistoryBusy(false)
+              setHistoryError(
+                `通话已结束，但无法刷新聊天记录：${
+                  error instanceof Error ? error.message : '请稍后重试'
+                }`,
+              )
+              setScreen('home')
+            }
+          },
+        })
+      }),
+    [accessToken, navigateTo, server, stopCall],
+  )
+
   useEffect(() => {
+    const callLifecycle = callLifecycleRef.current
+    const conversationOwnership = conversationOwnershipRef.current
+    const navigationGuard = navigationGuardRef.current
     return () => {
-      mediaRef.current?.stop()
-      void sessionRef.current?.close()
+      const media = mediaRef.current
+      const session = sessionRef.current
+      callLifecycle.invalidate()
+      conversationOwnership.invalidate()
+      navigationGuard.invalidate()
+      cameraOrchestratorRef.current?.invalidate()
+      cameraOrchestratorRef.current = null
+      cameraActivationInvalidatorRef.current?.()
+      cameraActivationInvalidatorRef.current = null
+      frameRequestVisibilityRef.current?.dispose()
+      frameRequestVisibilityRef.current = null
+      cameraControlReadyRef.current = false
+      cameraFlipGenerationRef.current += 1
+      mediaRef.current = null
+      sessionRef.current = null
+      media?.stop()
+      void session?.close()
     }
   }, [])
 
   const startCall = useCallback(
-    async (nextMode: RealtimeMode) => {
-      if (!videoRef.current || !canvasRef.current) return
+    async (owner: number) => {
+      if (
+        !callLifecycleRef.current.owns(owner) ||
+        sessionRef.current ||
+        !videoRef.current ||
+        !canvasRef.current
+      ) {
+        callLifecycleRef.current.fail(owner)
+        return
+      }
 
-      setMode(nextMode)
+      setMode('audio')
       setErrorMessage('')
+      setCameraErrorMessage('')
       setAssistantText('')
       setUserText('')
       setToolStatus('')
       setLiveArtifacts([])
+      dispatchLiveResults({ type: 'clear' })
+      setRippleSignals([])
       setElapsed(0)
       setMuted(false)
+      setInputLevel(0)
+      setOutputLevel(0)
+      cameraControlReadyRef.current = false
+      setCameraControlReady(false)
       setSessionState('connecting')
 
+      const cameraActivation = createCameraActivationGuard(
+        initialCameraRequestRef.current,
+      )
+      initialCameraRequestRef.current = false
+      cameraActivation.transition('connecting')
+      const invalidateCameraActivation = () => cameraActivation.invalidate()
       let session: RealtimeSession
+      let cameraOrchestrator: ReturnType<typeof createCameraOrchestrator>
+      let frameRequestVisibility: ReturnType<typeof createMinimumVisibleSignal>
+      const conversationOwner = conversationOwnershipRef.current.current()
+      const ownsSession = () =>
+        callLifecycleRef.current.owns(owner) &&
+        sessionRef.current === session
+      const setActiveConversationId = (conversationId: string) => {
+        if (!ownsSession()) return
+        const confirmedConversationId =
+          conversationOwnershipRef.current.confirm(
+            conversationOwner.owner,
+            conversationId,
+          )
+        if (confirmedConversationId) {
+          setActiveConversationIdState(confirmedConversationId)
+        }
+      }
       const media = new LiveMedia({
         video: videoRef.current,
         canvas: canvasRef.current,
-        withVideo: nextMode === 'video',
         facingMode: cameraFacing,
-        onPlaybackStarted: (bufferedMs) =>
-          session.outputPlaybackStarted(bufferedMs),
-        onPlaybackEnded: () => session.outputPlaybackEnded(),
+        onPlaybackStarted: (bufferedMs) => {
+          if (ownsSession()) session.outputPlaybackStarted(bufferedMs)
+        },
+        onPlaybackEnded: () => {
+          if (ownsSession()) session.outputPlaybackEnded()
+        },
+        onOutputLevel: (level) => {
+          if (ownsSession()) setOutputLevel(level)
+        },
+        onCameraInterrupted: () => {
+          if (ownsSession()) void cameraOrchestrator.interrupt()
+        },
       })
       session = new RealtimeSession({
         server,
         accessToken,
-        mode: nextMode,
-        onState: setSessionState,
+        conversationId: activeConversationId ?? undefined,
+        mode: 'audio',
+        onState: (state) => {
+          cameraActivation.transition(state)
+          if (!ownsSession()) return
+          if (
+            state === 'idle' ||
+            state === 'connecting' ||
+            state === 'preparing' ||
+            state === 'ended' ||
+            state === 'error'
+          ) {
+            cameraControlReadyRef.current = false
+            setCameraControlReady(false)
+          }
+          setSessionState(state)
+        },
         onError: (message) => {
+          cameraActivation.invalidate()
+          if (!ownsSession()) return
+          cameraControlReadyRef.current = false
+          setCameraControlReady(false)
+          setInputLevel(0)
+          setOutputLevel(0)
           setErrorMessage(message)
+          dispatchLiveResults({ type: 'clear' })
           setSessionState('error')
         },
-        onResponseFailed: setErrorMessage,
-        onAssistantText: setAssistantText,
+        onResponseFailed: (message) => {
+          if (!ownsSession()) return
+          setErrorMessage(message)
+        },
+        onAssistantText: (text) => {
+          if (ownsSession()) setAssistantText(text)
+        },
         onUserText: (text) => {
+          if (!ownsSession()) return
           setUserText(text)
           setLiveArtifacts([])
+          dispatchLiveResults({ type: 'clear' })
         },
-        onTool: setToolStatus,
-        onAudio: (audio) => media.enqueueOutput(audio),
-        onAudioDone: () => media.finishOutput(),
-        onInterrupted: () => media.clearOutput(),
-        onFrameRequested: () => media.captureFrame(),
+        onTool: (status) => {
+          if (ownsSession()) setToolStatus(status)
+        },
+        onToolResult: (event) => {
+          if (!ownsSession()) return
+          dispatchLiveResults({ type: 'add', result: parseLiveResult(event) })
+          const signal = createRippleSignal('tool')
+          setRippleSignals((current) => enqueueRippleSignal(current, signal))
+        },
+        onAudio: (audio) => {
+          if (ownsSession()) media.enqueueOutput(audio)
+        },
+        onAudioDone: () => {
+          if (ownsSession()) media.finishOutput()
+        },
+        onInterrupted: () => {
+          if (!ownsSession()) return
+          media.clearOutput()
+          const signal = createRippleSignal('interrupt')
+          setRippleSignals((current) => enqueueRippleSignal(current, signal))
+        },
+        onFrameRequested: () =>
+          ownsSession() ? media.captureFrame() : null,
+        onFrameRequestState: (active) => {
+          if (ownsSession()) frameRequestVisibility.update(active)
+        },
         onArtifact: (artifact) => {
+          if (!ownsSession()) return
           setLiveArtifacts((items) =>
             items.some((item) => item.id === artifact.id)
               ? items
               : [...items, artifact],
           )
         },
-        onConversation: () => {},
+        onConversation: setActiveConversationId,
         onReady: async () => {
+          if (!ownsSession()) return
+          const activationToken = cameraActivation.begin()
+          if (activationToken === null) return
           await media.start((audio) => {
-            void session.sendInput(audio)
+            if (ownsSession()) void session.sendInput(audio)
           }, () => {
+            if (!ownsSession()) return
+            setUserText('')
+            setAssistantText('')
+            const signal = createRippleSignal('speech')
+            setRippleSignals((current) => enqueueRippleSignal(current, signal))
             void session.speechStarted()
           }, () => {
-            void session.speechPaused()
+            if (ownsSession()) void session.speechPaused()
           }, (level) => {
-            visualizerRef.current?.style.setProperty('--audio-level', String(level))
+            if (ownsSession()) setInputLevel(level)
           })
+          const exactResources =
+            mediaRef.current === media &&
+            cameraOrchestratorRef.current === cameraOrchestrator
+          const activation = exactResources && ownsSession()
+            ? cameraActivation.commit(activationToken)
+            : null
+          if (!activation) return
+          cameraControlReadyRef.current = true
+          setCameraControlReady(true)
+          if (activation.cameraRequested) {
+            await cameraOrchestrator.open(cameraFacing)
+          }
+        },
+      })
+
+      cameraOrchestrator = createCameraOrchestrator({
+        enableCamera: (facingMode) => media.enableCamera(facingMode),
+        disableCamera: () => media.disableCamera(),
+        setMode: (targetMode) => session.setMode(targetMode),
+        waitForTransition: () =>
+          window.matchMedia('(prefers-reduced-motion: reduce)').matches
+            ? Promise.resolve()
+            : new Promise((resolve) => window.setTimeout(resolve, 420)),
+        onSnapshot: (snapshot) => {
+          if (!ownsSession()) return
+          setCameraPhase(snapshot.phase)
+          setCameraPreviewVisible(snapshot.previewVisible)
+          if (snapshot.serverMode === 'audio' || snapshot.serverMode === 'video') {
+            setMode(snapshot.serverMode)
+          }
+        },
+        onError: (message) => {
+          if (ownsSession()) setCameraErrorMessage(message)
+        },
+      })
+      frameRequestVisibility = createMinimumVisibleSignal({
+        minimumMs: 160,
+        onVisible: (visible) => {
+          if (ownsSession()) setFrameRequestActive(visible)
+        },
+        timers: {
+          now: () => performance.now(),
+          setTimeout: (callback, delayMs) =>
+            window.setTimeout(callback, delayMs),
+          clearTimeout: (handle) => window.clearTimeout(handle as number),
         },
       })
 
       mediaRef.current = media
       sessionRef.current = session
+      cameraOrchestratorRef.current = cameraOrchestrator
+      frameRequestVisibilityRef.current = frameRequestVisibility
+      cameraActivationInvalidatorRef.current = invalidateCameraActivation
 
       try {
         await session.connect()
       } catch (error) {
+        if (
+          sessionRef.current !== session ||
+          !callLifecycleRef.current.fail(owner)
+        ) {
+          return
+        }
+        sessionRef.current = null
+        mediaRef.current = null
+        cameraOrchestrator.invalidate()
+        if (cameraOrchestratorRef.current === cameraOrchestrator) {
+          cameraOrchestratorRef.current = null
+        }
+        cameraActivation.invalidate()
+        if (
+          cameraActivationInvalidatorRef.current === invalidateCameraActivation
+        ) {
+          cameraActivationInvalidatorRef.current = null
+        }
+        frameRequestVisibility.dispose()
+        if (frameRequestVisibilityRef.current === frameRequestVisibility) {
+          frameRequestVisibilityRef.current = null
+        }
+        cameraControlReadyRef.current = false
+        setCameraControlReady(false)
+        initialCameraRequestRef.current = false
         media.stop()
+        const closing = session.close()
+        setInputLevel(0)
+        setOutputLevel(0)
         const message =
           error instanceof Error ? error.message : '无法连接实时服务'
         setErrorMessage(message)
+        dispatchLiveResults({ type: 'clear' })
         setSessionState('error')
+        await closing
       }
     },
-    [accessToken, cameraFacing, server],
+    [accessToken, activeConversationId, cameraFacing, server],
   )
 
   useEffect(() => {
-    if (screen !== 'call' || sessionRef.current) return
-    const frame = window.requestAnimationFrame(() => void startCall(mode))
+    if (
+      screen !== 'call' ||
+      sessionRef.current ||
+      !callLifecycleRef.current.canAutoStart()
+    ) {
+      return
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const owner = callLifecycleRef.current.claimStart()
+      if (owner !== null) void startCall(owner)
+    })
     return () => window.cancelAnimationFrame(frame)
-  }, [mode, screen, startCall])
+  }, [screen, startCall])
 
-  const openCall = (nextMode: RealtimeMode) => {
-    setMode(nextMode)
+  const openCall = (
+    nextMode: RealtimeMode,
+    conversationId?: string,
+  ) => {
+    if (!callLifecycleRef.current.requestOpen()) return
+    const conversationOwner = conversationOwnershipRef.current.begin(conversationId)
+    setActiveConversationIdState(conversationOwner.conversationId)
+    if (!conversationOwner.conversationId) {
+      setSelectedConversation(null)
+      setHistoryMessages([])
+    }
+    setHistoryBusy(false)
+    setHistoryError('')
+    initialCameraRequestRef.current = nextMode === 'video'
+    setMode('audio')
+    setCameraPhase('off')
+    setCameraPreviewVisible(false)
+    cameraControlReadyRef.current = false
+    setCameraControlReady(false)
+    setFrameRequestActive(false)
+    setCameraErrorMessage('')
     setSessionState('idle')
-    setScreen('call')
+    dispatchLiveResults({ type: 'clear' })
+    setRippleSignals([])
+    navigateTo('call')
   }
 
-  const leaveCall = async () => {
-    await stopCall()
-    setScreen('home')
-    setSessionState('idle')
+  const openConversationMemory = async (targetId: string) => {
+    const routeOwner = navigateTo('memories')
+    actionMemoryTargetRef.current = targetId
+    setMemoryScope('all')
+    setMemoryQuery('')
+    setSelectedMemoryId(null)
+    setMemoryBusy(true)
+    setMemoryError('')
+    try {
+      const target = await memory(server, accessToken, targetId)
+      if (!navigationGuardRef.current.owns(routeOwner)) return
+      setMemoryItems((items) => [
+        target,
+        ...items.filter((item) => item.id !== target.id),
+      ])
+      setSelectedMemoryId(target.id)
+    } catch (error) {
+      if (!navigationGuardRef.current.owns(routeOwner)) return
+      actionMemoryTargetRef.current = null
+      setMemoryError(
+        error instanceof Error ? error.message : '该记忆已不存在或无法打开',
+      )
+    } finally {
+      if (navigationGuardRef.current.owns(routeOwner)) setMemoryBusy(false)
+    }
+  }
+
+  const openConversationTodo = (targetId: string) => {
+    actionTodoTargetRef.current = targetId
+    setTodoView('active')
+    setTodoQuery('')
+    setRevealedTodo(null)
+    navigateTo('todos')
+  }
+
+  const openConversationAction = (action: ConversationAction) =>
+    activateConversationAction(action, {
+      openMemory: openConversationMemory,
+      openTodo: openConversationTodo,
+    })
+
+  const selectDestination = (destination: AppDestination) => {
+    switch (destination) {
+      case 'home':
+        navigateTo('home')
+        break
+      case 'history':
+        navigateTo('history')
+        break
+      case 'memories':
+        actionMemoryTargetRef.current = null
+        navigateTo('memories')
+        break
+      case 'todos':
+        actionTodoTargetRef.current = null
+        navigateTo('todos')
+        break
+      case 'settings':
+        navigateTo('settings')
+        break
+    }
   }
 
   const toggleMute = () => {
@@ -557,10 +1128,66 @@ export default function App() {
     if (next) sessionRef.current?.discardInput()
   }
 
+  const toggleCamera = async () => {
+    if (!cameraControlReadyRef.current) return
+    const orchestrator = cameraOrchestratorRef.current
+    if (!orchestrator) return
+    setCameraErrorMessage('')
+    const snapshot = orchestrator.current()
+    if (snapshot.recovery) {
+      await orchestrator.retry(cameraFacing)
+      return
+    }
+    if (snapshot.previewVisible) {
+      await orchestrator.close()
+      return
+    }
+    await orchestrator.open(cameraFacing)
+  }
+
   const flipCamera = async () => {
+    const media = mediaRef.current
+    const orchestrator = cameraOrchestratorRef.current
+    if (
+      !cameraControlReadyRef.current ||
+      !media ||
+      !orchestrator ||
+      orchestrator.current().phase !== 'on'
+    ) return
+    const flipGeneration = ++cameraFlipGenerationRef.current
     const next = cameraFacing === 'user' ? 'environment' : 'user'
-    setCameraFacing(next)
-    await mediaRef.current?.setFacingMode(next)
+    setCameraErrorMessage('')
+    try {
+      const outcome = await media.setFacingMode(next)
+      if (
+        mediaRef.current !== media ||
+        cameraOrchestratorRef.current !== orchestrator ||
+        cameraFlipGenerationRef.current !== flipGeneration ||
+        orchestrator.current().phase !== 'on'
+      ) return
+      if (outcome === 'stale') return
+      if (outcome === 'failed') {
+        setCameraErrorMessage((previous) =>
+          cameraErrorAfterSwitch(previous, outcome),
+        )
+        return
+      }
+      setCameraFacing(next)
+      setCameraErrorMessage((previous) =>
+        cameraErrorAfterSwitch(previous, outcome),
+      )
+    } catch {
+      if (
+        mediaRef.current === media &&
+        cameraOrchestratorRef.current === orchestrator &&
+        cameraFlipGenerationRef.current === flipGeneration &&
+        orchestrator.current().phase === 'on'
+      ) {
+        setCameraErrorMessage((previous) =>
+          cameraErrorAfterSwitch(previous, 'failed'),
+        )
+      }
+    }
   }
 
   const submitAuth = async () => {
@@ -591,10 +1218,32 @@ export default function App() {
 
   const signOut = async () => {
     const token = accessToken
+    callLifecycleRef.current.invalidate()
+    cameraOrchestratorRef.current?.invalidate()
+    cameraOrchestratorRef.current = null
+    cameraActivationInvalidatorRef.current?.()
+    cameraActivationInvalidatorRef.current = null
+    frameRequestVisibilityRef.current?.dispose()
+    frameRequestVisibilityRef.current = null
+    cameraControlReadyRef.current = false
+    cameraFlipGenerationRef.current += 1
+    mediaRef.current?.stop()
+    mediaRef.current = null
+    const liveSession = sessionRef.current
+    sessionRef.current = null
+    void liveSession?.close()
+    initialCameraRequestRef.current = false
+    setCameraPhase('off')
+    setCameraPreviewVisible(false)
+    setCameraControlReady(false)
+    setFrameRequestActive(false)
     localStorage.removeItem('ripple-access-token')
     setAccessToken('')
     setUser(null)
-    setScreen('home')
+    conversationOwnershipRef.current.invalidate()
+    setActiveConversationIdState(null)
+    setSelectedConversation(null)
+    navigateTo('home')
     setHistoryItems([])
     setHistoryMessages([])
     setMemoryItems([])
@@ -622,6 +1271,7 @@ export default function App() {
     try {
       await updateTodo(server, accessToken, todo.id, { completed: todoView === 'active' })
       setTodoItems((items) => items.filter((item) => item.id !== todo.id))
+      setRevealedTodo(null)
     } catch (error) {
       setTodoError(error instanceof Error ? error.message : '无法更新待办')
     }
@@ -659,17 +1309,57 @@ export default function App() {
   }
 
   const beginTodoGesture = (event: React.PointerEvent<HTMLElement>, id: string) => {
-    if ((event.target as HTMLElement).closest('button, input, textarea, select, label')) return
-    todoPointerStartRef.current = { id, x: event.clientX, y: event.clientY }
+    if ((event.target as HTMLElement).closest('.todo-swipe-delete, input, textarea, select, label')) return
+    todoPointerStartRef.current = {
+      id,
+      x: event.clientX,
+      y: event.clientY,
+      baseOffset: revealedTodo === id ? 74 : 0,
+      dragging: false,
+    }
+  }
+
+  const moveTodoGesture = (event: React.PointerEvent<HTMLElement>) => {
+    const start = todoPointerStartRef.current
+    if (!start) return
+    const deltaX = event.clientX - start.x
+    const deltaY = event.clientY - start.y
+    if (!start.dragging) {
+      if (Math.abs(deltaX) < 7 && Math.abs(deltaY) < 7) return
+      if (Math.abs(deltaY) > Math.abs(deltaX)) {
+        todoPointerStartRef.current = null
+        return
+      }
+      start.dragging = true
+      event.currentTarget.setPointerCapture?.(event.pointerId)
+    }
+    event.preventDefault()
+    const offset = Math.min(74, Math.max(0, start.baseOffset + deltaX))
+    setTodoDrag({ id: start.id, offset })
   }
 
   const endTodoGesture = (event: React.PointerEvent<HTMLElement>) => {
     const start = todoPointerStartRef.current
     todoPointerStartRef.current = null
     if (!start) return
-    const distance = event.clientX - start.x
-    if (distance > 44) setRevealedTodo(start.id)
-    else if (distance < -32) setRevealedTodo(null)
+    const offset = Math.min(74, Math.max(0, start.baseOffset + event.clientX - start.x))
+    if (start.dragging) {
+      suppressTodoClickRef.current = true
+      window.setTimeout(() => { suppressTodoClickRef.current = false }, 0)
+    }
+    setRevealedTodo(offset >= 37 ? start.id : null)
+    setTodoDrag(null)
+  }
+
+  const cancelTodoGesture = () => {
+    todoPointerStartRef.current = null
+    setTodoDrag(null)
+  }
+
+  const consumeSuppressedTodoClick = () => {
+    if (!suppressTodoClickRef.current) return false
+    suppressTodoClickRef.current = false
+    return true
   }
 
   const visibleTodos = useMemo(() => {
@@ -683,6 +1373,14 @@ export default function App() {
   const historyLibraryItems = useMemo(
     () =>
       historyItems
+        .filter((item) => {
+          const title = item.title.trim()
+          return Boolean(
+            item.preview.trim() ||
+            item.is_pinned ||
+            (title && title !== '新对话' && title !== '未命名对话'),
+          )
+        })
         .map((item): LibraryItem => ({
           id: item.id,
           title: item.title || '未命名对话',
@@ -704,6 +1402,7 @@ export default function App() {
           timestamp: item.captured_at ?? item.created_at,
           isPinned: item.is_pinned,
           archivedAt: item.archived_at,
+          hasCover: Boolean(item.cover),
         }))
         .filter((item) => matchesLibraryQuery(item, memoryQuery)),
     [memoryItems, memoryQuery],
@@ -864,6 +1563,18 @@ export default function App() {
         setHistoryItems((items) => items.filter((item) => !ids.includes(item.id)))
         setHistorySelection(new Set())
         setHistorySelectionMode(false)
+        if (selectedConversation && ids.includes(selectedConversation.id)) {
+          setSelectedConversation(null)
+          setHistoryMessages([])
+        }
+        const conversationOwner = conversationOwnershipRef.current.current()
+        if (
+          conversationOwner.conversationId &&
+          ids.includes(conversationOwner.conversationId)
+        ) {
+          conversationOwnershipRef.current.release(conversationOwner.owner)
+          setActiveConversationIdState(null)
+        }
       } else if (kind === 'memory') {
         if (ids.length === 1) {
           await memoryMutation(server, accessToken, ids[0], 'delete')
@@ -922,18 +1633,6 @@ export default function App() {
     }
   }
 
-  const statusClass = useMemo(
-    () =>
-      sessionState === 'error'
-        ? 'is-error'
-        : sessionState === 'speaking'
-          ? 'is-speaking'
-          : isActive
-            ? 'is-live'
-            : '',
-    [isActive, sessionState],
-  )
-
   if (!authChecked) {
     return (
       <main className="app-shell auth-shell">
@@ -953,92 +1652,94 @@ export default function App() {
             <img src={appIcon} alt="" />
             <div>
               <strong>Ripple Live</strong>
-              <span>登录你的私人实时 Agent</span>
+              <span>让每一次开口，都有回响</span>
             </div>
           </header>
 
-          <div className="auth-intro">
-            <p>{authMode === 'login' ? '欢迎回来' : '接受邀请'}</p>
-            <h1>{authMode === 'login' ? '继续你的对话' : '创建私人账号'}</h1>
-            <span>
-              {authMode === 'login'
-                ? '历史聊天只保存在你连接的 Ripple 服务中。'
-                : '首次注册需要有效邀请码，邀请码受次数和有效期限制。'}
-            </span>
-          </div>
-
-          <form
-            className="auth-form"
-            onSubmit={(event) => {
-              event.preventDefault()
-              void submitAuth()
-            }}
-          >
-            <label htmlFor="auth-email">邮箱</label>
-            <div className="field-control">
-              <EnvelopeSimple aria-hidden="true" />
-              <input
-                id="auth-email"
-                type="email"
-                autoComplete="email"
-                value={authEmail}
-                onChange={(event) => setAuthEmail(event.target.value)}
-                placeholder="you@example.com"
-                required
-              />
+          <div className="auth-content">
+            <div className="auth-intro">
+              <p>{authMode === 'login' ? '欢迎回来' : '接受邀请'}</p>
+              <h1>{authMode === 'login' ? '继续你的对话' : '创建私人账号'}</h1>
+              <span>
+                {authMode === 'login'
+                  ? '历史聊天只保存在你连接的 Ripple 服务中。'
+                  : '首次注册需要有效邀请码，邀请码受次数和有效期限制。'}
+              </span>
             </div>
 
-            <label htmlFor="auth-password">密码</label>
-            <div className="field-control">
-              <LockKey aria-hidden="true" />
-              <input
-                id="auth-password"
-                type="password"
-                autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
-                value={authPassword}
-                onChange={(event) => setAuthPassword(event.target.value)}
-                placeholder="至少 8 个字符"
-                minLength={8}
-                required
-              />
-            </div>
+            <form
+              className="auth-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void submitAuth()
+              }}
+            >
+              <label htmlFor="auth-email">邮箱</label>
+              <div className="field-control">
+                <EnvelopeSimple aria-hidden="true" />
+                <input
+                  id="auth-email"
+                  type="email"
+                  autoComplete="email"
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  required
+                />
+              </div>
 
-            {authMode === 'register' && (
-              <>
-                <label htmlFor="invitation-code">邀请码</label>
-                <div className="field-control">
-                  <Ticket aria-hidden="true" />
-                  <input
-                    id="invitation-code"
-                    value={invitationCode}
-                    onChange={(event) => setInvitationCode(event.target.value)}
-                    placeholder="输入邀请码"
-                    required
-                  />
-                </div>
-              </>
-            )}
+              <label htmlFor="auth-password">密码</label>
+              <div className="field-control">
+                <LockKey aria-hidden="true" />
+                <input
+                  id="auth-password"
+                  type="password"
+                  autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  placeholder="至少 8 个字符"
+                  minLength={8}
+                  required
+                />
+              </div>
 
-            {authError && <p className="form-error">{authError}</p>}
-            <button className="primary-button" type="submit" disabled={authBusy}>
-              {authBusy
-                ? '正在连接'
-                : authMode === 'login'
-                  ? '登录'
-                  : '创建账号'}
+              {authMode === 'register' && (
+                <>
+                  <label htmlFor="invitation-code">邀请码</label>
+                  <div className="field-control">
+                    <Ticket aria-hidden="true" />
+                    <input
+                      id="invitation-code"
+                      value={invitationCode}
+                      onChange={(event) => setInvitationCode(event.target.value)}
+                      placeholder="输入邀请码"
+                      required
+                    />
+                  </div>
+                </>
+              )}
+
+              {authError && <p className="form-error">{authError}</p>}
+              <button className="primary-button" type="submit" disabled={authBusy}>
+                {authBusy
+                  ? '正在连接'
+                  : authMode === 'login'
+                    ? '登录'
+                    : '创建账号'}
+              </button>
+            </form>
+
+            <button
+              className="auth-switch"
+              type="button"
+              onClick={() => {
+                setAuthMode(authMode === 'login' ? 'register' : 'login')
+                setAuthError('')
+              }}
+            >
+              {authMode === 'login' ? '有邀请码？创建账号' : '已有账号？返回登录'}
             </button>
-          </form>
-
-          <button
-            className="auth-switch"
-            type="button"
-            onClick={() => {
-              setAuthMode(authMode === 'login' ? 'register' : 'login')
-              setAuthError('')
-            }}
-          >
-            {authMode === 'login' ? '有邀请码？创建账号' : '已有账号？返回登录'}
-          </button>
+          </div>
         </section>
       </main>
     )
@@ -1047,101 +1748,34 @@ export default function App() {
   return (
     <main className="app-shell">
       {screen === 'home' && (
-        <section className="home-screen">
-          <header className="home-header">
-            <div className="brand-lockup">
-              <img src={appIcon} alt="" />
-              <div>
-                <strong>Ripple Live</strong>
-                <span>私人实时 Agent</span>
-              </div>
-            </div>
-            <div className="header-actions">
-              <button
-                className="icon-button"
-                type="button"
-                aria-label="待办"
-                onClick={() => setScreen('todos')}
-              >
-                <ListChecks />
-              </button>
-              <button
-                className="icon-button"
-                type="button"
-                aria-label="视觉记忆"
-                onClick={() => setScreen('memories')}
-              >
-                <ImagesSquare />
-              </button>
-              <button
-                className="icon-button"
-                type="button"
-                aria-label="聊天历史"
-                onClick={() => setScreen('history')}
-              >
-                <ClockCounterClockwise />
-              </button>
-              <button
-                className="icon-button"
-                type="button"
-                aria-label="打开设置"
-                onClick={() => setScreen('settings')}
-              >
-                <GearSix />
-              </button>
-            </div>
-          </header>
-
-          <div className="ready-state">
-            <div className="ready-mark" aria-hidden="true">
-              <img src={appIcon} alt="" />
-            </div>
-            <p><span aria-hidden="true" /> 准备就绪</p>
-            <h1>打开镜头，开始聊聊</h1>
-            <span>让我看见现场，实时听懂并回应你。</span>
-          </div>
-
-          <div className="launch-actions">
-            <button
-              className="launch-button call-entry is-video"
-              type="button"
-              onClick={() => openCall('video')}
-            >
-              <span className="call-entry-icon" aria-hidden="true">
-                <VideoCamera weight="fill" />
-              </span>
-              <span className="call-entry-copy">
-                <strong>开始视频通话</strong>
-                <small>让我看见现场</small>
-              </span>
-            </button>
-            <button
-              className="launch-button call-entry is-voice"
-              type="button"
-              aria-label="开始语音通话"
-              onClick={() => openCall('audio')}
-            >
-              <span className="call-entry-icon" aria-hidden="true">
-                <Microphone weight="fill" />
-              </span>
-            </button>
-          </div>
-        </section>
+        <ConversationHome
+          onStartAudio={() => openCall('audio')}
+          onStartVideo={() => openCall('video')}
+          onOpenMenu={() => setNavigationOpen(true)}
+          historyError={historyError}
+        />
       )}
 
       {screen === 'history' && (
-        <section className="history-screen">
-          <header className="screen-header">
+        <section className="history-screen history-library-screen">
+          <header className="screen-header history-page-header library-sticky-header">
             <button
               className="icon-button"
               type="button"
-              aria-label="返回"
-              onClick={() => setScreen('home')}
+              aria-label="打开导航"
+              onClick={() => setNavigationOpen(true)}
             >
-              <ArrowLeft />
+              <Menu />
             </button>
             <h1>聊天历史</h1>
-            <span className="header-spacer" />
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="开始新对话"
+              onClick={() => openCall('audio')}
+            >
+              <NotePencil />
+            </button>
           </header>
 
           <div className="library-region" aria-label="搜索聊天历史">
@@ -1242,8 +1876,9 @@ export default function App() {
                                 toggleSelection(setHistorySelection, item.id)
                                 return
                               }
+                              preloadedConversationIdRef.current = null
                               setSelectedConversation(item)
-                              setScreen('conversation')
+                              navigateTo('conversation')
                             }}
                           >
                             {historySelectionMode && (
@@ -1252,7 +1887,6 @@ export default function App() {
                             <span className="library-row-copy">
                               <span className="library-row-title">
                                 <strong>{item.title || '未命名对话'}</strong>
-                                {item.is_pinned && <PushPin weight="fill" aria-label="已置顶" />}
                                 <time>{formatHistoryTime(item.updated_at)}</time>
                               </span>
                               <span className="library-row-preview">{item.preview || '这次对话还没有文本内容'}</span>
@@ -1277,13 +1911,16 @@ export default function App() {
 
       {screen === 'todos' && (
         <section className="history-screen todo-screen">
-          <header className="screen-header">
-            <button className="icon-button" type="button" aria-label="返回" onClick={() => setScreen('home')}>
-              <ArrowLeft />
+          <header className="screen-header history-page-header library-sticky-header todo-header">
+            <button className="icon-button" type="button" aria-label="打开导航" onClick={() => setNavigationOpen(true)}>
+              <Menu />
             </button>
-            <h1>待办</h1>
+            <div className="todo-heading">
+              <h1>待办</h1>
+              <p>{todoView === 'active' ? `${visibleTodos.length} 项待处理` : `${visibleTodos.length} 项已完成`}</p>
+            </div>
             <button
-              className="icon-button"
+              className="icon-button todo-add-button"
               type="button"
               aria-label="新建待办"
               onClick={() => setTodoEditor({ title: '', dueAt: '' })}
@@ -1291,7 +1928,6 @@ export default function App() {
               <Plus />
             </button>
           </header>
-          <p className="todo-intro">管理日常事项、提醒和完成记录。完成后会归档在“已完成”中；向右滑动事项可删除，点击编辑可调整标题或提醒时间。</p>
           <div className="todo-toolbar">
             <div className="todo-view-switch" role="tablist" aria-label="待办状态">
               <button
@@ -1299,21 +1935,28 @@ export default function App() {
                 type="button"
                 role="tab"
                 aria-selected={todoView === 'active'}
-                onClick={() => setTodoView('active')}
+                onClick={() => {
+                  setRevealedTodo(null)
+                  setTodoView('active')
+                }}
               >
-                待处理
+                进行中
               </button>
               <button
                 className={todoView === 'completed' ? 'is-active' : ''}
                 type="button"
                 role="tab"
                 aria-selected={todoView === 'completed'}
-                onClick={() => setTodoView('completed')}
+                onClick={() => {
+                  setRevealedTodo(null)
+                  setTodoView('completed')
+                }}
               >
                 已完成
               </button>
             </div>
             <label className="todo-search">
+              <Search aria-hidden="true" />
               <input aria-label="搜索待办" value={todoQuery} onChange={(event) => setTodoQuery(event.target.value)} placeholder="搜索待办" />
             </label>
           </div>
@@ -1339,41 +1982,46 @@ export default function App() {
             <div className="todo-list">
               {visibleTodos.map((todo) => (
                 <article
-                  className={`todo-swipe-shell ${revealedTodo === todo.id ? 'is-revealed' : ''}`}
+                  id={`todo-action-${encodeURIComponent(todo.id)}`}
+                  tabIndex={-1}
+                  className={`todo-swipe-shell ${revealedTodo === todo.id ? 'is-revealed' : ''} ${todoDrag?.id === todo.id ? 'is-dragging' : ''}`}
                   key={todo.id}
+                  style={todoDrag?.id === todo.id ? { '--todo-drag-offset': `${todoDrag.offset}px` } as React.CSSProperties : undefined}
                   onPointerDown={(event) => beginTodoGesture(event, todo.id)}
+                  onPointerMove={moveTodoGesture}
                   onPointerUp={endTodoGesture}
-                  onPointerCancel={() => { todoPointerStartRef.current = null }}
+                  onPointerCancel={cancelTodoGesture}
                 >
-                  <button className="todo-swipe-delete danger-action" type="button" onClick={() => setDeleteRequest({ kind: 'todo', ids: [todo.id] })}>
+                  <button className="todo-swipe-delete danger-action" type="button" aria-label={`删除：${todo.title}`} onClick={() => setDeleteRequest({ kind: 'todo', ids: [todo.id] })}>
                     <Trash aria-hidden="true" /> 删除
                   </button>
-                  <div className="todo-card todo-card-surface">
+                  <div className={`todo-card todo-card-surface ${todoView === 'completed' ? 'is-completed' : ''}`}>
                     <button
                       className="todo-complete"
                       type="button"
                       aria-label={todoView === 'active' ? `完成：${todo.title}` : `恢复：${todo.title}`}
-                      onClick={() => void setTodoCompleted(todo)}
+                      onClick={() => {
+                        if (consumeSuppressedTodoClick()) return
+                        void setTodoCompleted(todo)
+                      }}
                     >
                       {todoView === 'active' ? <Circle /> : <ArrowCounterClockwise />}
                     </button>
-                    {todo.cover ? (
-                      <AuthenticatedImage server={server} token={accessToken} artifact={todo.cover} className="todo-cover" />
-                    ) : (
-                      <span className="todo-cover todo-text-cover"><CheckCircle /></span>
-                    )}
-                    <div className="todo-copy">
-                      <div className="todo-title-row">
-                        <strong>{todo.title}</strong>
-                        <button className="todo-edit" type="button" aria-label={`编辑：${todo.title}`} onClick={() => setTodoEditor({ todo, title: todo.title, dueAt: todoDateInputValue(todo.due_at) })}>
-                          <NotePencil />
-                        </button>
-                      </div>
-                      {todo.visual_summary && <p>{todo.visual_summary}</p>}
+                    <button
+                      className="todo-copy"
+                      type="button"
+                      aria-label={`编辑：${todo.title}`}
+                      onClick={() => {
+                        if (consumeSuppressedTodoClick()) return
+                        setTodoEditor({ todo, title: todo.title, dueAt: todoDateInputValue(todo.due_at) })
+                      }}
+                    >
+                      <strong>{todo.title}</strong>
+                      {todo.visual_summary && <p>{todoSummaryLabel(todo.visual_summary)}</p>}
                       <time className={todo.due_at && todo.due_at < Date.now() / 1000 && todoView === 'active' ? 'is-overdue' : ''}>
                         {todoView === 'completed' && todo.completed_at ? `完成：${formatHistoryTime(todo.completed_at)}` : todoDueLabel(todo.due_at)}
                       </time>
-                    </div>
+                    </button>
                   </div>
                 </article>
               ))}
@@ -1398,7 +2046,7 @@ export default function App() {
               {todoEditor.dueAt && <button type="button" onClick={() => setTodoEditor({ ...todoEditor, dueAt: '' })}>清除提醒</button>}
               <span />
               <button type="button" onClick={() => setTodoEditor(null)}>取消</button>
-              <button className="primary-button" type="button" onClick={() => void saveTodo()}>保存</button>
+              <button className="primary-button" type="button" disabled={!todoEditor.title.trim()} onClick={() => void saveTodo()}>保存</button>
             </div>
           </section>
         </div>
@@ -1406,22 +2054,17 @@ export default function App() {
 
       {screen === 'memories' && (
         <section className="history-screen memory-screen">
-          <header className="screen-header">
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="返回"
-              onClick={() => setScreen('home')}
-            >
-              <ArrowLeft />
+          <header className="screen-header history-page-header library-sticky-header">
+            <button className="icon-button" type="button" aria-label="打开导航" onClick={() => setNavigationOpen(true)}>
+              <Menu />
             </button>
-            <h1>视觉记忆</h1>
+            <h1>记忆</h1>
             <span className="header-spacer" />
           </header>
 
           <div className="library-region" aria-label="搜索视觉记忆">
             <LibraryToolbar
-              kind="视觉记忆"
+              kind="记忆"
               query={memoryQuery}
               scope={memoryScope}
               selectionCount={memorySelection.size}
@@ -1461,7 +2104,7 @@ export default function App() {
           {!memoryBusy && !memoryError && memoryGroups.length === 0 && (
             <div className="history-empty">
               <ImagesSquare />
-              <h2>{memoryQuery ? '没有找到相关记忆' : memoryScope === 'archived' ? '还没有归档记忆' : memoryScope === 'pinned' ? '还没有置顶记忆' : '还没有保存记忆'}</h2>
+              <h2>{memoryQuery ? '没有找到相关记忆' : memoryScope === 'archived' ? '还没有归档记忆' : memoryScope === 'pinned' ? '还没有置顶记忆' : memoryScope === 'images' ? '还没有图片记忆' : '还没有保存记忆'}</h2>
               <p>{memoryQuery ? '试试搜索物品、地点或备注里的关键词。' : '视频通话时说“帮我记住这个”，我会保存当时的内容和画面。'}</p>
               {memoryQuery ? (
                 <button type="button" onClick={() => setMemoryQuery('')}>清除搜索</button>
@@ -1482,7 +2125,7 @@ export default function App() {
                       return (
                         <article
                           key={memory.id}
-                          className={`memory-card library-swipe-shell has-rename ${revealedItem === memory.id ? 'is-revealed' : ''}`}
+                          className={`memory-card library-swipe-shell has-rename ${memory.cover ? 'has-cover' : 'is-text-memory'} ${revealedItem === memory.id ? 'is-revealed' : ''}`}
                           onPointerDown={(event) =>
                             beginLibraryGesture(event, memory.id, () =>
                               {
@@ -1522,9 +2165,10 @@ export default function App() {
                             {memorySelectionMode && (
                               <span className={`selection-check card-check ${selected ? 'is-selected' : ''}`} aria-hidden="true" />
                             )}
-                            {memory.is_pinned && <PushPin className="memory-pin" weight="fill" aria-label="已置顶" />}
+                            {memory.is_pinned && <PushPin className="memory-pin" aria-label="已置顶" />}
                             <span className="memory-card-body">
-                              <strong>{memory.user_note || '未命名记忆'}</strong>
+                              <strong>{memoryDisplayTitle(memory)}</strong>
+                              {memory.visual_summary && <span className="memory-card-note">{memory.visual_summary}</span>}
                               <time>{formatHistoryTime(memory.captured_at ?? memory.created_at)}</time>
                             </span>
                           </button>
@@ -1549,8 +2193,9 @@ export default function App() {
             }}>
               <section className="memory-detail-sheet" role="dialog" aria-modal="true" aria-labelledby="memory-detail-title">
                 <header>
+                  <button type="button" aria-label="返回记忆列表" onClick={() => setSelectedMemoryId(null)}><ArrowLeft /></button>
                   <h2 id="memory-detail-title">记忆详情</h2>
-                  <button type="button" aria-label="关闭记忆详情" onClick={() => setSelectedMemoryId(null)}><X /></button>
+                  <span className="header-spacer" aria-hidden="true" />
                 </header>
                 {selectedMemory.cover ? (
                   <AuthenticatedImage server={server} token={accessToken} artifact={selectedMemory.cover} className="memory-detail-cover" />
@@ -1567,7 +2212,7 @@ export default function App() {
                 <div className="memory-actions">
                   {editingMemoryId === selectedMemory.id ? (
                     <>
-                      <button type="button" onClick={() => void saveMemoryEdit(selectedMemory.id)}>保存</button>
+                      <button type="button" disabled={!memoryDraft.trim()} onClick={() => void saveMemoryEdit(selectedMemory.id)}>保存</button>
                       <button type="button" onClick={() => { setEditingMemoryId(null); setMemoryDraft('') }}>取消</button>
                     </>
                   ) : (
@@ -1588,23 +2233,20 @@ export default function App() {
               className="icon-button"
               type="button"
               aria-label="返回聊天历史"
-              onClick={() => setScreen('history')}
+              onClick={() => navigateTo('history')}
             >
               <ArrowLeft />
             </button>
-            <h1>聊天内容</h1>
-            <span className="header-spacer" />
+            <h1 className="conversation-header-title">{selectedConversation.title || '未命名对话'}</h1>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="重命名对话"
+              onClick={() => beginRenameConversation(selectedConversation)}
+            >
+              <DotsThreeVertical aria-hidden="true" />
+            </button>
           </header>
-
-          <div className="conversation-title">
-            <div>
-              <h2>{selectedConversation.title || '未命名对话'}</h2>
-              <button className="conversation-rename" type="button" onClick={() => beginRenameConversation(selectedConversation)}>
-                <NotePencil aria-hidden="true" /> 重命名
-              </button>
-            </div>
-            <time>{formatHistoryTime(selectedConversation.updated_at)}</time>
-          </div>
 
           {historyBusy && (
             <div className="message-skeleton" aria-label="正在加载聊天内容">
@@ -1626,6 +2268,10 @@ export default function App() {
                     <time>{formatHistoryTime(message.created_at)}</time>
                   </div>
                   <MarkdownContent>{message.content}</MarkdownContent>
+                  <ConversationActions
+                    actions={message.actions}
+                    onActivate={openConversationAction}
+                  />
                   {message.attachments.length > 0 && (
                     <div className="message-attachments">
                       {message.attachments.map((artifact) => (
@@ -1643,31 +2289,80 @@ export default function App() {
               ))}
             </div>
           )}
+          <aside className="conversation-continuation-bar" aria-label="继续这段对话">
+            <button
+              className="continuation-video"
+              type="button"
+              aria-label="用视频继续"
+              onClick={() => openCall('video', selectedConversation.id)}
+            >
+              <Video aria-hidden="true" />
+            </button>
+            <button
+              className="continuation-compose"
+              type="button"
+              onClick={() => openCall('audio', selectedConversation.id)}
+            >
+              <Microphone aria-hidden="true" />
+              <span>继续语音对话</span>
+            </button>
+          </aside>
         </section>
       )}
 
       {screen === 'settings' && (
-        <section className="settings-screen">
+        <section className="settings-screen profile-screen">
           <header className="screen-header">
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="返回"
-              onClick={() => setScreen('home')}
-            >
-              <ArrowLeft />
+            <button className="icon-button" type="button" aria-label="打开导航" onClick={() => setNavigationOpen(true)}>
+              <Menu />
             </button>
-            <h1>账户设置</h1>
+            <h1>设置</h1>
             <span className="header-spacer" />
           </header>
 
-          <div className="account-panel">
-            <div>
-              <span>当前账号</span>
-              <strong>{user.email}</strong>
+          <div className="profile-groups">
+            <div className="profile-identity">
+              <span aria-hidden="true">R</span>
+              <div>
+                <strong>{user.email}</strong>
+                <small>Ripple Live</small>
+              </div>
             </div>
-            <button type="button" onClick={() => void signOut()}>
-              <SignOut />
+            <section className="profile-section" aria-labelledby="profile-account-heading">
+              <h2 id="profile-account-heading">系统状态</h2>
+              <dl className="profile-info-list">
+                <div className="profile-info-row">
+                  <dt>通知权限</dt>
+                  <dd>{notificationPermissionLabel()}</dd>
+                </div>
+              </dl>
+            </section>
+
+            <section className="profile-section" aria-labelledby="profile-experience-heading">
+              <h2 id="profile-experience-heading">通话体验</h2>
+              <div className="profile-copy-row">
+                <strong>实时字幕</strong>
+                <p>通话时自动显示你和 Ripple 正在说的内容。</p>
+              </div>
+              <button className="profile-navigation-row" type="button" onClick={() => navigateTo('memories')}>
+                <span>
+                  <strong>视觉记忆</strong>
+                  <small>查看通话中保存的画面与备注</small>
+                </span>
+                <ChevronRight aria-hidden="true" />
+              </button>
+            </section>
+
+            <section className="profile-section" aria-labelledby="profile-privacy-heading">
+              <h2 id="profile-privacy-heading">数据使用</h2>
+              <div className="profile-copy-row">
+                <strong>麦克风与相机</strong>
+                <p>麦克风音频仅用于实时对话；相机画面只在你开启视频或 Ripple 请求画面时发送到已连接服务。</p>
+              </div>
+            </section>
+
+            <button className="profile-logout" type="button" onClick={() => void signOut()}>
+              <SignOut aria-hidden="true" />
               退出登录
             </button>
           </div>
@@ -1675,140 +2370,47 @@ export default function App() {
       )}
 
       {screen === 'call' && (
-        <section className={`call-screen ${mode === 'video' ? 'has-video' : ''}`}>
-          <video
-            ref={videoRef}
-            className="camera-preview"
-            autoPlay
-            muted
-            playsInline
-          />
-          <canvas ref={canvasRef} hidden />
-          <div className="camera-scrim" />
+        <LiveCallScreen
+          mode={mode}
+          cameraPhase={cameraPhase}
+          cameraPreviewVisible={cameraPreviewVisible}
+          cameraControlReady={cameraControlReady}
+          frameRequestActive={frameRequestActive}
+          state={sessionState}
+          elapsed={elapsed}
+          muted={muted}
+          inputLevel={inputLevel}
+          outputLevel={outputLevel}
+          rippleSignals={rippleSignals}
+          onRippleSignalsConsumed={onRippleSignalsConsumed}
+          userText={userText}
+          assistantText={assistantText}
+          toolStatus={toolStatus}
+          errorMessage={visibleCallError(errorMessage, cameraErrorMessage)}
+          artifacts={liveArtifacts}
+          results={liveResults}
+          server={server}
+          accessToken={accessToken}
+          videoRef={videoRef}
+          captureCanvasRef={canvasRef}
+          onToggleMute={toggleMute}
+          onToggleCamera={toggleCamera}
+          onFlipCamera={flipCamera}
+          onDismissResult={(callId) =>
+            dispatchLiveResults({ type: 'dismiss', callId })
+          }
+          onLeave={leaveCall}
+        />
+      )}
 
-          <header className="call-header">
-            <span className="call-mode">
-              {mode === 'video' ? '视频' : '语音'} · 智能响应
-            </span>
-            <div className={`call-status ${statusClass}`}>
-              <span aria-hidden="true" />
-              <strong>{stateLabels[sessionState]}</strong>
-              <small>{formatDuration(elapsed)}</small>
-            </div>
-            {mode === 'video' ? (
-              <button
-                className="icon-button call-icon"
-                type="button"
-                aria-label="切换摄像头"
-                onClick={() => void flipCamera()}
-              >
-                <CameraRotate />
-              </button>
-            ) : (
-              <span className="header-spacer" />
-            )}
-          </header>
-
-          <div className={`conversation ${statusClass}`}>
-            {mode === 'audio' && (
-              <div
-                ref={visualizerRef}
-                className={`voice-visualizer ${statusClass}`}
-                aria-hidden="true"
-              >
-                {[0.45, 0.7, 1, 0.62, 0.88, 0.56, 0.38].map((scale, index) => (
-                  <span
-                    key={index}
-                    style={{ height: `${24 + scale * 88}px` }}
-                  />
-                ))}
-              </div>
-            )}
-
-            <div className="transcript" aria-live="polite">
-              {userText && (
-                <div className="utterance user-utterance">
-                  <span>你</span>
-                  <p>{userText}</p>
-                </div>
-              )}
-              <div className="utterance assistant-utterance">
-                <span>Ripple</span>
-                <MarkdownContent>
-                  {assistantText ||
-                    (sessionState === 'listening'
-                      ? '我在听'
-                      : sessionState === 'thinking'
-                        ? '正在理解你的问题'
-                        : sessionState === 'using_tool'
-                          ? toolStatus || '正在使用工具'
-                      : sessionState === 'speaking'
-                        ? '正在回答'
-                        : '正在建立实时连接')}
-                </MarkdownContent>
-                {liveArtifacts.length > 0 && (
-                  <div className="live-artifacts">
-                    {liveArtifacts.map((artifact) => (
-                      <AuthenticatedImage
-                        key={artifact.id}
-                        server={server}
-                        token={accessToken}
-                        artifact={artifact}
-                        className="live-artifact"
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-              {errorMessage && (
-                <div className="error-message">
-                  <X weight="bold" />
-                  <span>{errorMessage}</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <footer className="call-controls">
-            <div className="control-item">
-              <button
-                className={`control-button ${muted ? 'is-active' : ''}`}
-                type="button"
-                aria-label={muted ? '取消静音' : '静音'}
-                onClick={toggleMute}
-              >
-                {muted ? <MicrophoneSlash /> : <Microphone />}
-              </button>
-              <span>{muted ? '取消静音' : '静音'}</span>
-            </div>
-            <div className="control-item">
-              <button
-                className="end-button"
-                type="button"
-                aria-label="结束通话"
-                onClick={() => void leaveCall()}
-              >
-                <PhoneDisconnect weight="fill" />
-              </button>
-              <span>结束</span>
-            </div>
-            <div className="control-item">
-              <button
-                className="control-button"
-                type="button"
-                aria-label="打断回答"
-                onClick={() => {
-                  if (sessionRef.current?.forceListen()) {
-                    mediaRef.current?.clearOutput()
-                  }
-                }}
-              >
-                <HandPalm weight="fill" />
-              </button>
-              <span>打断</span>
-            </div>
-          </footer>
-        </section>
+      {screen !== 'call' && (
+        <AppDrawer
+          open={navigationOpen}
+          active={destinationForScreen(screen)}
+          accountLabel={user.email}
+          onClose={() => setNavigationOpen(false)}
+          onSelect={selectDestination}
+        />
       )}
 
       {deleteRequest && (
@@ -1822,9 +2424,19 @@ export default function App() {
           >
             <span className="confirm-dialog-mark"><Trash aria-hidden="true" /></span>
             <h2 id="delete-dialog-title">
-              删除{deleteRequest.ids.length > 1 ? `${deleteRequest.ids.length} 项` : deleteRequest.kind === 'history' ? '这段对话' : '这条记忆'}？
+              删除{deleteRequest.ids.length > 1
+                ? `${deleteRequest.ids.length} 项`
+                : deleteRequest.kind === 'history'
+                  ? '这段对话'
+                  : deleteRequest.kind === 'todo' ? '这条待办' : '这条记忆'}？
             </h2>
-            <p id="delete-dialog-description">删除后无法恢复。视觉记忆与聊天记录会分别保留，不会连带删除。</p>
+            <p id="delete-dialog-description">
+              {deleteRequest.kind === 'todo'
+                ? '删除后无法恢复，提醒和完成记录也会一并移除。'
+                : deleteRequest.kind === 'history'
+                  ? '删除后无法恢复，但视觉记忆和待办会分别保留。'
+                  : '删除后无法恢复，但不会删除关联的聊天记录。'}
+            </p>
             <div>
               <button type="button" onClick={() => setDeleteRequest(null)}>取消</button>
               <button className="danger-action" type="button" autoFocus onClick={() => void confirmDelete()}>确认删除</button>

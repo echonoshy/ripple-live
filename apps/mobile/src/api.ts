@@ -27,6 +27,14 @@ export type ConversationMessage = {
   content: string
   created_at: number
   attachments: MemoryArtifact[]
+  actions: ConversationAction[]
+}
+
+export type ConversationAction = {
+  kind: 'memory' | 'todo' | string
+  target_id: string
+  label: string
+  due_at: number | null
 }
 
 export type MemoryArtifact = {
@@ -174,6 +182,20 @@ export async function conversations(
   return payload.data
 }
 
+export async function conversation(
+  server: string,
+  token: string,
+  id: string,
+) {
+  const payload = await request<{ data: ConversationSummary }>(
+    server,
+    `/v1/conversations/${encodeURIComponent(id)}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
 export async function updateConversation(
   server: string,
   token: string,
@@ -248,18 +270,100 @@ export function batchConversations(
   return batchMutation(server, token, '/v1/conversations/batch', ids, action)
 }
 
+function ownDataValue(value: unknown, key: string) {
+  if (!value || typeof value !== 'object') return undefined
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function safeArrayValues(value: unknown, limit: number): unknown[] {
+  try {
+    if (!Array.isArray(value)) return []
+  } catch {
+    return []
+  }
+  const rawLength = ownDataValue(value, 'length')
+  if (typeof rawLength !== 'number' || !Number.isSafeInteger(rawLength) || rawLength < 0) {
+    return []
+  }
+  const values: unknown[] = []
+  for (let index = 0; index < Math.min(rawLength, limit); index += 1) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+      if (descriptor && 'value' in descriptor) values.push(descriptor.value)
+    } catch {
+      // A malformed row must not discard other rows from the same response.
+    }
+  }
+  return values
+}
+
+export function normalizeConversationMessages(
+  messages: unknown,
+): ConversationMessage[] {
+  return safeArrayValues(messages, 500).flatMap((message): ConversationMessage[] => {
+    const id = ownDataValue(message, 'id')
+    const role = ownDataValue(message, 'role')
+    const content = ownDataValue(message, 'content')
+    const createdAt = ownDataValue(message, 'created_at')
+    if (
+      typeof id !== 'number' || !Number.isFinite(id) ||
+      typeof role !== 'string' ||
+      typeof content !== 'string' ||
+      typeof createdAt !== 'number' || !Number.isFinite(createdAt)
+    ) return []
+
+    const actions = safeArrayValues(ownDataValue(message, 'actions'), 10)
+      .flatMap((candidate): ConversationAction[] => {
+        const kind = ownDataValue(candidate, 'kind')
+        const targetId = ownDataValue(candidate, 'target_id')
+        const label = ownDataValue(candidate, 'label')
+        const dueAt = ownDataValue(candidate, 'due_at')
+        if (
+          typeof kind !== 'string' ||
+          typeof targetId !== 'string' ||
+          typeof label !== 'string'
+        ) return []
+        return [{
+          kind,
+          target_id: targetId,
+          label,
+          due_at: typeof dueAt === 'number' && Number.isFinite(dueAt)
+            ? dueAt
+            : null,
+        }]
+      })
+
+    return [{
+      id,
+      role,
+      content,
+      created_at: createdAt,
+      attachments: safeArrayValues(
+        ownDataValue(message, 'attachments'),
+        100,
+      ) as MemoryArtifact[],
+      actions,
+    }]
+  })
+}
+
 export async function conversationMessages(
   server: string,
   token: string,
   conversationId: string,
 ) {
-  const payload = await request<{ data: ConversationMessage[] }>(
+  const payload = await request<{ data: unknown }>(
     server,
     `/v1/conversations/${encodeURIComponent(conversationId)}/messages?limit=500`,
     {},
     token,
   )
-  return payload.data
+  return normalizeConversationMessages(payload.data)
 }
 
 export async function memories(
@@ -274,6 +378,20 @@ export async function memories(
   const payload = await request<{ data: VisualMemory[] }>(
     server,
     `/v1/memories?${librarySearchParams(options)}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function memory(
+  server: string,
+  token: string,
+  memoryId: string,
+) {
+  const payload = await request<{ data: VisualMemory }>(
+    server,
+    `/v1/memories/${encodeURIComponent(memoryId)}`,
     {},
     token,
   )
@@ -397,9 +515,11 @@ export async function assetBlob(
   server: string,
   token: string,
   contentUrl: string,
+  signal?: AbortSignal,
 ) {
   const response = await fetch(`${httpBase(server)}${contentUrl}`, {
     headers: { Authorization: `Bearer ${token}` },
+    signal,
   })
   if (!response.ok) throw new Error(`图片加载失败 (${response.status})`)
   return response.blob()

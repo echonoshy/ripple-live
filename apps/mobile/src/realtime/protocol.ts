@@ -1,6 +1,6 @@
 export type RealtimeMode = 'audio' | 'video'
 
-export const REALTIME_PROTOCOL_VERSION = 4
+export const REALTIME_PROTOCOL_VERSION = 5
 
 const clientBuild =
   typeof __RIPPLE_CLIENT_BUILD__ === 'string'
@@ -12,6 +12,16 @@ export function createSessionStart(mode: RealtimeMode) {
     type: 'session.start',
     protocol_version: REALTIME_PROTOCOL_VERSION,
     client_build: clientBuild,
+    mode,
+  }
+}
+
+export function createModeSet(mode: RealtimeMode) {
+  if (mode !== 'audio' && mode !== 'video') {
+    throw new TypeError('会话模式只支持 audio 或 video')
+  }
+  return {
+    type: 'session.mode.set' as const,
     mode,
   }
 }

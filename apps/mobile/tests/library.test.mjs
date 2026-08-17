@@ -18,6 +18,7 @@ const items = [
     timestamp: at('2026-08-03T10:00:00+08:00'),
     isPinned: true,
     archivedAt: null,
+    hasCover: true,
   },
   {
     id: 'today',
@@ -26,6 +27,7 @@ const items = [
     timestamp: at('2026-08-03T09:00:00+08:00'),
     isPinned: false,
     archivedAt: null,
+    hasCover: false,
   },
   {
     id: 'yesterday',
@@ -34,6 +36,7 @@ const items = [
     timestamp: at('2026-08-02T18:00:00+08:00'),
     isPinned: false,
     archivedAt: null,
+    hasCover: true,
   },
   {
     id: 'recent',
@@ -42,6 +45,7 @@ const items = [
     timestamp: at('2026-07-29T12:00:00+08:00'),
     isPinned: false,
     archivedAt: null,
+    hasCover: false,
   },
   {
     id: 'older',
@@ -50,6 +54,7 @@ const items = [
     timestamp: at('2026-07-20T12:00:00+08:00'),
     isPinned: false,
     archivedAt: null,
+    hasCover: false,
   },
   {
     id: 'archived',
@@ -58,6 +63,7 @@ const items = [
     timestamp: at('2026-08-03T08:00:00+08:00'),
     isPinned: true,
     archivedAt: at('2026-08-03T11:00:00+08:00'),
+    hasCover: true,
   },
 ]
 
@@ -93,11 +99,43 @@ test('archived and pinned views only include their own scope', () => {
   )
 })
 
+test('image view truthfully filters active items with a local cover', () => {
+  assert.deepEqual(
+    groupLibraryItems(items, new Date('2026-08-03T12:00:00+08:00'), 'images')
+      .flatMap((group) => group.items)
+      .map((item) => item.id),
+    ['pinned', 'yesterday'],
+  )
+})
+
 test('matches every normalized query token', () => {
   assert.equal(matchesLibraryQuery(items[0], '红茶 配料'), true)
   assert.equal(matchesLibraryQuery(items[0], '  红茶   糖浆  '), true)
   assert.equal(matchesLibraryQuery(items[0], '不存在'), false)
   assert.equal(matchesLibraryQuery(items[0], '   '), true)
+})
+
+test('keeps title-first row content intact through search and grouping', () => {
+  const visible = groupLibraryItems(
+    items.filter((item) => matchesLibraryQuery(item, '红茶')),
+    new Date('2026-08-03T12:00:00+08:00'),
+    'all',
+  ).flatMap((group) => group.items)
+
+  assert.deepEqual(
+    visible.map((item) => ({
+      id: item.id,
+      title: item.title,
+      searchableText: item.searchableText,
+    })),
+    [
+      {
+        id: 'pinned',
+        title: '红茶配料表',
+        searchableText: '红茶配料表 水 糖浆 食品添加剂',
+      },
+    ],
+  )
 })
 
 test('maps views to server query options', () => {
@@ -114,6 +152,11 @@ test('maps views to server query options', () => {
   })
   assert.deepEqual(libraryOptionsForView('archived', '', 100), {
     scope: 'archived',
+    query: '',
+    limit: 100,
+  })
+  assert.deepEqual(libraryOptionsForView('images', '', 100), {
+    scope: 'active',
     query: '',
     limit: 100,
   })

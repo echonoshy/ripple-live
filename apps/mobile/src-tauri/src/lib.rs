@@ -1,8 +1,11 @@
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_websocket::init())
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_notification::init());
+    #[cfg(not(target_os = "ios"))]
+    let builder = builder.plugin(tauri_plugin_opener::init());
+    builder
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

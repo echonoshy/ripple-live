@@ -1,5 +1,5 @@
 export type LibraryApiScope = 'active' | 'archived' | 'all'
-export type LibraryView = 'all' | 'pinned' | 'archived'
+export type LibraryView = 'all' | 'pinned' | 'archived' | 'images'
 export type LibraryAction =
   | 'pin'
   | 'unpin'
@@ -14,6 +14,7 @@ export type LibraryItem = {
   timestamp: number
   isPinned: boolean
   archivedAt: number | null
+  hasCover?: boolean
 }
 
 export type LibraryGroup<T extends LibraryItem = LibraryItem> = {
@@ -78,6 +79,7 @@ export function groupLibraryItems<T extends LibraryItem>(
     .filter((item) => {
       if (view === 'archived') return item.archivedAt !== null
       if (item.archivedAt !== null) return false
+      if (view === 'images') return item.hasCover === true
       return view !== 'pinned' || item.isPinned
     })
     .sort((left, right) => right.timestamp - left.timestamp)
@@ -88,8 +90,10 @@ export function groupLibraryItems<T extends LibraryItem>(
 
   const groups: LibraryGroup<T>[] = []
   const chronological =
-    view === 'all' ? visible.filter((item) => !item.isPinned) : visible
-  if (view === 'all') {
+    view === 'all' || view === 'images'
+      ? visible.filter((item) => !item.isPinned)
+      : visible
+  if (view === 'all' || view === 'images') {
     const pinned = visible.filter((item) => item.isPinned)
     if (pinned.length > 0) groups.push({ label: '已置顶', items: pinned })
   }

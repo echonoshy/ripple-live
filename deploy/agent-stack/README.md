@@ -54,7 +54,7 @@ vLLM wheel against the server's CUDA 12.8 toolkit, and no longer installs or
 starts the serial Transformers wrapper or the smaller 0.6B TTS model.
 
 After all four health checks report ready, run the real model smoke test. It
-sends an image through the multimodal request, requires the VL model to issue a
+sends an image through the multimodal request, requires the Agent model to issue a
 structured `calculate` call, and verifies that the final response contains
 playable audio. It then resamples that speech and feeds it through Qwen3-ASR as
 an audio loopback test:
@@ -91,7 +91,7 @@ continuous batching enabled, while CustomVoice Code2Wav uses one sequence for
 the best first-audio latency. The codec emits an initial five-frame chunk,
 then uses 25-frame chunks with 72 frames of decoder context. This seeds the
 client playback buffer before the first steady-state chunk and keeps adjacent
-streaming chunks timbrally consistent. ASR and Qwen3-VL retain vLLM continuous
+streaming chunks timbrally consistent. ASR and Qwen3.5 retain vLLM continuous
 batching.
 
 Run a repeatable TTS concurrency benchmark with:
@@ -104,7 +104,7 @@ On the RTX 5880 validation, the 1.7B model delivered 197 ms median first-audio
 latency at four-way concurrency, a 0.24 real-time factor, and 14.22 generated
 audio-seconds/second. The larger initial chunk trades about 90 ms of server
 TTFA for enough audio to prevent an immediate playback underrun. End-to-end
-Agent first audio also includes VL generation and sentence accumulation; the
+Agent first audio also includes multimodal generation and sentence accumulation; the
 smoke test measured 0.93 seconds.
 
 ## Tool extension
@@ -120,6 +120,8 @@ The native Gateway tools are:
 - `calculate`
 - `remember`
 - `recall`
+- `create_todo`
+- `list_todos`
 
 The external read-only tools are loaded from Skills and executed through the
 standalone Rust `ripple-tool` CLI:
@@ -127,6 +129,7 @@ standalone Rust `ripple-tool` CLI:
 - `web_search` uses Tavily Basic Search and returns bounded source snippets.
 - `web_fetch` uses Tavily Extract for one public HTTP/HTTPS URL.
 - `weather_lookup` uses QWeather GeoAPI and Weather API.
+- `system_info` returns allowlisted read-only host information.
 
 Configure `RIPPLE_TAVILY_API_KEY` plus the QWeather API host and either an API
 key or the JWT project ID, credential ID, and Ed25519 private-key path in `.env`. The Gateway passes only
@@ -143,8 +146,9 @@ memories in `runtime-data/agent-gateway/context.sqlite3`. A later Redis/PostgreS
 vector-memory implementation can replace this class without changing the
 Android protocol or model adapters.
 
-The mobile client creates a new session UUID whenever a voice or video call is
-started. Server-side events record the session lifecycle and each response's
+Calls started from Home create a new conversation, while calls started from a
+conversation detail screen continue that conversation. Server-side events
+record the session lifecycle and each response's
 input commit, transcript, context load, Agent rounds, TTS segments, completion,
 cancellation, or failure. Inspect the latest flow with:
 
