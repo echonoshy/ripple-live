@@ -726,6 +726,22 @@ impl ContextStore {
             separated.push_unseparated(")");
             clear_sources.build().execute(&mut *transaction).await?;
 
+            let mut clear_todo_sources = QueryBuilder::<Sqlite>::new(
+                "UPDATE todos SET conversation_id = NULL, source_turn_id = NULL WHERE user_id = ",
+            );
+            clear_todo_sources
+                .push_bind(user_id)
+                .push(" AND conversation_id IN (");
+            let mut separated = clear_todo_sources.separated(", ");
+            for id in ids {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(")");
+            clear_todo_sources
+                .build()
+                .execute(&mut *transaction)
+                .await?;
+
             for (prefix, nested) in [
                 (
                     "DELETE FROM turn_attachments WHERE turn_id IN (SELECT id FROM turns WHERE session_id IN (",
@@ -1455,6 +1471,70 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn deleting_conversation_detaches_todo_sources_before_removing_turns() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ContextStore::open(&directory.path().join("delete.sqlite3"))
+            .await
+            .unwrap();
+        let user = registered_user(&store, "delete@example.com", "delete-invite").await;
+        let conversation = store.create_conversation(&user.id).await.unwrap();
+        let source_turn = store
+            .add_turn(&conversation, "user", "周一带充电器", None)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO todos(
+                id, user_id, conversation_id, source_turn_id, source_response_id,
+                title, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("todo-delete")
+        .bind(&user.id)
+        .bind(&conversation)
+        .bind(source_turn)
+        .bind("response-delete")
+        .bind("周一带充电器")
+        .bind(1.0)
+        .bind(1.0)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        store
+            .mutate_conversations(
+                &user.id,
+                std::slice::from_ref(&conversation),
+                LibraryAction::Delete,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .conversation_messages(&user.id, &conversation, 20)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let todo_sources: (Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT conversation_id, source_turn_id FROM todos WHERE id = ?",
+        )
+        .bind("todo-delete")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(todo_sources, (None, None));
+
+        let foreign_key_violations: Vec<(String, i64, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        assert!(foreign_key_violations.is_empty());
     }
 
     #[tokio::test]
