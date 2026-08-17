@@ -1,7 +1,7 @@
 # Ripple Live Mobile
 
-Shared Tauri 2 + React client for the self-hosted Ripple multimodal Agent on
-Android and iOS.
+Shared Tauri 2 + React client for the self-hosted Ripple multimodal Agent.
+Android is the active delivery target. The iOS host is retained but frozen.
 
 ## Directory layout
 
@@ -29,12 +29,12 @@ The app supports:
 - a spoken stop command silences output and is not added to chat history;
 - on-demand camera capture only after the server accepts a video turn;
 - server-side structured tool calls and visible tool status;
-- response interruption only after the model accepts a new turn, so unrelated
-  speech does not stop playback;
+- response interruption when a new speech turn starts, with correlated
+  cancellation across playback, transport, and server generation;
 - continuous 24 kHz float32 response playback through an AudioWorklet ring
   buffer, with 450 ms startup buffering and underrun recovery;
-- a new session ID for every voice or video call so separate calls never share
-  conversation history;
+- a new conversation for calls started from Home, plus explicit continuation
+  of an existing conversation from its history detail screen;
 - a configurable plain-WebSocket server address.
 
 The default endpoint is:
@@ -43,9 +43,9 @@ The default endpoint is:
 ws://YOUR_SERVER_IP:8700/v1/agent/realtime
 ```
 
-Realtime sessions use protocol v4. Wake words and manual wake state are not part
-of the client protocol; the server model decides whether each speech turn needs
-a response.
+Realtime sessions use protocol v5. The session negotiates audio/video mode and
+supports in-call camera transitions. The server-side response gate decides
+whether each completed speech turn needs a response.
 
 ## Web UI debugging
 
@@ -76,9 +76,9 @@ is useful for visual layout checks, but mobile browsers normally block microphon
 and camera access outside a secure context. Use `127.0.0.1`/`localhost` on the
 development computer when testing realtime audio or video.
 
-Every time the user starts a call, the client creates a fresh UUID and sends it
-as the WebSocket `session_id`. Reconnecting by starting another call therefore
-creates an empty conversation instead of restoring the previous call.
+Starting a call from Home omits `conversation_id`, so the server creates a new
+conversation. Starting a call from a conversation detail screen sends that
+conversation's ID and continues its stored history.
 
 ## Android build
 
@@ -120,20 +120,11 @@ adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-u
 Android 7.0 (API 24) or newer is required. The app requests microphone and
 camera permission at runtime.
 
-## iOS build
+## iOS status
 
-iOS development requires macOS with Xcode and the Rust iOS targets installed.
-From this directory, initialize or refresh the generated host and build with:
-
-```bash
-npm ci
-npm run ios:init
-npm run ios:build
-```
-
-Use `npm run ios:dev` to launch through Xcode during development. The signing
-team and iOS-specific bundle identifier are defined in
-`src-tauri/tauri.ios.conf.json`.
+The generated iOS host and shared code are retained for compatibility, but iOS
+development and delivery are frozen. Do not extend or modify the iOS-specific
+implementation unless the project scope explicitly reactivates it.
 
 ## Security note
 
