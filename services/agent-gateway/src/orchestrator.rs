@@ -52,6 +52,14 @@ fn forced_tool_instructions(name: &str) -> String {
     )
 }
 
+fn with_context_instructions(mut instructions: String, context: Option<&str>) -> String {
+    if let Some(context) = context.filter(|context| !context.trim().is_empty()) {
+        instructions.push_str("\n\n");
+        instructions.push_str(context);
+    }
+    instructions
+}
+
 fn should_retry_empty_agent_response(retried: bool, round: usize, max_tool_rounds: usize) -> bool {
     !retried && round + 1 < max_tool_rounds
 }
@@ -260,6 +268,7 @@ impl AgentOrchestrator {
             .context_compiler
             .compile(user_id, conversation_id, user_input)
             .await?;
+        let context_instructions = compiled.instructions;
         let mut response_input = compiled.messages;
         let tools = self
             .tools
@@ -282,7 +291,10 @@ impl AgentOrchestrator {
             } else {
                 tools.clone()
             };
-            let instructions = forced_name.map_or_else(system_prompt, forced_tool_instructions);
+            let instructions = with_context_instructions(
+                forced_name.map_or_else(system_prompt, forced_tool_instructions),
+                context_instructions.as_deref(),
+            );
             let reply = self
                 .adapters
                 .respond(&response_input, &round_tools, json!("auto"), &instructions)
@@ -458,6 +470,7 @@ impl AgentOrchestrator {
             .context_compiler
             .compile(user_id, session_id, &transcript)
             .await?;
+        let context_instructions = compiled.instructions;
         compiled.messages.pop();
         let history_messages = compiled.history_messages.saturating_sub(1);
         info!(
@@ -529,9 +542,12 @@ impl AgentOrchestrator {
                 } else {
                     available_tools.clone()
                 };
-                let instructions = forced_name
-                    .as_deref()
-                    .map_or_else(system_prompt, forced_tool_instructions);
+                let instructions = with_context_instructions(
+                    forced_name
+                        .as_deref()
+                        .map_or_else(system_prompt, forced_tool_instructions),
+                    context_instructions.as_deref(),
+                );
                 let agent_started = Instant::now();
                 info!(%session_id, %response_id, round, "agent generation started");
                 self.record_flow_event(

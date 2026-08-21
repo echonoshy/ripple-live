@@ -1,9 +1,10 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::context::ContextStore;
 
 #[derive(Clone, Debug)]
 pub struct CompiledContext {
+    pub instructions: Option<String>,
     pub messages: Vec<Value>,
     pub history_messages: usize,
     pub memories: usize,
@@ -105,21 +106,15 @@ impl ContextCompiler {
 
         let history_messages = selected.len();
         let memory_count = memories.len();
-        let mut messages = Vec::with_capacity(
-            history_messages
-                + usize::from(project_text.is_some())
-                + usize::from(memory_text.is_some()),
-        );
-        if let Some(text) = project_text {
-            messages.push(json!({"role": "system", "content": text}));
-        }
-        if let Some(text) = memory_text {
-            messages.push(json!({"role": "system", "content": text}));
-        }
-        messages.extend(selected);
+        let instructions = [project_text, memory_text]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n\n");
 
         Ok(CompiledContext {
-            messages,
+            instructions: (!instructions.is_empty()).then_some(instructions),
+            messages: selected,
             history_messages,
             memories: memory_count,
             estimated_chars: used + memory_chars + project_chars,
@@ -152,11 +147,12 @@ mod tests {
             .unwrap();
         assert_eq!(compiled.memories, 1);
         assert_eq!(compiled.history_messages, 8);
+        assert!(compiled.instructions.as_deref().unwrap().contains("乌龙茶"));
         assert!(
-            compiled.messages[0]["content"]
-                .as_str()
-                .unwrap()
-                .contains("乌龙茶")
+            compiled
+                .messages
+                .iter()
+                .all(|message| message["role"] != "system")
         );
     }
 }
