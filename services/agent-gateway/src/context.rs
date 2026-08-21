@@ -3,8 +3,8 @@ use std::{path::Path, str::FromStr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{
-    Acquire, QueryBuilder, Row, Sqlite, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    PgPool, Postgres, QueryBuilder, Row,
+    postgres::{PgConnectOptions, PgPoolOptions},
 };
 use uuid::Uuid;
 
@@ -20,6 +20,17 @@ pub struct ConversationSummary {
     pub created_at: f64,
     pub updated_at: f64,
     pub is_pinned: bool,
+    pub archived_at: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProjectRecord {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    pub created_at: f64,
+    pub updated_at: f64,
     pub archived_at: Option<f64>,
 }
 
@@ -72,326 +83,55 @@ pub struct ConversationAttachment {
 
 #[derive(Clone)]
 pub struct ContextStore {
-    pool: SqlitePool,
+    pool: PgPool,
 }
 
 impl ContextStore {
-    pub async fn open(path: &Path) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .foreign_keys(true);
-        let pool = SqlitePoolOptions::new()
+    pub async fn connect(database_url: &str, max_connections: u32) -> anyhow::Result<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections.max(1))
+            .connect(database_url)
+            .await?;
+        sqlx::migrate!("./migrations").run(&pool).await?;
+        Ok(Self { pool })
+    }
+
+    #[doc(hidden)]
+    pub async fn open(_path: &Path) -> anyhow::Result<Self> {
+        let database_url = std::env::var("RIPPLE_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://postgres:postgres@127.0.0.1:55432/ripple_test".to_owned()
+        });
+        let schema = format!("test_{}", Uuid::new_v4().simple());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::query("SELECT pg_advisory_lock(727105001)")
+            .execute(&admin)
+            .await?;
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS vector")
+            .execute(&admin)
+            .await?;
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            .execute(&admin)
+            .await?;
+        sqlx::query("SELECT pg_advisory_unlock(727105001)")
+            .execute(&admin)
+            .await?;
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await?;
+        admin.close().await;
+
+        let search_path = format!("{schema},public");
+        let options = PgConnectOptions::from_str(&database_url)?
+            .options([("search_path", search_path.as_str())]);
+        let pool = PgPoolOptions::new()
             .max_connections(8)
             .connect_with(options)
             .await?;
-        let store = Self { pool };
-        store.initialize().await?;
-        Ok(store)
-    }
-
-    async fn initialize(&self) -> anyhow::Result<()> {
-        for statement in [
-            "CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY, created_at REAL NOT NULL, updated_at REAL NOT NULL
-            )",
-            "CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
-                kind TEXT NOT NULL, payload TEXT NOT NULL, created_at REAL NOT NULL
-            )",
-            "CREATE TABLE IF NOT EXISTS turns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
-                role TEXT NOT NULL, content TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL
-            )",
-            "CREATE TABLE IF NOT EXISTS memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
-                content TEXT NOT NULL, created_at REAL NOT NULL
-            )",
-            "CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL, created_at REAL NOT NULL
-            )",
-            "CREATE TABLE IF NOT EXISTS invitation_codes (
-                code_hash TEXT PRIMARY KEY, created_at REAL NOT NULL,
-                used_by TEXT, used_at REAL,
-                max_uses INTEGER NOT NULL DEFAULT 1,
-                use_count INTEGER NOT NULL DEFAULT 0,
-                expires_at REAL
-            )",
-            "CREATE TABLE IF NOT EXISTS invitation_redemptions (
-                code_hash TEXT NOT NULL, user_id TEXT NOT NULL, used_at REAL NOT NULL,
-                PRIMARY KEY(code_hash, user_id)
-            )",
-            "CREATE TABLE IF NOT EXISTS auth_sessions (
-                token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL,
-                created_at REAL NOT NULL, expires_at REAL NOT NULL,
-                revoked_at REAL
-            )",
-            "CREATE TABLE IF NOT EXISTS conversations (
-                id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
-                title TEXT NOT NULL DEFAULT '新对话',
-                created_at REAL NOT NULL, updated_at REAL NOT NULL,
-                is_pinned INTEGER NOT NULL DEFAULT 0, archived_at REAL
-            )",
-            "CREATE TABLE IF NOT EXISTS memory_items (
-                id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
-                conversation_id TEXT, source_turn_id INTEGER,
-                source_response_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'visual',
-                user_note TEXT NOT NULL, visual_summary TEXT NOT NULL DEFAULT '',
-                cover_asset_id TEXT, captured_at REAL,
-                created_at REAL NOT NULL, updated_at REAL NOT NULL,
-                is_pinned INTEGER NOT NULL DEFAULT 0, archived_at REAL,
-                FOREIGN KEY(user_id) REFERENCES users(id),
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id),
-                FOREIGN KEY(source_turn_id) REFERENCES turns(id)
-            )",
-            "CREATE TABLE IF NOT EXISTS assets (
-                id TEXT PRIMARY KEY, user_id TEXT NOT NULL, sha256 TEXT NOT NULL,
-                mime_type TEXT NOT NULL, storage_key TEXT NOT NULL,
-                width INTEGER NOT NULL, height INTEGER NOT NULL,
-                size_bytes INTEGER NOT NULL, captured_at REAL, created_at REAL NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id),
-                UNIQUE(user_id, sha256)
-            )",
-            "CREATE TABLE IF NOT EXISTS memory_assets (
-                memory_id TEXT NOT NULL, asset_id TEXT NOT NULL,
-                ordinal INTEGER NOT NULL, is_cover INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(memory_id, asset_id),
-                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE CASCADE,
-                FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
-            )",
-            "CREATE TABLE IF NOT EXISTS turn_attachments (
-                turn_id INTEGER NOT NULL, asset_id TEXT NOT NULL,
-                memory_id TEXT, todo_id TEXT, caption TEXT NOT NULL DEFAULT '',
-                ordinal INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(turn_id, asset_id),
-                FOREIGN KEY(turn_id) REFERENCES turns(id) ON DELETE CASCADE,
-                FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE,
-                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE SET NULL,
-                FOREIGN KEY(todo_id) REFERENCES todos(id) ON DELETE SET NULL
-            )",
-            "CREATE TABLE IF NOT EXISTS memory_tool_executions (
-                response_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
-                memory_id TEXT NOT NULL,
-                PRIMARY KEY(response_id, tool_call_id),
-                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE CASCADE
-            )",
-            "CREATE TABLE IF NOT EXISTS todos (
-                id TEXT PRIMARY KEY, user_id TEXT NOT NULL, memory_id TEXT,
-                conversation_id TEXT, source_turn_id INTEGER, source_response_id TEXT,
-                title TEXT NOT NULL, visual_summary TEXT NOT NULL DEFAULT '',
-                cover_asset_id TEXT, due_at REAL, completed_at REAL,
-                created_at REAL NOT NULL, updated_at REAL NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id),
-                FOREIGN KEY(memory_id) REFERENCES memory_items(id) ON DELETE SET NULL,
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id),
-                FOREIGN KEY(source_turn_id) REFERENCES turns(id),
-                FOREIGN KEY(cover_asset_id) REFERENCES assets(id) ON DELETE SET NULL
-            )",
-            "CREATE TABLE IF NOT EXISTS todo_tool_executions (
-                response_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
-                todo_id TEXT NOT NULL,
-                PRIMARY KEY(response_id, tool_call_id),
-                FOREIGN KEY(todo_id) REFERENCES todos(id) ON DELETE CASCADE
-            )",
-            "CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, id)",
-            "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, id)",
-            "CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id, id)",
-            "CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at)",
-            "CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_memory_items_user ON memory_items(user_id, created_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_memory_assets_memory ON memory_assets(memory_id, ordinal)",
-            "CREATE INDEX IF NOT EXISTS idx_turn_attachments_turn ON turn_attachments(turn_id, ordinal)",
-            "CREATE INDEX IF NOT EXISTS idx_todos_user_due ON todos(user_id, completed_at, due_at)",
-        ] {
-            sqlx::query(statement).execute(&self.pool).await?;
-        }
-        self.ensure_column("invitation_codes", "max_uses", "INTEGER NOT NULL DEFAULT 1")
-            .await?;
-        self.ensure_column(
-            "invitation_codes",
-            "use_count",
-            "INTEGER NOT NULL DEFAULT 0",
-        )
-        .await?;
-        self.ensure_column("invitation_codes", "expires_at", "REAL")
-            .await?;
-        self.ensure_column("conversations", "is_pinned", "INTEGER NOT NULL DEFAULT 0")
-            .await?;
-        self.ensure_column("conversations", "archived_at", "REAL")
-            .await?;
-        self.ensure_column("memory_items", "is_pinned", "INTEGER NOT NULL DEFAULT 0")
-            .await?;
-        self.ensure_column("memory_items", "archived_at", "REAL")
-            .await?;
-        sqlx::query(
-            "UPDATE conversations SET is_pinned = 0
-             WHERE archived_at IS NOT NULL AND is_pinned != 0",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "UPDATE memory_items SET is_pinned = 0
-             WHERE archived_at IS NOT NULL AND is_pinned != 0",
-        )
-        .execute(&self.pool)
-        .await?;
-        self.ensure_column("todos", "conversation_id", "TEXT")
-            .await?;
-        self.ensure_column("todos", "source_turn_id", "INTEGER")
-            .await?;
-        self.ensure_column("todos", "source_response_id", "TEXT")
-            .await?;
-        self.ensure_column("todos", "visual_summary", "TEXT NOT NULL DEFAULT ''")
-            .await?;
-        self.ensure_column("todos", "cover_asset_id", "TEXT")
-            .await?;
-        self.ensure_column(
-            "turn_attachments",
-            "todo_id",
-            "TEXT REFERENCES todos(id) ON DELETE SET NULL",
-        )
-        .await?;
-        self.migrate_memory_sources_nullable().await?;
-        self.migrate_todo_evidence().await?;
-        sqlx::query(
-            "UPDATE invitation_codes SET use_count = 1
-             WHERE used_by IS NOT NULL AND use_count = 0",
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn migrate_todo_evidence(&self) -> anyhow::Result<()> {
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(
-            "UPDATE todos
-             SET visual_summary = COALESCE(NULLIF(visual_summary, ''),
-                    (SELECT m.visual_summary FROM memory_items m WHERE m.id = todos.memory_id), ''),
-                 cover_asset_id = COALESCE(cover_asset_id,
-                    (SELECT m.cover_asset_id FROM memory_items m WHERE m.id = todos.memory_id)),
-                 conversation_id = COALESCE(conversation_id,
-                    (SELECT m.conversation_id FROM memory_items m WHERE m.id = todos.memory_id)),
-                 source_turn_id = COALESCE(source_turn_id,
-                    (SELECT m.source_turn_id FROM memory_items m WHERE m.id = todos.memory_id)),
-                 source_response_id = COALESCE(source_response_id,
-                    (SELECT m.source_response_id FROM memory_items m WHERE m.id = todos.memory_id))
-             WHERE memory_id IS NOT NULL",
-        )
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "DELETE FROM memory_items
-             WHERE id IN (SELECT memory_id FROM todos WHERE memory_id IS NOT NULL)",
-        )
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query("UPDATE todos SET memory_id = NULL WHERE memory_id IS NOT NULL")
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok(())
-    }
-
-    async fn migrate_memory_sources_nullable(&self) -> anyhow::Result<()> {
-        let columns = sqlx::query("PRAGMA table_info(memory_items)")
-            .fetch_all(&self.pool)
-            .await?;
-        let requires_rebuild = columns.iter().any(|row| {
-            row.get::<String, _>("name") == "conversation_id" && row.get::<i64, _>("notnull") != 0
-        });
-        if !requires_rebuild {
-            return Ok(());
-        }
-
-        let mut connection = self.pool.acquire().await?;
-        sqlx::query("PRAGMA foreign_keys = OFF")
-            .execute(&mut *connection)
-            .await?;
-        let migration = async {
-            let mut transaction = connection.begin().await?;
-            sqlx::query(
-                "CREATE TABLE memory_items_new (
-                    id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
-                    conversation_id TEXT, source_turn_id INTEGER,
-                    source_response_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'visual',
-                    user_note TEXT NOT NULL, visual_summary TEXT NOT NULL DEFAULT '',
-                    cover_asset_id TEXT, captured_at REAL,
-                    created_at REAL NOT NULL, updated_at REAL NOT NULL,
-                    is_pinned INTEGER NOT NULL DEFAULT 0, archived_at REAL,
-                    FOREIGN KEY(user_id) REFERENCES users(id),
-                    FOREIGN KEY(conversation_id) REFERENCES conversations(id),
-                    FOREIGN KEY(source_turn_id) REFERENCES turns(id)
-                )",
-            )
-            .execute(&mut *transaction)
-            .await?;
-            sqlx::query(
-                "INSERT INTO memory_items_new(
-                    id, user_id, conversation_id, source_turn_id, source_response_id,
-                    kind, user_note, visual_summary, cover_asset_id, captured_at,
-                    created_at, updated_at, is_pinned, archived_at
-                 ) SELECT id, user_id, conversation_id, source_turn_id, source_response_id,
-                    kind, user_note, visual_summary, cover_asset_id, captured_at,
-                    created_at, updated_at, is_pinned, archived_at
-                 FROM memory_items",
-            )
-            .execute(&mut *transaction)
-            .await?;
-            sqlx::query("DROP TABLE memory_items")
-                .execute(&mut *transaction)
-                .await?;
-            sqlx::query("ALTER TABLE memory_items_new RENAME TO memory_items")
-                .execute(&mut *transaction)
-                .await?;
-            sqlx::query(
-                "CREATE INDEX IF NOT EXISTS idx_memory_items_user
-                 ON memory_items(user_id, created_at DESC)",
-            )
-            .execute(&mut *transaction)
-            .await?;
-            let violations = sqlx::query("PRAGMA foreign_key_check")
-                .fetch_all(&mut *transaction)
-                .await?;
-            if !violations.is_empty() {
-                anyhow::bail!("memory_items migration failed foreign key validation");
-            }
-            transaction.commit().await?;
-            Ok::<(), anyhow::Error>(())
-        }
-        .await;
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&mut *connection)
-            .await?;
-        migration
-    }
-
-    async fn ensure_column(
-        &self,
-        table: &str,
-        column: &str,
-        definition: &str,
-    ) -> anyhow::Result<()> {
-        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
-            .fetch_all(&self.pool)
-            .await?;
-        if rows
-            .iter()
-            .any(|row| row.get::<String, _>("name") == column)
-        {
-            return Ok(());
-        }
-        sqlx::query(&format!(
-            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
-        ))
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        sqlx::migrate!("./migrations").run(&pool).await?;
+        Ok(Self { pool })
     }
 
     pub async fn seed_invitation_codes(
@@ -407,7 +147,7 @@ impl ContextStore {
             sqlx::query(
                 "INSERT INTO invitation_codes(
                     code_hash, created_at, max_uses, use_count, expires_at
-                 ) VALUES (?, ?, ?, 0, ?)
+                 ) VALUES ($1, $2, $3, 0, $4)
                  ON CONFLICT(code_hash) DO UPDATE SET
                     max_uses = excluded.max_uses,
                     expires_at = COALESCE(invitation_codes.expires_at, excluded.expires_at)",
@@ -439,7 +179,7 @@ impl ContextStore {
 
         let available = sqlx::query(
             "SELECT 1 FROM invitation_codes
-             WHERE code_hash = ? AND use_count < max_uses AND expires_at > ?",
+             WHERE code_hash = $1 AND use_count < max_uses AND expires_at > $2",
         )
         .bind(&invitation_hash)
         .bind(now)
@@ -449,7 +189,7 @@ impl ContextStore {
         if !available {
             anyhow::bail!("邀请码无效、已达使用上限或已经过期");
         }
-        let exists = sqlx::query("SELECT 1 FROM users WHERE email = ?")
+        let exists = sqlx::query("SELECT 1 FROM users WHERE email = $1")
             .bind(&email)
             .fetch_optional(&mut *transaction)
             .await?
@@ -457,17 +197,19 @@ impl ContextStore {
         if exists {
             anyhow::bail!("该邮箱已经注册");
         }
-        sqlx::query("INSERT INTO users(id, email, password_hash, created_at) VALUES (?, ?, ?, ?)")
-            .bind(&user_id)
-            .bind(&email)
-            .bind(password_hash)
-            .bind(now)
-            .execute(&mut *transaction)
-            .await?;
+        sqlx::query(
+            "INSERT INTO users(id, email, password_hash, created_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&user_id)
+        .bind(&email)
+        .bind(password_hash)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
         let consumed = sqlx::query(
             "UPDATE invitation_codes
-             SET used_by = ?, used_at = ?, use_count = use_count + 1
-             WHERE code_hash = ? AND use_count < max_uses AND expires_at > ?",
+             SET used_by = $1, used_at = $2, use_count = use_count + 1
+             WHERE code_hash = $3 AND use_count < max_uses AND expires_at > $4",
         )
         .bind(&user_id)
         .bind(now)
@@ -480,7 +222,7 @@ impl ContextStore {
         }
         sqlx::query(
             "INSERT INTO invitation_redemptions(code_hash, user_id, used_at)
-             VALUES (?, ?, ?)",
+             VALUES ($1, $2, $3)",
         )
         .bind(secret_hash(invitation_code.trim()))
         .bind(&user_id)
@@ -499,7 +241,7 @@ impl ContextStore {
         token_ttl_hours: i64,
     ) -> anyhow::Result<(AuthUser, String)> {
         let email = normalize_email(email)?;
-        let row = sqlx::query("SELECT id, password_hash FROM users WHERE email = ?")
+        let row = sqlx::query("SELECT id, password_hash FROM users WHERE email = $1")
             .bind(&email)
             .fetch_optional(&self.pool)
             .await?
@@ -523,8 +265,8 @@ impl ContextStore {
         let row = sqlx::query(
             "SELECT users.id, users.email FROM auth_sessions
              JOIN users ON users.id = auth_sessions.user_id
-             WHERE auth_sessions.token_hash = ? AND auth_sessions.revoked_at IS NULL
-             AND auth_sessions.expires_at > ?",
+             WHERE auth_sessions.token_hash = $1 AND auth_sessions.revoked_at IS NULL
+             AND auth_sessions.expires_at > $2",
         )
         .bind(secret_hash(token))
         .bind(unix_time())
@@ -538,7 +280,7 @@ impl ContextStore {
 
     pub async fn revoke_token(&self, token: &str) -> anyhow::Result<()> {
         sqlx::query(
-            "UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
+            "UPDATE auth_sessions SET revoked_at = $1 WHERE token_hash = $2 AND revoked_at IS NULL",
         )
         .bind(unix_time())
         .bind(secret_hash(token))
@@ -552,7 +294,7 @@ impl ContextStore {
         let now = unix_time();
         sqlx::query(
             "INSERT INTO conversations(id, user_id, title, created_at, updated_at)
-             VALUES (?, ?, '新对话', ?, ?)",
+             VALUES ($1, $2, '新对话', $3, $4)",
         )
         .bind(&id)
         .bind(user_id)
@@ -564,13 +306,203 @@ impl ContextStore {
         Ok(id)
     }
 
+    pub async fn create_project(
+        &self,
+        user_id: &str,
+        name: &str,
+        description: &str,
+        instructions: &str,
+    ) -> anyhow::Result<ProjectRecord> {
+        validate_project_fields(name, description, instructions)?;
+        let id = format!("proj_{}", Uuid::new_v4().simple());
+        let now = unix_time();
+        sqlx::query(
+            "INSERT INTO projects(
+                id, owner_user_id, name, description, instructions,
+                status, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, 'active', $6, $7)",
+        )
+        .bind(&id)
+        .bind(user_id)
+        .bind(name.trim())
+        .bind(description.trim())
+        .bind(instructions.trim())
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        self.project(user_id, &id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("创建后的项目不存在"))
+    }
+
+    pub async fn project(
+        &self,
+        user_id: &str,
+        project_id: &str,
+    ) -> anyhow::Result<Option<ProjectRecord>> {
+        let row = sqlx::query(
+            "SELECT id, name, description, instructions, created_at, updated_at, archived_at
+             FROM projects WHERE id = $1 AND owner_user_id = $2",
+        )
+        .bind(project_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(project_from_row))
+    }
+
+    pub async fn list_projects(
+        &self,
+        user_id: &str,
+        scope: LibraryScope,
+        limit: i64,
+    ) -> anyhow::Result<Vec<ProjectRecord>> {
+        let scope = match scope {
+            LibraryScope::Active => 0_i64,
+            LibraryScope::Archived => 1_i64,
+            LibraryScope::All => 2_i64,
+        };
+        let rows = sqlx::query(
+            "SELECT id, name, description, instructions, created_at, updated_at, archived_at
+             FROM projects WHERE owner_user_id = $1
+               AND ($2 = 2 OR ($3 = 0 AND archived_at IS NULL)
+                    OR ($4 = 1 AND archived_at IS NOT NULL))
+             ORDER BY updated_at DESC LIMIT $5",
+        )
+        .bind(user_id)
+        .bind(scope)
+        .bind(scope)
+        .bind(scope)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(project_from_row).collect())
+    }
+
+    pub async fn update_project(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        instructions: Option<&str>,
+        archived: Option<bool>,
+    ) -> anyhow::Result<ProjectRecord> {
+        let existing = self
+            .project(user_id, project_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("项目不存在"))?;
+        let next_name = name.unwrap_or(&existing.name);
+        let next_description = description.unwrap_or(&existing.description);
+        let next_instructions = instructions.unwrap_or(&existing.instructions);
+        validate_project_fields(next_name, next_description, next_instructions)?;
+        let now = unix_time();
+        let archived_at = match archived {
+            Some(true) => Some(now),
+            Some(false) => None,
+            None => existing.archived_at,
+        };
+        let status = if archived_at.is_some() {
+            "archived"
+        } else {
+            "active"
+        };
+        sqlx::query(
+            "UPDATE projects SET name = $1, description = $2, instructions = $3,
+                status = $4, archived_at = $5, updated_at = $6
+             WHERE id = $7 AND owner_user_id = $8",
+        )
+        .bind(next_name.trim())
+        .bind(next_description.trim())
+        .bind(next_instructions.trim())
+        .bind(status)
+        .bind(archived_at)
+        .bind(now)
+        .bind(project_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        self.project(user_id, project_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("项目不存在"))
+    }
+
+    pub async fn create_project_conversation(
+        &self,
+        user_id: &str,
+        project_id: &str,
+    ) -> anyhow::Result<String> {
+        let active = sqlx::query(
+            "SELECT 1 FROM projects
+             WHERE id = $1 AND owner_user_id = $2 AND archived_at IS NULL",
+        )
+        .bind(project_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some();
+        if !active {
+            anyhow::bail!("项目不存在或已归档");
+        }
+        let id = format!("conv_{}", Uuid::new_v4().simple());
+        let now = unix_time();
+        sqlx::query(
+            "INSERT INTO conversations(
+                id, user_id, project_id, title, created_at, updated_at
+             ) VALUES ($1, $2, $3, '新对话', $4, $5)",
+        )
+        .bind(&id)
+        .bind(user_id)
+        .bind(project_id)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        self.touch_session(&id).await?;
+        Ok(id)
+    }
+
+    pub async fn conversation_project_id(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> anyhow::Result<Option<Option<String>>> {
+        let row =
+            sqlx::query("SELECT project_id FROM conversations WHERE id = $1 AND user_id = $2")
+                .bind(conversation_id)
+                .bind(user_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|row| row.get("project_id")))
+    }
+
+    pub async fn project_for_conversation(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> anyhow::Result<Option<ProjectRecord>> {
+        let row = sqlx::query(
+            "SELECT p.id, p.name, p.description, p.instructions,
+                p.created_at, p.updated_at, p.archived_at
+             FROM conversations c
+             JOIN projects p ON p.id = c.project_id
+             WHERE c.id = $1 AND c.user_id = $2 AND p.owner_user_id = $2",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(project_from_row))
+    }
+
     pub async fn conversation_belongs_to(
         &self,
         conversation_id: &str,
         user_id: &str,
     ) -> anyhow::Result<bool> {
         Ok(
-            sqlx::query("SELECT 1 FROM conversations WHERE id = ? AND user_id = ?")
+            sqlx::query("SELECT 1 FROM conversations WHERE id = $1 AND user_id = $2")
                 .bind(conversation_id)
                 .bind(user_id)
                 .fetch_optional(&self.pool)
@@ -599,14 +531,14 @@ impl ContextStore {
                 c.is_pinned, c.archived_at,
                 COALESCE((SELECT content FROM turns t WHERE t.session_id = c.id
                           ORDER BY t.id DESC LIMIT 1), '') AS preview
-             FROM conversations c WHERE c.user_id = ?
-               AND (? = 2 OR (? = 0 AND c.archived_at IS NULL)
-                    OR (? = 1 AND c.archived_at IS NOT NULL))
-               AND (? = 0 OR c.is_pinned = 1)
-               AND (? = '' OR c.title LIKE ? OR
+             FROM conversations c WHERE c.user_id = $1 AND c.project_id IS NULL
+               AND ($2 = 2 OR ($3 = 0 AND c.archived_at IS NULL)
+                    OR ($4 = 1 AND c.archived_at IS NOT NULL))
+               AND ($5 = 0 OR c.is_pinned = 1)
+               AND ($6 = '' OR c.title LIKE $7 OR
                     COALESCE((SELECT content FROM turns t WHERE t.session_id = c.id
-                              ORDER BY t.id DESC LIMIT 1), '') LIKE ?)
-             ORDER BY c.is_pinned DESC, c.updated_at DESC LIMIT ?",
+                              ORDER BY t.id DESC LIMIT 1), '') LIKE $8)
+             ORDER BY c.is_pinned DESC, c.updated_at DESC LIMIT $9",
         )
         .bind(user_id)
         .bind(scope)
@@ -616,6 +548,54 @@ impl ContextStore {
         .bind(query)
         .bind(&pattern)
         .bind(&pattern)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ConversationSummary {
+                id: row.get("id"),
+                title: row.get("title"),
+                preview: row.get("preview"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+                is_pinned: row.get::<i64, _>("is_pinned") != 0,
+                archived_at: row.get("archived_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_project_conversations(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        scope: LibraryScope,
+        limit: i64,
+    ) -> anyhow::Result<Vec<ConversationSummary>> {
+        if self.project(user_id, project_id).await?.is_none() {
+            anyhow::bail!("项目不存在");
+        }
+        let scope = match scope {
+            LibraryScope::Active => 0_i64,
+            LibraryScope::Archived => 1_i64,
+            LibraryScope::All => 2_i64,
+        };
+        let rows = sqlx::query(
+            "SELECT c.id, c.title, c.created_at, c.updated_at,
+                c.is_pinned, c.archived_at,
+                COALESCE((SELECT content FROM turns t WHERE t.session_id = c.id
+                          ORDER BY t.id DESC LIMIT 1), '') AS preview
+             FROM conversations c
+             WHERE c.user_id = $1 AND c.project_id = $2
+               AND ($3 = 2 OR ($4 = 0 AND c.archived_at IS NULL)
+                    OR ($5 = 1 AND c.archived_at IS NOT NULL))
+             ORDER BY c.is_pinned DESC, c.updated_at DESC LIMIT $6",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .bind(scope)
+        .bind(scope)
+        .bind(scope)
         .bind(limit.clamp(1, 100))
         .fetch_all(&self.pool)
         .await?;
@@ -643,7 +623,7 @@ impl ContextStore {
                 c.is_pinned, c.archived_at,
                 COALESCE((SELECT content FROM turns t WHERE t.session_id = c.id
                           ORDER BY t.id DESC LIMIT 1), '') AS preview
-             FROM conversations c WHERE c.user_id = ? AND c.id = ?",
+             FROM conversations c WHERE c.user_id = $1 AND c.id = $2",
         )
         .bind(user_id)
         .bind(conversation_id)
@@ -674,7 +654,7 @@ impl ContextStore {
             anyhow::bail!("对话名称不能超过 80 个字符");
         }
         let result = sqlx::query(
-            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            "UPDATE conversations SET title = $1, updated_at = $2 WHERE id = $3 AND user_id = $4",
         )
         .bind(title)
         .bind(unix_time())
@@ -697,7 +677,7 @@ impl ContextStore {
         validate_library_ids(ids)?;
         let mut transaction = self.pool.begin().await?;
         let mut ownership =
-            QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM conversations WHERE user_id = ");
+            QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM conversations WHERE user_id = ");
         ownership.push_bind(user_id).push(" AND id IN (");
         let mut separated = ownership.separated(", ");
         for id in ids {
@@ -713,7 +693,7 @@ impl ContextStore {
         }
 
         if action == LibraryAction::Delete {
-            let mut clear_sources = QueryBuilder::<Sqlite>::new(
+            let mut clear_sources = QueryBuilder::<Postgres>::new(
                 "UPDATE memory_items SET conversation_id = NULL, source_turn_id = NULL WHERE user_id = ",
             );
             clear_sources
@@ -726,7 +706,7 @@ impl ContextStore {
             separated.push_unseparated(")");
             clear_sources.build().execute(&mut *transaction).await?;
 
-            let mut clear_todo_sources = QueryBuilder::<Sqlite>::new(
+            let mut clear_todo_sources = QueryBuilder::<Postgres>::new(
                 "UPDATE todos SET conversation_id = NULL, source_turn_id = NULL WHERE user_id = ",
             );
             clear_todo_sources
@@ -752,7 +732,7 @@ impl ContextStore {
                 ("DELETE FROM memories WHERE session_id IN (", false),
                 ("DELETE FROM sessions WHERE id IN (", false),
             ] {
-                let mut delete = QueryBuilder::<Sqlite>::new(prefix);
+                let mut delete = QueryBuilder::<Postgres>::new(prefix);
                 let mut separated = delete.separated(", ");
                 for id in ids {
                     separated.push_bind(id);
@@ -761,7 +741,7 @@ impl ContextStore {
                 delete.build().execute(&mut *transaction).await?;
             }
         } else {
-            let mut update = QueryBuilder::<Sqlite>::new("UPDATE conversations SET ");
+            let mut update = QueryBuilder::<Postgres>::new("UPDATE conversations SET ");
             match action {
                 LibraryAction::Pin => {
                     update.push("is_pinned = CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END")
@@ -786,7 +766,7 @@ impl ContextStore {
 
         if action == LibraryAction::Delete {
             let mut delete =
-                QueryBuilder::<Sqlite>::new("DELETE FROM conversations WHERE user_id = ");
+                QueryBuilder::<Postgres>::new("DELETE FROM conversations WHERE user_id = ");
             delete.push_bind(user_id).push(" AND id IN (");
             let mut separated = delete.separated(", ");
             for id in ids {
@@ -812,8 +792,8 @@ impl ContextStore {
             return Ok(None);
         }
         let rows = sqlx::query(
-            "SELECT id, role, content, created_at FROM turns WHERE session_id = ?
-             ORDER BY id ASC LIMIT ?",
+            "SELECT id, role, content, created_at FROM turns WHERE session_id = $1
+             ORDER BY id ASC LIMIT $2",
         )
         .bind(conversation_id)
         .bind(limit.clamp(1, 1000))
@@ -826,7 +806,7 @@ impl ContextStore {
             let attachment_rows = sqlx::query(
                 "SELECT a.id, ta.memory_id, ta.todo_id, ta.caption
                  FROM turn_attachments ta JOIN assets a ON a.id = ta.asset_id
-                 WHERE ta.turn_id = ? AND a.user_id = ? ORDER BY ta.ordinal ASC",
+                 WHERE ta.turn_id = $1 AND a.user_id = $2 ORDER BY ta.ordinal ASC",
             )
             .bind(turn_id)
             .bind(user_id)
@@ -837,11 +817,11 @@ impl ContextStore {
                     "SELECT kind, target_id, label, due_at FROM (
                         SELECT 'memory' AS kind, id AS target_id, user_note AS label,
                                NULL AS due_at, 0 AS kind_order, created_at
-                        FROM memory_items WHERE user_id = ? AND source_turn_id = ?
+                        FROM memory_items WHERE user_id = $1 AND source_turn_id = $2
                         UNION ALL
                         SELECT 'todo' AS kind, id AS target_id, title AS label,
                                due_at, 1 AS kind_order, created_at
-                        FROM todos WHERE user_id = ? AND source_turn_id = ?
+                        FROM todos WHERE user_id = $3 AND source_turn_id = $4
                      ) ORDER BY kind_order ASC, created_at ASC, target_id ASC LIMIT 10",
                 )
                 .bind(user_id)
@@ -889,7 +869,7 @@ impl ContextStore {
     pub async fn touch_session(&self, session_id: &str) -> anyhow::Result<()> {
         let now = unix_time();
         sqlx::query(
-            "INSERT INTO sessions(id, created_at, updated_at) VALUES (?, ?, ?)
+            "INSERT INTO sessions(id, created_at, updated_at) VALUES ($1, $2, $3)
              ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at",
         )
         .bind(session_id)
@@ -909,7 +889,7 @@ impl ContextStore {
         let now = unix_time();
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO events(session_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO events(session_id, kind, payload, created_at) VALUES ($1, $2, $3, $4)",
         )
         .bind(session_id)
         .bind(kind)
@@ -917,7 +897,7 @@ impl ContextStore {
         .bind(now)
         .execute(&mut *transaction)
         .await?;
-        sqlx::query("UPDATE sessions SET updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE sessions SET updated_at = $1 WHERE id = $2")
             .bind(now)
             .bind(session_id)
             .execute(&mut *transaction)
@@ -934,9 +914,10 @@ impl ContextStore {
         metadata: Option<&Value>,
     ) -> anyhow::Result<i64> {
         let now = unix_time();
-        let result = sqlx::query(
+        let row = sqlx::query(
             "INSERT INTO turns(session_id, role, content, metadata, created_at)
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id",
         )
         .bind(session_id)
         .bind(role)
@@ -945,13 +926,13 @@ impl ContextStore {
             metadata.unwrap_or(&Value::Object(Default::default())),
         )?)
         .bind(now)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
         sqlx::query(
-            "UPDATE conversations SET updated_at = ?,
-             title = CASE WHEN title = '新对话' AND ? = 'user'
-                          THEN substr(?, 1, 32) ELSE title END
-             WHERE id = ?",
+            "UPDATE conversations SET updated_at = $1,
+             title = CASE WHEN title = '新对话' AND $2 = 'user'
+                          THEN substr($3, 1, 32) ELSE title END
+             WHERE id = $4",
         )
         .bind(now)
         .bind(role)
@@ -959,10 +940,10 @@ impl ContextStore {
         .bind(session_id)
         .execute(&self.pool)
         .await?;
-        Ok(result.last_insert_rowid())
+        Ok(row.get("id"))
     }
 
-    pub(crate) fn pool(&self) -> &SqlitePool {
+    pub(crate) fn pool(&self) -> &PgPool {
         &self.pool
     }
 
@@ -977,8 +958,8 @@ impl ContextStore {
         limit: i64,
     ) -> anyhow::Result<Vec<Value>> {
         let rows = sqlx::query(
-            "SELECT role, content FROM turns WHERE session_id = ?
-             ORDER BY id DESC LIMIT ?",
+            "SELECT role, content FROM turns WHERE session_id = $1
+             ORDER BY id DESC LIMIT $2",
         )
         .bind(session_id)
         .bind(limit * 2)
@@ -1002,7 +983,7 @@ impl ContextStore {
         max_turns: i64,
     ) -> anyhow::Result<(String, usize)> {
         let rows = sqlx::query(
-            "SELECT role, content FROM turns WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            "SELECT role, content FROM turns WHERE session_id = $1 ORDER BY id DESC LIMIT $2",
         )
         .bind(session_id)
         .bind(max_turns.clamp(1, 8))
@@ -1026,14 +1007,16 @@ impl ContextStore {
     }
 
     pub async fn remember(&self, session_id: &str, content: &str) -> anyhow::Result<i64> {
-        let result =
-            sqlx::query("INSERT INTO memories(session_id, content, created_at) VALUES (?, ?, ?)")
-                .bind(session_id)
-                .bind(content)
-                .bind(unix_time())
-                .execute(&self.pool)
-                .await?;
-        Ok(result.last_insert_rowid())
+        let row = sqlx::query(
+            "INSERT INTO memories(session_id, content, created_at)
+                 VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(session_id)
+        .bind(content)
+        .bind(unix_time())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("id"))
     }
 
     pub async fn recent_memories(
@@ -1042,7 +1025,7 @@ impl ContextStore {
         limit: i64,
     ) -> anyhow::Result<Vec<String>> {
         let rows = sqlx::query(
-            "SELECT content FROM memories WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            "SELECT content FROM memories WHERE session_id = $1 ORDER BY id DESC LIMIT $2",
         )
         .bind(session_id)
         .bind(limit)
@@ -1054,6 +1037,66 @@ impl ContextStore {
             .collect())
     }
 
+    pub async fn relevant_explicit_memories(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        query: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "WITH current_scope AS (
+                SELECT project_id FROM conversations
+                WHERE id = $1 AND user_id = $2
+             )
+             SELECT m.user_note, m.visual_summary, m.scope_type,
+                    similarity(m.user_note || ' ' || m.visual_summary, $3) AS score
+             FROM memory_items m
+             CROSS JOIN current_scope s
+             WHERE m.user_id = $2 AND m.archived_at IS NULL
+               AND (
+                    (s.project_id IS NULL AND m.scope_type = 'personal')
+                    OR (s.project_id IS NOT NULL AND
+                        (m.scope_type = 'personal' OR m.project_id = s.project_id))
+               )
+               AND (
+                    similarity(m.user_note || ' ' || m.visual_summary, $3) >= 0.08
+                    OR m.user_note ILIKE '%' || $3 || '%'
+                    OR m.visual_summary ILIKE '%' || $3 || '%'
+               )
+             ORDER BY m.is_pinned DESC, score DESC, m.created_at DESC
+             LIMIT $4",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(query)
+        .bind(limit.clamp(1, 20))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let note: String = row.get("user_note");
+                let visual: String = row.get("visual_summary");
+                let scope: String = row.get("scope_type");
+                let label = if scope == "project" {
+                    "项目显式记忆"
+                } else {
+                    "个人显式记忆"
+                };
+                if visual.trim().is_empty() {
+                    format!("[{label}] {note}")
+                } else {
+                    format!("[{label}] {note}；画面：{visual}")
+                }
+            })
+            .collect())
+    }
+
     pub async fn recall(
         &self,
         session_id: &str,
@@ -1062,8 +1105,8 @@ impl ContextStore {
     ) -> anyhow::Result<Vec<String>> {
         let rows = if query.is_empty() {
             sqlx::query(
-                "SELECT content FROM memories WHERE session_id = ?
-                 ORDER BY id DESC LIMIT ?",
+                "SELECT content FROM memories WHERE session_id = $1
+                 ORDER BY id DESC LIMIT $2",
             )
             .bind(session_id)
             .bind(limit)
@@ -1071,8 +1114,8 @@ impl ContextStore {
             .await?
         } else {
             sqlx::query(
-                "SELECT content FROM memories WHERE session_id = ? AND content LIKE ?
-                 ORDER BY id DESC LIMIT ?",
+                "SELECT content FROM memories WHERE session_id = $1 AND content LIKE $2
+                 ORDER BY id DESC LIMIT $3",
             )
             .bind(session_id)
             .bind(format!("%{query}%"))
@@ -1098,8 +1141,38 @@ fn validate_library_ids(ids: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn project_from_row(row: sqlx::postgres::PgRow) -> ProjectRecord {
+    ProjectRecord {
+        id: row.get("id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        instructions: row.get("instructions"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        archived_at: row.get("archived_at"),
+    }
+}
+
+fn validate_project_fields(
+    name: &str,
+    description: &str,
+    instructions: &str,
+) -> anyhow::Result<()> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 {
+        anyhow::bail!("项目名称不能为空且不能超过 80 个字符");
+    }
+    if description.trim().chars().count() > 2_000 {
+        anyhow::bail!("项目说明不能超过 2000 个字符");
+    }
+    if instructions.trim().chars().count() > 4_000 {
+        anyhow::bail!("项目规则不能超过 4000 个字符");
+    }
+    Ok(())
+}
+
 async fn insert_auth_session(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: &str,
     now: f64,
     token_ttl_hours: i64,
@@ -1108,7 +1181,7 @@ async fn insert_auth_session(
     let expires_at = now + token_ttl_hours.clamp(1, 24 * 365) as f64 * 3600.0;
     sqlx::query(
         "INSERT INTO auth_sessions(token_hash, user_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4)",
     )
     .bind(secret_hash(&token))
     .bind(user_id)
@@ -1179,7 +1252,7 @@ mod tests {
             "INSERT INTO memory_items(
                 id, user_id, conversation_id, source_turn_id, source_response_id,
                 user_note, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind("mem-action")
         .bind(&user.id)
@@ -1196,7 +1269,7 @@ mod tests {
             "INSERT INTO memory_items(
                 id, user_id, conversation_id, source_turn_id, source_response_id,
                 user_note, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind("foreign-action")
         .bind(&other.id)
@@ -1213,7 +1286,7 @@ mod tests {
             "INSERT INTO todos(
                 id, user_id, conversation_id, source_turn_id, source_response_id,
                 title, due_at, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind("todo-action")
         .bind(&user.id)
@@ -1245,7 +1318,7 @@ mod tests {
                 "INSERT INTO memory_items(
                     id, user_id, conversation_id, source_turn_id, source_response_id,
                     user_note, created_at, updated_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             )
             .bind(format!("mem-cap-{index}"))
             .bind(&user.id)
@@ -1474,6 +1547,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn projects_isolate_their_conversations_from_personal_chat() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ContextStore::open(&directory.path().join("projects.pg-test"))
+            .await
+            .unwrap();
+        let user = registered_user(&store, "projects@example.com", "projects-invite").await;
+        let personal = store.create_conversation(&user.id).await.unwrap();
+        let project = store
+            .create_project(
+                &user.id,
+                "Ripple Live",
+                "Android 优先的多模态 Agent",
+                "所有模型调用使用 Responses API",
+            )
+            .await
+            .unwrap();
+        let project_conversation = store
+            .create_project_conversation(&user.id, &project.id)
+            .await
+            .unwrap();
+
+        let personal_rows = store
+            .list_conversations(&user.id, LibraryScope::Active, false, "", 50)
+            .await
+            .unwrap();
+        assert_eq!(personal_rows.len(), 1);
+        assert_eq!(personal_rows[0].id, personal);
+
+        let project_rows = store
+            .list_project_conversations(&user.id, &project.id, LibraryScope::Active, 50)
+            .await
+            .unwrap();
+        assert_eq!(project_rows.len(), 1);
+        assert_eq!(project_rows[0].id, project_conversation);
+        assert_eq!(
+            store
+                .conversation_project_id(&user.id, &project_conversation)
+                .await
+                .unwrap(),
+            Some(Some(project.id.clone()))
+        );
+
+        let loaded = store
+            .project_for_conversation(&user.id, &project_conversation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.name, "Ripple Live");
+        assert!(loaded.instructions.contains("Responses API"));
+    }
+
+    #[tokio::test]
     async fn deleting_conversation_detaches_todo_sources_before_removing_turns() {
         let directory = tempfile::tempdir().unwrap();
         let store = ContextStore::open(&directory.path().join("delete.sqlite3"))
@@ -1490,7 +1615,7 @@ mod tests {
             "INSERT INTO todos(
                 id, user_id, conversation_id, source_turn_id, source_response_id,
                 title, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind("todo-delete")
         .bind(&user.id)
@@ -1520,106 +1645,12 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let todo_sources: (Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT conversation_id, source_turn_id FROM todos WHERE id = ?",
-        )
-        .bind("todo-delete")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+        let todo_sources: (Option<String>, Option<i64>) =
+            sqlx::query_as("SELECT conversation_id, source_turn_id FROM todos WHERE id = $1")
+                .bind("todo-delete")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
         assert_eq!(todo_sources, (None, None));
-
-        let foreign_key_violations: Vec<(String, i64, String, i64)> =
-            sqlx::query_as("PRAGMA foreign_key_check")
-                .fetch_all(store.pool())
-                .await
-                .unwrap();
-        assert!(foreign_key_violations.is_empty());
-    }
-
-    #[tokio::test]
-    async fn migrates_legacy_memory_sources_to_nullable_without_losing_rows() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("legacy.sqlite3");
-        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
-            .unwrap()
-            .create_if_missing(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        for statement in [
-            "CREATE TABLE users (
-                id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL, created_at REAL NOT NULL
-            )",
-            "CREATE TABLE conversations (
-                id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
-                title TEXT NOT NULL DEFAULT '新对话',
-                created_at REAL NOT NULL, updated_at REAL NOT NULL
-            )",
-            "CREATE TABLE turns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
-                role TEXT NOT NULL, content TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL
-            )",
-            "CREATE TABLE memory_items (
-                id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
-                conversation_id TEXT NOT NULL, source_turn_id INTEGER NOT NULL,
-                source_response_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'visual',
-                user_note TEXT NOT NULL, visual_summary TEXT NOT NULL DEFAULT '',
-                cover_asset_id TEXT, captured_at REAL,
-                created_at REAL NOT NULL, updated_at REAL NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id),
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id),
-                FOREIGN KEY(source_turn_id) REFERENCES turns(id)
-            )",
-            "INSERT INTO users VALUES ('user-1', 'legacy@example.com', 'hash', 1)",
-            "INSERT INTO conversations VALUES ('conv-1', 'user-1', '旧对话', 1, 1)",
-            "INSERT INTO turns(id, session_id, role, content, created_at)
-             VALUES (1, 'conv-1', 'user', '旧消息', 1)",
-            "INSERT INTO memory_items(
-                id, user_id, conversation_id, source_turn_id, source_response_id,
-                user_note, created_at, updated_at
-             ) VALUES ('mem-1', 'user-1', 'conv-1', 1, 'response-1', '旧记忆', 1, 1)",
-        ] {
-            sqlx::query(statement).execute(&pool).await.unwrap();
-        }
-        pool.close().await;
-
-        let store = ContextStore::open(&path).await.unwrap();
-        let columns = sqlx::query("PRAGMA table_info(memory_items)")
-            .fetch_all(store.pool())
-            .await
-            .unwrap();
-        for source in ["conversation_id", "source_turn_id"] {
-            let column = columns
-                .iter()
-                .find(|row| row.get::<String, _>("name") == source)
-                .unwrap();
-            assert_eq!(column.get::<i64, _>("notnull"), 0);
-        }
-        let row = sqlx::query(
-            "SELECT conversation_id, source_turn_id, is_pinned, archived_at
-             FROM memory_items WHERE id = 'mem-1'",
-        )
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        assert_eq!(
-            row.get::<Option<String>, _>("conversation_id").as_deref(),
-            Some("conv-1")
-        );
-        assert_eq!(row.get::<Option<i64>, _>("source_turn_id"), Some(1));
-        assert_eq!(row.get::<i64, _>("is_pinned"), 0);
-        assert_eq!(row.get::<Option<f64>, _>("archived_at"), None);
-        assert!(
-            sqlx::query("PRAGMA foreign_key_check")
-                .fetch_all(store.pool())
-                .await
-                .unwrap()
-                .is_empty()
-        );
     }
 }

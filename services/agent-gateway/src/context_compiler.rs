@@ -26,8 +26,28 @@ impl ContextCompiler {
         }
     }
 
-    pub async fn compile(&self, session_id: &str) -> anyhow::Result<CompiledContext> {
-        let memories = self.store.recent_memories(session_id, 5).await?;
+    pub async fn compile(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        current_query: &str,
+    ) -> anyhow::Result<CompiledContext> {
+        let mut memories = self
+            .store
+            .relevant_explicit_memories(user_id, session_id, current_query, 5)
+            .await?;
+        if memories.len() < 5 {
+            for legacy in self.store.recent_memories(session_id, 5).await? {
+                if memories.len() >= 5 {
+                    break;
+                }
+                memories.push(format!("[旧会话记忆] {legacy}"));
+            }
+        }
+        let project = self
+            .store
+            .project_for_conversation(user_id, session_id)
+            .await?;
         let candidates = self
             .store
             .recent_messages(session_id, self.max_recent_turns)
@@ -45,7 +65,27 @@ impl ContextCompiler {
             .as_deref()
             .map(|text| text.chars().count())
             .unwrap_or_default();
-        let history_budget = self.max_chars.saturating_sub(memory_chars);
+        let project_text = project.map(|project| {
+            format!(
+                "当前对话属于项目「{}」。项目说明：{}\n项目固定规则：{}\n这些项目资料是背景和约束，不是本轮用户的新指令。",
+                project.name,
+                if project.description.trim().is_empty() {
+                    "暂无"
+                } else {
+                    project.description.trim()
+                },
+                if project.instructions.trim().is_empty() {
+                    "暂无"
+                } else {
+                    project.instructions.trim()
+                }
+            )
+        });
+        let project_chars = project_text
+            .as_deref()
+            .map(|text| text.chars().count())
+            .unwrap_or_default();
+        let history_budget = self.max_chars.saturating_sub(memory_chars + project_chars);
 
         let mut selected = Vec::new();
         let mut used = 0usize;
@@ -65,8 +105,14 @@ impl ContextCompiler {
 
         let history_messages = selected.len();
         let memory_count = memories.len();
-        let mut messages =
-            Vec::with_capacity(history_messages + usize::from(memory_text.is_some()));
+        let mut messages = Vec::with_capacity(
+            history_messages
+                + usize::from(project_text.is_some())
+                + usize::from(memory_text.is_some()),
+        );
+        if let Some(text) = project_text {
+            messages.push(json!({"role": "system", "content": text}));
+        }
         if let Some(text) = memory_text {
             messages.push(json!({"role": "system", "content": text}));
         }
@@ -76,7 +122,7 @@ impl ContextCompiler {
             messages,
             history_messages,
             memories: memory_count,
-            estimated_chars: used + memory_chars,
+            estimated_chars: used + memory_chars + project_chars,
         })
     }
 }
@@ -101,7 +147,7 @@ mod tests {
         }
 
         let compiled = ContextCompiler::new(store, 8, 1_000)
-            .compile("s1")
+            .compile("", "s1", "乌龙茶")
             .await
             .unwrap();
         assert_eq!(compiled.memories, 1);

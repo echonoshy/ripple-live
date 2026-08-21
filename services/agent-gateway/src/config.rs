@@ -4,6 +4,8 @@ use std::{env, net::SocketAddr, path::PathBuf, time::Duration};
 pub struct Settings {
     pub address: SocketAddr,
     pub data_dir: PathBuf,
+    pub database_url: String,
+    pub database_max_connections: u32,
     pub asr_backend: String,
     pub asr_url: String,
     pub asr_model: String,
@@ -83,6 +85,11 @@ impl Settings {
         Ok(Self {
             address: format!("{host}:{port}").parse()?,
             data_dir: PathBuf::from(value("DATA_DIR", "runtime-data/agent-gateway")),
+            database_url: value(
+                "DATABASE_URL",
+                "postgres://ripple_live:ripple_live@127.0.0.1:5432/ripple_live",
+            ),
+            database_max_connections: parsed("DATABASE_MAX_CONNECTIONS", 16),
             asr_backend: value("ASR_BACKEND", "openai"),
             asr_readiness_url: readiness_url("ASR", &asr_url, "/health"),
             asr_url,
@@ -128,9 +135,5 @@ impl Settings {
             gate_timeout: Duration::from_millis(parsed("GATE_TIMEOUT_MS", 3_000)),
             readiness_timeout: Duration::from_secs(2),
         })
-    }
-
-    pub fn database_path(&self) -> PathBuf {
-        self.data_dir.join("context.sqlite3")
     }
 }

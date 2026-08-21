@@ -417,7 +417,15 @@ impl ToolExecutor {
             }
             "recall" => {
                 let query = payload.get("query").and_then(Value::as_str).unwrap_or("");
-                let memories = self.memories.recall(&execution.user_id, query, 5).await?;
+                let memories = self
+                    .memories
+                    .recall(
+                        &execution.user_id,
+                        Some(&execution.conversation_id),
+                        query,
+                        5,
+                    )
+                    .await?;
                 let artifacts = memories
                     .iter()
                     .filter_map(|memory| memory.memory.cover.clone())

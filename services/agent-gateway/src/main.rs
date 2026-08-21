@@ -738,7 +738,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let settings = Arc::new(Settings::from_env()?);
-    let context = ContextStore::open(&settings.database_path()).await?;
+    let context =
+        ContextStore::connect(&settings.database_url, settings.database_max_connections).await?;
     context
         .seed_invitation_codes(
             &settings.invite_codes,
@@ -783,6 +784,17 @@ fn app(state: AppState) -> Router {
         .route("/v1/auth/login", post(login))
         .route("/v1/auth/me", get(me))
         .route("/v1/auth/logout", post(logout))
+        .route("/v1/projects", get(list_projects).post(create_project))
+        .route(
+            "/v1/projects/{project_id}",
+            get(get_project)
+                .patch(update_project)
+                .delete(archive_project),
+        )
+        .route(
+            "/v1/projects/{project_id}/conversations",
+            get(list_project_conversations).post(create_project_conversation),
+        )
         .route("/v1/conversations", get(list_conversations))
         .route("/v1/conversations/batch", post(batch_conversations))
         .route(
@@ -912,6 +924,23 @@ struct MemoryPatch {
     archived: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProjectCreate {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    instructions: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectPatch {
+    name: Option<String>,
+    description: Option<String>,
+    instructions: Option<String>,
+    archived: Option<bool>,
+}
+
 #[derive(Deserialize)]
 struct ResponsesRequest {
     input: Value,
@@ -976,6 +1005,171 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+async fn create_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ProjectCreate>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .create_project(
+            &user.id,
+            &request.name,
+            &request.description,
+            &request.instructions,
+        )
+        .await
+    {
+        Ok(project) => (StatusCode::CREATED, Json(json!({"data": project}))).into_response(),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn list_projects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<LibraryListQuery>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .list_projects(&user.id, query.scope, query.limit.unwrap_or(50))
+        .await
+    {
+        Ok(projects) => Json(json!({"data": projects})).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn get_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.context.project(&user.id, &project_id).await {
+        Ok(Some(project)) => Json(json!({"data": project})).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "项目不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn update_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(request): Json<ProjectPatch>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .update_project(
+            &user.id,
+            &project_id,
+            request.name.as_deref(),
+            request.description.as_deref(),
+            request.instructions.as_deref(),
+            request.archived,
+        )
+        .await
+    {
+        Ok(project) => Json(json!({"data": project})).into_response(),
+        Err(error) if error.to_string().contains("不存在") => {
+            api_error(StatusCode::NOT_FOUND, &error.to_string())
+        }
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn archive_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .update_project(&user.id, &project_id, None, None, None, Some(true))
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) if error.to_string().contains("不存在") => {
+            api_error(StatusCode::NOT_FOUND, &error.to_string())
+        }
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn create_project_conversation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .create_project_conversation(&user.id, &project_id)
+        .await
+    {
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(json!({"id": id, "project_id": project_id})),
+        )
+            .into_response(),
+        Err(error) if error.to_string().contains("不存在") => {
+            api_error(StatusCode::NOT_FOUND, &error.to_string())
+        }
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn list_project_conversations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Query(query): Query<LibraryListQuery>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .list_project_conversations(
+            &user.id,
+            &project_id,
+            query.scope,
+            query.limit.unwrap_or(50),
+        )
+        .await
+    {
+        Ok(conversations) => Json(json!({"data": conversations})).into_response(),
+        Err(error) if error.to_string().contains("不存在") => {
+            api_error(StatusCode::NOT_FOUND, &error.to_string())
+        }
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
 }
 
 async fn list_conversations(
@@ -3132,7 +3326,9 @@ mod tests {
         settings.asr_backend = "mock".to_owned();
         settings.agent_backend = "mock".to_owned();
         settings.tts_backend = "mock".to_owned();
-        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
+            .await
+            .unwrap();
 
         let report = check_readiness(&settings, &context).await;
 
@@ -3443,7 +3639,9 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
+            .await
+            .unwrap();
         context
             .seed_invitation_codes(&["route-one".to_owned(), "route-two".to_owned()], 1, 24)
             .await
@@ -3764,7 +3962,7 @@ mod tests {
                 frames: vec![],
             })
             .await
-            .unwrap();
+            .expect_err("foreign user must not attach memory to another user's conversation");
 
         let response = app(state)
             .oneshot(authenticated_request(

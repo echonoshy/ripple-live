@@ -1,7 +1,7 @@
 use std::{cmp::Ordering, collections::HashSet, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sqlx::{QueryBuilder, Row, Sqlite};
+use sqlx::{Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::{
@@ -128,6 +128,16 @@ impl MemoryService {
         if visual_summary.chars().count() > 2_000 {
             anyhow::bail!("画面描述不能超过 2000 个字符");
         }
+        let project_id = self
+            .context
+            .conversation_project_id(&request.user_id, &request.conversation_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("对话不存在"))?;
+        let scope_type = if project_id.is_some() {
+            "project"
+        } else {
+            "personal"
+        };
 
         let mut stored = Vec::new();
         for frame in request.frames.iter().take(3) {
@@ -155,7 +165,7 @@ impl MemoryService {
                 "INSERT INTO assets(
                     id, user_id, sha256, mime_type, storage_key, width, height,
                     size_bytes, captured_at, created_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                  ON CONFLICT(user_id, sha256) DO NOTHING",
             )
             .bind(&asset.id)
@@ -170,7 +180,7 @@ impl MemoryService {
             .bind(now)
             .execute(&mut *transaction)
             .await?;
-            let row = sqlx::query("SELECT id FROM assets WHERE user_id = ? AND sha256 = ?")
+            let row = sqlx::query("SELECT id FROM assets WHERE user_id = $1 AND sha256 = $2")
                 .bind(&request.user_id)
                 .bind(&asset.sha256)
                 .fetch_one(&mut *transaction)
@@ -180,13 +190,19 @@ impl MemoryService {
         let cover_asset_id = asset_ids.last().cloned();
         sqlx::query(
             "INSERT INTO memory_items(
-                id, user_id, conversation_id, source_turn_id, source_response_id,
+                id, user_id, scope_type, project_id,
+                conversation_id, source_turn_id, source_response_id,
                 kind, user_note, visual_summary, cover_asset_id, captured_at,
                 created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12, $13, $14
+             )",
         )
         .bind(&memory_id)
         .bind(&request.user_id)
+        .bind(scope_type)
+        .bind(&project_id)
         .bind(&request.conversation_id)
         .bind(request.source_turn_id)
         .bind(&request.response_id)
@@ -206,7 +222,7 @@ impl MemoryService {
         for (ordinal, asset_id) in asset_ids.iter().enumerate() {
             sqlx::query(
                 "INSERT INTO memory_assets(memory_id, asset_id, ordinal, is_cover)
-                 VALUES (?, ?, ?, ?)",
+                 VALUES ($1, $2, $3, $4)",
             )
             .bind(&memory_id)
             .bind(asset_id)
@@ -217,7 +233,7 @@ impl MemoryService {
         }
         sqlx::query(
             "INSERT INTO memory_tool_executions(response_id, tool_call_id, memory_id)
-             VALUES (?, ?, ?)",
+             VALUES ($1, $2, $3)",
         )
         .bind(&request.response_id)
         .bind(&request.tool_call_id)
@@ -234,14 +250,30 @@ impl MemoryService {
     pub async fn recall(
         &self,
         user_id: &str,
+        conversation_id: Option<&str>,
         query: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<MemorySearchResult>> {
+        let project_id = match conversation_id {
+            Some(conversation_id) => self
+                .context
+                .conversation_project_id(user_id, conversation_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("对话不存在"))?,
+            None => None,
+        };
         let rows = sqlx::query(
-            "SELECT id FROM memory_items WHERE user_id = ? AND archived_at IS NULL
+            "SELECT id FROM memory_items
+             WHERE user_id = $1 AND archived_at IS NULL
+               AND (
+                    ($2::text IS NULL AND scope_type = 'personal')
+                    OR ($2::text IS NOT NULL AND
+                        (scope_type = 'personal' OR project_id = $2))
+               )
              ORDER BY created_at DESC LIMIT 200",
         )
         .bind(user_id)
+        .bind(project_id.as_deref())
         .fetch_all(self.context.pool())
         .await?;
         let mut results = Vec::new();
@@ -314,7 +346,7 @@ impl MemoryService {
                 "INSERT INTO assets(
                     id, user_id, sha256, mime_type, storage_key, width, height,
                     size_bytes, captured_at, created_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                  ON CONFLICT(user_id, sha256) DO NOTHING",
             )
             .bind(&asset.id)
@@ -331,7 +363,7 @@ impl MemoryService {
             .await?;
             Some(
                 sqlx::query_scalar::<_, String>(
-                    "SELECT id FROM assets WHERE user_id = ? AND sha256 = ?",
+                    "SELECT id FROM assets WHERE user_id = $1 AND sha256 = $2",
                 )
                 .bind(&request.user_id)
                 .bind(&asset.sha256)
@@ -346,7 +378,7 @@ impl MemoryService {
                 id, user_id, memory_id, conversation_id, source_turn_id,
                 source_response_id, title, visual_summary, cover_asset_id,
                 due_at, completed_at, created_at, updated_at
-             ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+             ) VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11)",
         )
         .bind(&todo_id)
         .bind(&request.user_id)
@@ -363,7 +395,7 @@ impl MemoryService {
         .await?;
         sqlx::query(
             "INSERT INTO todo_tool_executions(response_id, tool_call_id, todo_id)
-             VALUES (?, ?, ?)",
+             VALUES ($1, $2, $3)",
         )
         .bind(&request.response_id)
         .bind(&request.tool_call_id)
@@ -384,16 +416,16 @@ impl MemoryService {
     ) -> anyhow::Result<Vec<TodoRecord>> {
         let rows = match completed {
             Some(true) => sqlx::query(
-                "SELECT id FROM todos WHERE user_id = ? AND completed_at IS NOT NULL
-                 ORDER BY completed_at DESC LIMIT ?",
+                "SELECT id FROM todos WHERE user_id = $1 AND completed_at IS NOT NULL
+                 ORDER BY completed_at DESC LIMIT $2",
             )
             .bind(user_id)
             .bind(limit.clamp(1, 100) as i64)
             .fetch_all(self.context.pool())
             .await?,
             _ => sqlx::query(
-                "SELECT id FROM todos WHERE user_id = ? AND completed_at IS NULL
-                 ORDER BY CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, created_at DESC LIMIT ?",
+                "SELECT id FROM todos WHERE user_id = $1 AND completed_at IS NULL
+                 ORDER BY CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, created_at DESC LIMIT $2",
             )
             .bind(user_id)
             .bind(limit.clamp(1, 100) as i64)
@@ -424,7 +456,7 @@ impl MemoryService {
         sqlx::query(
             "INSERT INTO todos(
                 id, user_id, title, visual_summary, due_at, completed_at, created_at, updated_at
-             ) VALUES (?, ?, ?, '', ?, NULL, ?, ?)",
+             ) VALUES ($1, $2, $3, '', $4, NULL, $5, $6)",
         )
         .bind(&todo_id)
         .bind(user_id)
@@ -462,11 +494,11 @@ impl MemoryService {
         let completed_at = update.completed.filter(|completed| *completed).map(|_| now);
         let result = sqlx::query(
             "UPDATE todos SET
-                title = CASE WHEN ? THEN ? ELSE title END,
-                due_at = CASE WHEN ? THEN ? ELSE due_at END,
-                completed_at = CASE WHEN ? THEN ? ELSE completed_at END,
-                updated_at = ?
-             WHERE id = ? AND user_id = ?",
+                title = CASE WHEN $1 THEN $2 ELSE title END,
+                due_at = CASE WHEN $3 THEN $4 ELSE due_at END,
+                completed_at = CASE WHEN $5 THEN $6 ELSE completed_at END,
+                updated_at = $7
+             WHERE id = $8 AND user_id = $9",
         )
         .bind(title_changed)
         .bind(title)
@@ -503,7 +535,7 @@ impl MemoryService {
     }
 
     pub async fn delete_todo(&self, user_id: &str, todo_id: &str) -> anyhow::Result<bool> {
-        let result = sqlx::query("DELETE FROM todos WHERE id = ? AND user_id = ?")
+        let result = sqlx::query("DELETE FROM todos WHERE id = $1 AND user_id = $2")
             .bind(todo_id)
             .bind(user_id)
             .execute(self.context.pool())
@@ -527,12 +559,13 @@ impl MemoryService {
         let query = query.trim();
         let pattern = format!("%{query}%");
         let rows = sqlx::query(
-            "SELECT id FROM memory_items WHERE user_id = ?
-               AND (? = 2 OR (? = 0 AND archived_at IS NULL)
-                    OR (? = 1 AND archived_at IS NOT NULL))
-               AND (? = 0 OR is_pinned = 1)
-               AND (? = '' OR user_note LIKE ? OR visual_summary LIKE ?)
-             ORDER BY is_pinned DESC, COALESCE(captured_at, created_at) DESC LIMIT ?",
+            "SELECT id FROM memory_items WHERE user_id = $1
+               AND scope_type = 'personal'
+               AND ($2 = 2 OR ($3 = 0 AND archived_at IS NULL)
+                    OR ($4 = 1 AND archived_at IS NOT NULL))
+               AND ($5 = 0 OR is_pinned = 1)
+               AND ($6 = '' OR user_note LIKE $7 OR visual_summary LIKE $8)
+             ORDER BY is_pinned DESC, COALESCE(captured_at, created_at) DESC LIMIT $9",
         )
         .bind(user_id)
         .bind(scope)
@@ -562,7 +595,7 @@ impl MemoryService {
         let row = sqlx::query(
             "SELECT id, kind, user_note, visual_summary, cover_asset_id,
                     captured_at, created_at, is_pinned, archived_at
-             FROM memory_items WHERE id = ? AND user_id = ?",
+             FROM memory_items WHERE id = $1 AND user_id = $2",
         )
         .bind(memory_id)
         .bind(user_id)
@@ -573,7 +606,7 @@ impl MemoryService {
         };
         let asset_rows = sqlx::query(
             "SELECT a.id FROM memory_assets ma JOIN assets a ON a.id = ma.asset_id
-             WHERE ma.memory_id = ? AND a.user_id = ? ORDER BY ma.ordinal ASC",
+             WHERE ma.memory_id = $1 AND a.user_id = $2 ORDER BY ma.ordinal ASC",
         )
         .bind(memory_id)
         .bind(user_id)
@@ -610,7 +643,7 @@ impl MemoryService {
             anyhow::bail!("记忆内容不能为空且不能超过 2000 个字符");
         }
         let result = sqlx::query(
-            "UPDATE memory_items SET user_note = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            "UPDATE memory_items SET user_note = $1, updated_at = $2 WHERE id = $3 AND user_id = $4",
         )
         .bind(note)
         .bind(unix_time())
@@ -639,7 +672,7 @@ impl MemoryService {
         validate_library_ids(ids)?;
         let mut transaction = self.context.pool().begin().await?;
         let mut ownership =
-            QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM memory_items WHERE user_id = ");
+            QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM memory_items WHERE user_id = ");
         ownership.push_bind(user_id).push(" AND id IN (");
         let mut separated = ownership.separated(", ");
         for id in ids {
@@ -656,7 +689,7 @@ impl MemoryService {
 
         let mut orphaned = Vec::new();
         if action == LibraryAction::Delete {
-            let mut assets = QueryBuilder::<Sqlite>::new(
+            let mut assets = QueryBuilder::<Postgres>::new(
                 "SELECT DISTINCT a.id, a.storage_key FROM memory_assets ma
                  JOIN assets a ON a.id = ma.asset_id
                  JOIN memory_items m ON m.id = ma.memory_id
@@ -671,7 +704,7 @@ impl MemoryService {
             let asset_rows = assets.build().fetch_all(&mut *transaction).await?;
 
             let mut detach =
-                QueryBuilder::<Sqlite>::new("DELETE FROM turn_attachments WHERE memory_id IN (");
+                QueryBuilder::<Postgres>::new("DELETE FROM turn_attachments WHERE memory_id IN (");
             let mut separated = detach.separated(", ");
             for id in ids {
                 separated.push_bind(id);
@@ -680,7 +713,7 @@ impl MemoryService {
             detach.build().execute(&mut *transaction).await?;
 
             let mut delete =
-                QueryBuilder::<Sqlite>::new("DELETE FROM memory_items WHERE user_id = ");
+                QueryBuilder::<Postgres>::new("DELETE FROM memory_items WHERE user_id = ");
             delete.push_bind(user_id).push(" AND id IN (");
             let mut separated = delete.separated(", ");
             for id in ids {
@@ -692,12 +725,12 @@ impl MemoryService {
             for row in asset_rows {
                 let asset_id: String = row.get("id");
                 let references: i64 =
-                    sqlx::query_scalar("SELECT COUNT(*) FROM memory_assets WHERE asset_id = ?")
+                    sqlx::query_scalar("SELECT COUNT(*) FROM memory_assets WHERE asset_id = $1")
                         .bind(&asset_id)
                         .fetch_one(&mut *transaction)
                         .await?;
                 if references == 0 {
-                    sqlx::query("DELETE FROM assets WHERE id = ? AND user_id = ?")
+                    sqlx::query("DELETE FROM assets WHERE id = $1 AND user_id = $2")
                         .bind(&asset_id)
                         .bind(user_id)
                         .execute(&mut *transaction)
@@ -706,7 +739,7 @@ impl MemoryService {
                 }
             }
         } else {
-            let mut update = QueryBuilder::<Sqlite>::new("UPDATE memory_items SET ");
+            let mut update = QueryBuilder::<Postgres>::new("UPDATE memory_items SET ");
             match action {
                 LibraryAction::Pin => {
                     update.push("is_pinned = CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END")
@@ -741,7 +774,7 @@ impl MemoryService {
         asset_id: &str,
     ) -> anyhow::Result<Option<AssetContent>> {
         let row =
-            sqlx::query("SELECT storage_key, mime_type FROM assets WHERE id = ? AND user_id = ?")
+            sqlx::query("SELECT storage_key, mime_type FROM assets WHERE id = $1 AND user_id = $2")
                 .bind(asset_id)
                 .bind(user_id)
                 .fetch_optional(self.context.pool())
@@ -767,9 +800,10 @@ impl MemoryService {
                 Some(item.memory_id.as_str())
             };
             sqlx::query(
-                "INSERT OR IGNORE INTO turn_attachments(
+                "INSERT INTO turn_attachments(
                     turn_id, asset_id, memory_id, todo_id, caption, ordinal
-                 ) VALUES (?, ?, ?, ?, ?, ?)",
+                 ) VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT(turn_id, asset_id) DO NOTHING",
             )
             .bind(turn_id)
             .bind(&item.id)
@@ -786,7 +820,7 @@ impl MemoryService {
     async fn get_todo(&self, user_id: &str, todo_id: &str) -> anyhow::Result<Option<TodoRecord>> {
         let row = sqlx::query(
             "SELECT id, title, visual_summary, cover_asset_id, due_at, completed_at, created_at
-             FROM todos WHERE id = ? AND user_id = ?",
+             FROM todos WHERE id = $1 AND user_id = $2",
         )
         .bind(todo_id)
         .bind(user_id)
@@ -814,7 +848,7 @@ impl MemoryService {
     ) -> anyhow::Result<Option<String>> {
         Ok(sqlx::query_scalar(
             "SELECT todo_id FROM todo_tool_executions
-             WHERE response_id = ? AND tool_call_id = ?",
+             WHERE response_id = $1 AND tool_call_id = $2",
         )
         .bind(response_id)
         .bind(tool_call_id)
@@ -829,7 +863,7 @@ impl MemoryService {
     ) -> anyhow::Result<Option<String>> {
         Ok(sqlx::query_scalar(
             "SELECT memory_id FROM memory_tool_executions
-             WHERE response_id = ? AND tool_call_id = ?",
+             WHERE response_id = $1 AND tool_call_id = $2",
         )
         .bind(response_id)
         .bind(tool_call_id)
@@ -981,7 +1015,7 @@ mod tests {
             .await
             .unwrap();
         let attachment =
-            sqlx::query("SELECT memory_id, todo_id FROM turn_attachments WHERE turn_id = ?")
+            sqlx::query("SELECT memory_id, todo_id FROM turn_attachments WHERE turn_id = $1")
                 .bind(assistant_turn)
                 .fetch_one(context.pool())
                 .await
@@ -1096,7 +1130,7 @@ mod tests {
         );
 
         let recalled = service
-            .recall(&user.id, "蓝色转接头放哪了", 5)
+            .recall(&user.id, None, "蓝色转接头放哪了", 5)
             .await
             .unwrap();
         assert_eq!(recalled[0].memory.id, created.memory.id);
@@ -1111,7 +1145,7 @@ mod tests {
             .unwrap();
         assert!(
             service
-                .recall(&user.id, "蓝色转接头", 5)
+                .recall(&user.id, None, "蓝色转接头", 5)
                 .await
                 .unwrap()
                 .is_empty()
@@ -1271,12 +1305,103 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        let source: (Option<String>, Option<i64>) =
-            sqlx::query_as("SELECT conversation_id, source_turn_id FROM memory_items WHERE id = ?")
-                .bind(&own.memory.id)
-                .fetch_one(context.pool())
-                .await
-                .unwrap();
+        let source: (Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT conversation_id, source_turn_id FROM memory_items WHERE id = $1",
+        )
+        .bind(&own.memory.id)
+        .fetch_one(context.pool())
+        .await
+        .unwrap();
         assert_eq!(source, (None, None));
+    }
+
+    #[tokio::test]
+    async fn project_memories_are_recalled_only_inside_their_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = ContextStore::open(&directory.path().join("project-memory.pg-test"))
+            .await
+            .unwrap();
+        context
+            .seed_invitation_codes(&["project-memory-invite".to_owned()], 1, 24)
+            .await
+            .unwrap();
+        let (user, _) = context
+            .register_user(
+                "project-memory@example.com",
+                "password-project-memory",
+                "project-memory-invite",
+                24,
+            )
+            .await
+            .unwrap();
+        let personal_conversation = context.create_conversation(&user.id).await.unwrap();
+        let personal_turn = context
+            .add_turn(&personal_conversation, "user", "我喜欢乌龙茶", None)
+            .await
+            .unwrap();
+        let project = context
+            .create_project(&user.id, "数据库迁移", "", "只使用 Responses API")
+            .await
+            .unwrap();
+        let project_conversation = context
+            .create_project_conversation(&user.id, &project.id)
+            .await
+            .unwrap();
+        let project_turn = context
+            .add_turn(
+                &project_conversation,
+                "user",
+                "项目数据库确定使用 PostgreSQL",
+                None,
+            )
+            .await
+            .unwrap();
+        let service = MemoryService::new(context.clone(), directory.path().join("assets"))
+            .await
+            .unwrap();
+        service
+            .create(CreateMemoryRequest {
+                user_id: user.id.clone(),
+                conversation_id: personal_conversation.clone(),
+                source_turn_id: personal_turn,
+                response_id: "personal-memory-response".to_owned(),
+                tool_call_id: "personal-memory-call".to_owned(),
+                user_note: "用户喜欢乌龙茶".to_owned(),
+                visual_summary: String::new(),
+                frames: vec![],
+            })
+            .await
+            .unwrap();
+        service
+            .create(CreateMemoryRequest {
+                user_id: user.id.clone(),
+                conversation_id: project_conversation.clone(),
+                source_turn_id: project_turn,
+                response_id: "project-memory-response".to_owned(),
+                tool_call_id: "project-memory-call".to_owned(),
+                user_note: "项目数据库使用 PostgreSQL".to_owned(),
+                visual_summary: String::new(),
+                frames: vec![],
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            service
+                .recall(&user.id, None, "PostgreSQL", 5)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let project_results = service
+            .recall(
+                &user.id,
+                Some(&project_conversation),
+                "PostgreSQL 乌龙茶",
+                5,
+            )
+            .await
+            .unwrap();
+        assert_eq!(project_results.len(), 2);
     }
 }

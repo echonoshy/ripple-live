@@ -256,7 +256,10 @@ impl AgentOrchestrator {
                 }),
             )
             .await?;
-        let compiled = self.context_compiler.compile(conversation_id).await?;
+        let compiled = self
+            .context_compiler
+            .compile(user_id, conversation_id, user_input)
+            .await?;
         let mut response_input = compiled.messages;
         let tools = self
             .tools
@@ -451,7 +454,10 @@ impl AgentOrchestrator {
         )
         .await;
 
-        let mut compiled = self.context_compiler.compile(session_id).await?;
+        let mut compiled = self
+            .context_compiler
+            .compile(user_id, session_id, &transcript)
+            .await?;
         compiled.messages.pop();
         let history_messages = compiled.history_messages.saturating_sub(1);
         info!(
@@ -1233,7 +1239,9 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
+            .await
+            .unwrap();
         let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
             .await
             .unwrap();
@@ -1347,7 +1355,9 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
+            .await
+            .unwrap();
         context.touch_session("gate-session").await.unwrap();
         let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
             .await
@@ -1388,7 +1398,9 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
+            .await
+            .unwrap();
         context
             .touch_session("gate-reasoning-session")
             .await
@@ -1592,7 +1604,9 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
+            .await
+            .unwrap();
         context.touch_session("metrics-session").await.unwrap();
         let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
             .await
@@ -1624,7 +1638,7 @@ mod tests {
 
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT kind, COUNT(*) FROM events
-             WHERE json_extract(payload, '$.response_id') = ?
+             WHERE payload::jsonb ->> 'response_id' = $1
                AND kind IN ('server.agent.first_delta', 'server.tts.first_audio')
              GROUP BY kind ORDER BY kind",
         )
@@ -1664,7 +1678,9 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.database_path()).await.unwrap();
+        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
+            .await
+            .unwrap();
         context.touch_session("recovery-session").await.unwrap();
         let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
             .await
@@ -1705,7 +1721,7 @@ mod tests {
 
         let recovery_events: Vec<String> = sqlx::query_scalar(
             "SELECT kind FROM events
-             WHERE json_extract(payload, '$.response_id') = ?
+             WHERE payload::jsonb ->> 'response_id' = $1
                AND kind LIKE 'server.agent.recovery.%'
              ORDER BY id",
         )
