@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     asset_store::AssetStore,
+    auth::avatar_content_url,
     context::{ContextStore, LibraryAction, LibraryScope},
     protocol::VideoFrame,
 };
@@ -108,6 +109,109 @@ impl MemoryService {
             context,
             assets: AssetStore::new(assets_dir).await?,
         })
+    }
+
+    pub async fn set_avatar(&self, user_id: &str, bytes: &[u8]) -> anyhow::Result<String> {
+        let stored = self.assets.store_jpeg(user_id, bytes).await?;
+        let now = unix_time();
+        let mut transaction = self.context.pool().begin().await?;
+        let previous = sqlx::query("SELECT avatar_asset_id FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("用户不存在"))?
+            .get::<Option<String>, _>("avatar_asset_id");
+        sqlx::query(
+            "INSERT INTO assets(
+                id, user_id, sha256, mime_type, storage_key, width, height,
+                size_bytes, captured_at, created_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9)
+             ON CONFLICT(user_id, sha256) DO NOTHING",
+        )
+        .bind(&stored.id)
+        .bind(user_id)
+        .bind(&stored.sha256)
+        .bind(&stored.mime_type)
+        .bind(&stored.storage_key)
+        .bind(i64::from(stored.width))
+        .bind(i64::from(stored.height))
+        .bind(stored.size_bytes as i64)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        let row = sqlx::query("SELECT id FROM assets WHERE user_id = $1 AND sha256 = $2")
+            .bind(user_id)
+            .bind(&stored.sha256)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let asset_id = row.get::<String, _>("id");
+        sqlx::query("UPDATE users SET avatar_asset_id = $1 WHERE id = $2")
+            .bind(&asset_id)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        if let Some(previous) = previous.filter(|id| id != &asset_id) {
+            self.remove_asset_if_unreferenced(user_id, &previous)
+                .await?;
+        }
+        Ok(avatar_content_url(&asset_id))
+    }
+
+    pub async fn clear_avatar(&self, user_id: &str) -> anyhow::Result<bool> {
+        let mut transaction = self.context.pool().begin().await?;
+        let previous = sqlx::query("SELECT avatar_asset_id FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("用户不存在"))?
+            .get::<Option<String>, _>("avatar_asset_id");
+        let Some(previous) = previous else {
+            transaction.commit().await?;
+            return Ok(false);
+        };
+        sqlx::query("UPDATE users SET avatar_asset_id = NULL WHERE id = $1")
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        self.remove_asset_if_unreferenced(user_id, &previous)
+            .await?;
+        Ok(true)
+    }
+
+    async fn remove_asset_if_unreferenced(
+        &self,
+        user_id: &str,
+        asset_id: &str,
+    ) -> anyhow::Result<()> {
+        let references: i64 = sqlx::query_scalar(
+            "SELECT
+                (SELECT COUNT(*) FROM memory_assets WHERE asset_id = $1) +
+                (SELECT COUNT(*) FROM memory_items WHERE cover_asset_id = $1) +
+                (SELECT COUNT(*) FROM turn_attachments WHERE asset_id = $1) +
+                (SELECT COUNT(*) FROM todos WHERE cover_asset_id = $1) +
+                (SELECT COUNT(*) FROM project_resources WHERE asset_id = $1) +
+                (SELECT COUNT(*) FROM memory_evidence WHERE asset_id = $1) +
+                (SELECT COUNT(*) FROM users WHERE avatar_asset_id = $1)",
+        )
+        .bind(asset_id)
+        .fetch_one(self.context.pool())
+        .await?;
+        if references != 0 {
+            return Ok(());
+        }
+        let storage_key = sqlx::query_scalar::<_, String>(
+            "DELETE FROM assets WHERE id = $1 AND user_id = $2 RETURNING storage_key",
+        )
+        .bind(asset_id)
+        .bind(user_id)
+        .fetch_optional(self.context.pool())
+        .await?;
+        if let Some(storage_key) = storage_key {
+            self.assets.remove(&storage_key).await?;
+        }
+        Ok(())
     }
 
     pub async fn create(&self, request: CreateMemoryRequest) -> anyhow::Result<MemorySearchResult> {
@@ -724,11 +828,19 @@ impl MemoryService {
 
             for row in asset_rows {
                 let asset_id: String = row.get("id");
-                let references: i64 =
-                    sqlx::query_scalar("SELECT COUNT(*) FROM memory_assets WHERE asset_id = $1")
-                        .bind(&asset_id)
-                        .fetch_one(&mut *transaction)
-                        .await?;
+                let references: i64 = sqlx::query_scalar(
+                    "SELECT
+                        (SELECT COUNT(*) FROM memory_assets WHERE asset_id = $1) +
+                        (SELECT COUNT(*) FROM memory_items WHERE cover_asset_id = $1) +
+                        (SELECT COUNT(*) FROM turn_attachments WHERE asset_id = $1) +
+                        (SELECT COUNT(*) FROM todos WHERE cover_asset_id = $1) +
+                        (SELECT COUNT(*) FROM project_resources WHERE asset_id = $1) +
+                        (SELECT COUNT(*) FROM memory_evidence WHERE asset_id = $1) +
+                        (SELECT COUNT(*) FROM users WHERE avatar_asset_id = $1)",
+                )
+                .bind(&asset_id)
+                .fetch_one(&mut *transaction)
+                .await?;
                 if references == 0 {
                     sqlx::query("DELETE FROM assets WHERE id = $1 AND user_id = $2")
                         .bind(&asset_id)

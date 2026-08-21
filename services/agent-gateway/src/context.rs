@@ -9,7 +9,8 @@ use sqlx::{
 use uuid::Uuid;
 
 use crate::auth::{
-    AuthUser, hash_password, new_access_token, normalize_email, secret_hash, verify_password,
+    AuthUser, avatar_content_url, hash_password, new_access_token, normalize_email, secret_hash,
+    verify_password,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -240,7 +241,14 @@ impl ContextStore {
         .await?;
         let token = insert_auth_session(&mut transaction, &user_id, now, token_ttl_hours).await?;
         transaction.commit().await?;
-        Ok((AuthUser { id: user_id, email }, token))
+        Ok((
+            AuthUser {
+                id: user_id,
+                email,
+                avatar_url: None,
+            },
+            token,
+        ))
     }
 
     pub async fn login_user(
@@ -250,11 +258,12 @@ impl ContextStore {
         token_ttl_hours: i64,
     ) -> anyhow::Result<(AuthUser, String)> {
         let email = normalize_email(email)?;
-        let row = sqlx::query("SELECT id, password_hash FROM users WHERE email = $1")
-            .bind(&email)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("邮箱或密码错误"))?;
+        let row =
+            sqlx::query("SELECT id, password_hash, avatar_asset_id FROM users WHERE email = $1")
+                .bind(&email)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("邮箱或密码错误"))?;
         let password_hash = row.get::<String, _>("password_hash");
         let password = password.to_owned();
         let verified =
@@ -267,12 +276,22 @@ impl ContextStore {
         let mut transaction = self.pool.begin().await?;
         let token = insert_auth_session(&mut transaction, &user_id, now, token_ttl_hours).await?;
         transaction.commit().await?;
-        Ok((AuthUser { id: user_id, email }, token))
+        Ok((
+            AuthUser {
+                id: user_id,
+                email,
+                avatar_url: row
+                    .get::<Option<String>, _>("avatar_asset_id")
+                    .as_deref()
+                    .map(avatar_content_url),
+            },
+            token,
+        ))
     }
 
     pub async fn authenticate(&self, token: &str) -> anyhow::Result<Option<AuthUser>> {
         let row = sqlx::query(
-            "SELECT users.id, users.email FROM auth_sessions
+            "SELECT users.id, users.email, users.avatar_asset_id FROM auth_sessions
              JOIN users ON users.id = auth_sessions.user_id
              WHERE auth_sessions.token_hash = $1 AND auth_sessions.revoked_at IS NULL
              AND auth_sessions.expires_at > $2",
@@ -284,6 +303,10 @@ impl ContextStore {
         Ok(row.map(|row| AuthUser {
             id: row.get("id"),
             email: row.get("email"),
+            avatar_url: row
+                .get::<Option<String>, _>("avatar_asset_id")
+                .as_deref()
+                .map(avatar_content_url),
         }))
     }
 

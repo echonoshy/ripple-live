@@ -10,6 +10,11 @@ use uuid::Uuid;
 pub struct AuthUser {
     pub id: String,
     pub email: String,
+    pub avatar_url: Option<String>,
+}
+
+pub fn avatar_content_url(asset_id: &str) -> String {
+    format!("/v1/assets/{asset_id}/content")
 }
 
 pub fn normalize_email(email: &str) -> anyhow::Result<String> {

@@ -7,6 +7,7 @@ use std::{
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -789,6 +790,10 @@ fn app(state: AppState) -> Router {
         .route("/v1/auth/register", post(register))
         .route("/v1/auth/login", post(login))
         .route("/v1/auth/me", get(me))
+        .route(
+            "/v1/auth/me/avatar",
+            axum::routing::put(upload_avatar).delete(clear_avatar),
+        )
         .route("/v1/auth/logout", post(logout))
         .route(
             "/v1/profile",
@@ -1016,6 +1021,41 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match authenticated_user(&state, &headers).await {
         Ok(user) => Json(json!({"user": user})).into_response(),
         Err(response) => response,
+    }
+}
+
+async fn upload_avatar(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let mut user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    if headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        != Some("image/jpeg")
+    {
+        return api_error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "头像必须是 JPEG 图片");
+    }
+    match state.memories.set_avatar(&user.id, &body).await {
+        Ok(avatar_url) => {
+            user.avatar_url = Some(avatar_url);
+            Json(json!({"user": user})).into_response()
+        }
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn clear_avatar(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let mut user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.memories.clear_avatar(&user.id).await {
+        Ok(_) => {
+            user.avatar_url = None;
+            Json(json!({"user": user})).into_response()
+        }
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
 }
 
@@ -3755,6 +3795,60 @@ mod tests {
     async fn json_body(response: Response) -> Value {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn avatar_route_persists_and_serves_the_authenticated_users_image() {
+        let (_directory, state, token, _, _) = test_state().await;
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(8, 8)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+
+        let uploaded = app(state.clone())
+            .oneshot(
+                Request::put("/v1/auth/me/avatar")
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "image/jpeg")
+                    .body(Body::from(jpeg.into_inner()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let avatar_url = json_body(uploaded).await["user"]["avatar_url"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(avatar_url.starts_with("/v1/assets/"));
+
+        let me = app(state.clone())
+            .oneshot(authenticated_request("GET", "/v1/auth/me", &token, ""))
+            .await
+            .unwrap();
+        assert_eq!(json_body(me).await["user"]["avatar_url"], avatar_url);
+
+        let image = app(state.clone())
+            .oneshot(authenticated_request("GET", &avatar_url, &token, ""))
+            .await
+            .unwrap();
+        assert_eq!(image.status(), StatusCode::OK);
+        assert_eq!(
+            image.headers()[axum::http::header::CONTENT_TYPE],
+            "image/jpeg"
+        );
+
+        let cleared = app(state)
+            .oneshot(authenticated_request(
+                "DELETE",
+                "/v1/auth/me/avatar",
+                &token,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(cleared.status(), StatusCode::OK);
+        assert!(json_body(cleared).await["user"]["avatar_url"].is_null());
     }
 
     #[tokio::test]

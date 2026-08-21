@@ -1,0 +1,2 @@
+ALTER TABLE users
+ADD COLUMN avatar_asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL;
