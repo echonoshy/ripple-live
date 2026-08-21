@@ -6,7 +6,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const sourceHash = 'f52273c5c3e08ff85e5afd8ae5de8ab2014951fd03619d769b42537db1885872'
+const sourceHash = '78dccdf08b07a642c2fbbdce7a1d965b8935512d7465b34a7790b4d09b6aad4f'
 
 function readPngInfo(file) {
   const bytes = readFileSync(file)
@@ -32,7 +32,7 @@ test('mobile package has the supplied icon and iOS media permissions', () => {
   const sourceBytes = readFileSync(source)
   assert.equal(createHash('sha256').update(sourceBytes).digest('hex'), sourceHash)
   const { width, height } = readPngInfo(source)
-  assert.deepEqual({ width, height }, { width: 1206, height: 1206 })
+  assert.deepEqual({ width, height }, { width: 1024, height: 1024 })
   expectRgba(source)
 
   expectSquare(path.join(appRoot, 'src-tauri/icons/icon.png'), 512)

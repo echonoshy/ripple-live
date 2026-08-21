@@ -20,7 +20,7 @@ resize_android_foreground() {
   temporary_image="$temporary_directory/foreground.png"
 
   /usr/bin/sips -z "$safe_size" "$safe_size" "$SOURCE" --out "$temporary_image" >/dev/null 2>&1
-  /usr/bin/sips -p "$canvas_size" "$canvas_size" --padColor 15131d \
+  /usr/bin/sips -p "$canvas_size" "$canvas_size" --padColor 09091d \
     "$temporary_image" --out "$output" >/dev/null 2>&1
   rm -rf "$temporary_directory"
 }
