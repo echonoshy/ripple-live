@@ -37,6 +37,7 @@ TTS_SITE="$TTS_RUNTIME/lib/python3.12/site-packages"
 TTS_LIBRARY_PATH="$TTS_CUDA_HOME/targets/x86_64-linux/lib:$TTS_SITE/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 GATEWAY_DATA_DIR="${RIPPLE_DATA_DIR:-$REPO_ROOT/runtime-data/agent-gateway}"
 DATABASE_URL="${RIPPLE_DATABASE_URL:-postgres://lake@127.0.0.1:5432/ripple_live}"
+POSTGRES_ROOT="${RIPPLE_POSTGRES_ROOT:-$REPO_ROOT/runtime-data/postgres}"
 SEARCH_PROXY="${RIPPLE_SEARCH_PROXY:-${https_proxy:-${HTTPS_PROXY:-}}}"
 TOOL_CACHE_DB="${RIPPLE_TOOL_CACHE_DB:-$GATEWAY_DATA_DIR/tool-cache.sqlite3}"
 if [[ "$GATEWAY_DATA_DIR" != /* ]]; then
@@ -44,6 +45,9 @@ if [[ "$GATEWAY_DATA_DIR" != /* ]]; then
 fi
 if [[ "$TOOL_CACHE_DB" != /* ]]; then
   TOOL_CACHE_DB="$REPO_ROOT/$TOOL_CACHE_DB"
+fi
+if [[ "$POSTGRES_ROOT" != /* ]]; then
+  POSTGRES_ROOT="$REPO_ROOT/$POSTGRES_ROOT"
 fi
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
@@ -106,6 +110,21 @@ warm_tts() {
 
   echo "warning: tts did not become healthy in time; skipping warm-up" >&2
 }
+
+POSTGRES_BIN="$POSTGRES_ROOT/runtime/usr/lib/postgresql/16/bin/postgres"
+POSTGRES_DATA="$POSTGRES_ROOT/data"
+POSTGRES_SOCKET="$POSTGRES_ROOT/socket"
+if [[ ! -x "$POSTGRES_BIN" || ! -d "$POSTGRES_DATA" ]]; then
+  echo "PostgreSQL runtime is not installed under $POSTGRES_ROOT" >&2
+  exit 1
+fi
+mkdir -p "$POSTGRES_SOCKET"
+start_process postgres \
+  "$POSTGRES_BIN" \
+  -D "$POSTGRES_DATA" \
+  -h 127.0.0.1 \
+  -p 5432 \
+  -k "$POSTGRES_SOCKET"
 
 start_process asr env CUDA_VISIBLE_DEVICES="$ASR_GPU" \
   "$ASR_RUNTIME/bin/qwen-asr-serve" \

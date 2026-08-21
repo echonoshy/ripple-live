@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_DIR="$SCRIPT_DIR/run"
 
-for name in gateway tts agent asr; do
+for name in gateway tts agent asr postgres; do
   unit="ripple-agent-$name.service"
   if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
     systemctl --user stop "$unit"
