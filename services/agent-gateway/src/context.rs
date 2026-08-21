@@ -34,6 +34,15 @@ pub struct ProjectRecord {
     pub archived_at: Option<f64>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct UserProfile {
+    pub ai_identity: String,
+    pub user_identity: String,
+    pub preferred_name: String,
+    pub basic_memory: String,
+    pub updated_at: Option<f64>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LibraryScope {
@@ -304,6 +313,49 @@ impl ContextStore {
         .await?;
         self.touch_session(&id).await?;
         Ok(id)
+    }
+
+    pub async fn user_profile(&self, user_id: &str) -> anyhow::Result<UserProfile> {
+        let row = sqlx::query(
+            "SELECT ai_identity, user_identity, preferred_name, basic_memory, updated_at
+             FROM user_profiles WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(user_profile_from_row).unwrap_or_default())
+    }
+
+    pub async fn update_user_profile(
+        &self,
+        user_id: &str,
+        ai_identity: &str,
+        user_identity: &str,
+        preferred_name: &str,
+        basic_memory: &str,
+    ) -> anyhow::Result<UserProfile> {
+        validate_user_profile(ai_identity, user_identity, preferred_name, basic_memory)?;
+        let now = unix_time();
+        sqlx::query(
+            "INSERT INTO user_profiles(
+                user_id, ai_identity, user_identity, preferred_name, basic_memory, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT(user_id) DO UPDATE SET
+                ai_identity = EXCLUDED.ai_identity,
+                user_identity = EXCLUDED.user_identity,
+                preferred_name = EXCLUDED.preferred_name,
+                basic_memory = EXCLUDED.basic_memory,
+                updated_at = EXCLUDED.updated_at",
+        )
+        .bind(user_id)
+        .bind(ai_identity.trim())
+        .bind(user_identity.trim())
+        .bind(preferred_name.trim())
+        .bind(basic_memory.trim())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        self.user_profile(user_id).await
     }
 
     pub async fn create_project(
@@ -1153,6 +1205,37 @@ fn project_from_row(row: sqlx::postgres::PgRow) -> ProjectRecord {
     }
 }
 
+fn user_profile_from_row(row: sqlx::postgres::PgRow) -> UserProfile {
+    UserProfile {
+        ai_identity: row.get("ai_identity"),
+        user_identity: row.get("user_identity"),
+        preferred_name: row.get("preferred_name"),
+        basic_memory: row.get("basic_memory"),
+        updated_at: Some(row.get("updated_at")),
+    }
+}
+
+fn validate_user_profile(
+    ai_identity: &str,
+    user_identity: &str,
+    preferred_name: &str,
+    basic_memory: &str,
+) -> anyhow::Result<()> {
+    if ai_identity.trim().chars().count() > 2_000 {
+        anyhow::bail!("Ripple 身份设定不能超过 2000 个字符");
+    }
+    if user_identity.trim().chars().count() > 2_000 {
+        anyhow::bail!("使用者身份设定不能超过 2000 个字符");
+    }
+    if preferred_name.trim().chars().count() > 80 {
+        anyhow::bail!("称呼不能超过 80 个字符");
+    }
+    if basic_memory.trim().chars().count() > 4_000 {
+        anyhow::bail!("基础资料不能超过 4000 个字符");
+    }
+    Ok(())
+}
+
 fn validate_project_fields(
     name: &str,
     description: &str,
@@ -1227,6 +1310,34 @@ mod tests {
             store.recall("s1", "乌龙", 5).await.unwrap(),
             vec!["用户喜欢乌龙茶"]
         );
+    }
+
+    #[tokio::test]
+    async fn stores_user_profile_per_user() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ContextStore::open(&directory.path().join("profile.sqlite3"))
+            .await
+            .unwrap();
+        let user = registered_user(&store, "profile@example.com", "profile-invite").await;
+
+        assert_eq!(
+            store.user_profile(&user.id).await.unwrap(),
+            UserProfile::default()
+        );
+        let profile = store
+            .update_user_profile(
+                &user.id,
+                "你是 Ripple，一位温柔直接的长期伙伴",
+                "我是独立开发者",
+                "Lake",
+                "我偏好先看结论，再看细节",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(profile.preferred_name, "Lake");
+        assert!(profile.updated_at.is_some());
+        assert_eq!(store.user_profile(&user.id).await.unwrap(), profile);
     }
 
     #[tokio::test]

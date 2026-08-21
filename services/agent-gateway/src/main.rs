@@ -775,7 +775,13 @@ async fn main() -> anyhow::Result<()> {
 fn app(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(HeaderValue::from_static("*"))
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
         .allow_headers(tower_http::cors::Any);
     Router::new()
         .route("/health", get(health))
@@ -784,6 +790,10 @@ fn app(state: AppState) -> Router {
         .route("/v1/auth/login", post(login))
         .route("/v1/auth/me", get(me))
         .route("/v1/auth/logout", post(logout))
+        .route(
+            "/v1/profile",
+            get(get_user_profile).put(update_user_profile),
+        )
         .route("/v1/projects", get(list_projects).post(create_project))
         .route(
             "/v1/projects/{project_id}",
@@ -941,6 +951,18 @@ struct ProjectPatch {
     archived: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct UserProfileUpdate {
+    #[serde(default)]
+    ai_identity: String,
+    #[serde(default)]
+    user_identity: String,
+    #[serde(default)]
+    preferred_name: String,
+    #[serde(default)]
+    basic_memory: String,
+}
+
 #[derive(Deserialize)]
 struct ResponsesRequest {
     input: Value,
@@ -1005,6 +1027,42 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+async fn get_user_profile(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.context.user_profile(&user.id).await {
+        Ok(profile) => Json(json!({"data": profile})).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn update_user_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UserProfileUpdate>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .context
+        .update_user_profile(
+            &user.id,
+            &request.ai_identity,
+            &request.user_identity,
+            &request.preferred_name,
+            &request.basic_memory,
+        )
+        .await
+    {
+        Ok(profile) => Json(json!({"data": profile})).into_response(),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
 }
 
 async fn create_project(
@@ -3878,6 +3936,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn profile_routes_persist_and_require_authentication() {
+        let (_directory, state, token, _, _) = test_state().await;
+
+        let unauthorized = app(state.clone())
+            .oneshot(Request::get("/v1/profile").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let empty = app(state.clone())
+            .oneshot(authenticated_request("GET", "/v1/profile", &token, ""))
+            .await
+            .unwrap();
+        assert_eq!(empty.status(), StatusCode::OK);
+        assert_eq!(json_body(empty).await["data"]["preferred_name"], "");
+
+        let updated = app(state.clone())
+            .oneshot(authenticated_request(
+                "PUT",
+                "/v1/profile",
+                &token,
+                r#"{
+                    "ai_identity":"你是温柔直接的长期伙伴",
+                    "user_identity":"我是独立开发者",
+                    "preferred_name":"Lake",
+                    "basic_memory":"回答先给结论"
+                }"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(updated.status(), StatusCode::OK);
+        let updated = json_body(updated).await;
+        assert_eq!(updated["data"]["preferred_name"], "Lake");
+        assert!(updated["data"]["updated_at"].is_number());
+
+        let loaded = app(state)
+            .oneshot(authenticated_request("GET", "/v1/profile", &token, ""))
+            .await
+            .unwrap();
+        assert_eq!(loaded.status(), StatusCode::OK);
+        assert_eq!(json_body(loaded).await["data"], updated["data"]);
     }
 
     #[tokio::test]
