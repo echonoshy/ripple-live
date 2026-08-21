@@ -3,8 +3,8 @@
   display: block;
   width: 232px;
   max-width: calc(100vw - 64px);
-  aspect-ratio: 1;
-  border-radius: 50%;
+  aspect-ratio: 192 / 208;
+  border-radius: 0;
   background: transparent;
   opacity: 1;
   transform: scale(1);
@@ -16,47 +16,20 @@
   will-change: transform, opacity, filter;
 }
 
-.live-orb-canvas.is-idle,
-.live-orb-fallback.is-idle,
-.live-orb-canvas.is-connecting,
-.live-orb-fallback.is-connecting,
-.live-orb-canvas.is-listening,
-.live-orb-fallback.is-listening,
-.live-orb-canvas.is-thinking,
-.live-orb-fallback.is-thinking,
-.live-orb-canvas.is-tool,
-.live-orb-fallback.is-tool,
-.live-orb-canvas.is-speaking,
-.live-orb-fallback.is-speaking {
-  animation: live-orb-idle-breath 7.2s ease-in-out infinite alternate;
-}
-
 .live-orb-fallback {
-  position: relative;
-  isolation: isolate;
-  background: transparent;
+  background-image: url('../assets/starry-avatar.webp');
+  background-position: 0 0;
+  background-repeat: no-repeat;
+  background-size: 800% 1100%;
   box-shadow: none;
 }
 
-.live-orb-fallback::before {
-  position: absolute;
-  inset: 12.5%;
-  border-radius: 50%;
-  background:
-    radial-gradient(circle at 38% 15%, #f4fff9 0%, #b7f2ff 32%, transparent 68%),
-    radial-gradient(circle at 60% 38%, rgb(112 225 255 / 92%) 0%, transparent 62%),
-    radial-gradient(circle at 52% 88%, #0870ff 0%, #1194ff 72%);
-  content: '';
-}
-
-.live-orb-fallback::after {
-  position: absolute;
-  z-index: -1;
-  inset: 12.5%;
-  border-radius: 50%;
-  box-shadow: 0 0 36px 16px rgb(155 195 255 / 5%);
-  content: '';
-}
+.live-orb-fallback.is-connecting,
+.live-orb-fallback.is-listening { background-position: 0 60%; }
+.live-orb-fallback.is-thinking { background-position: 0 70%; }
+.live-orb-fallback.is-tool { background-position: 0 80%; }
+.live-orb-fallback.is-ended { background-position: 0 30%; }
+.live-orb-fallback.is-error { background-position: 0 50%; }
 
 .live-orb-canvas.is-connecting,
 .live-orb-fallback.is-connecting {
@@ -92,24 +65,14 @@
 
 .live-orb-canvas.is-ended,
 .live-orb-fallback.is-ended {
-  opacity: 0;
-  transform: scale(0.75);
+  opacity: 0.82;
+  transform: scale(0.94);
 }
 
 .live-orb-canvas.is-error,
 .live-orb-fallback.is-error {
   filter: saturate(0.42) brightness(0.82);
   transform: scale(0.92);
-}
-
-@keyframes live-orb-idle-breath {
-  from {
-    transform: scale(0.992);
-  }
-
-  to {
-    transform: scale(1.008);
-  }
 }
 
 @keyframes live-orb-interrupt-release {
@@ -135,6 +98,146 @@
     transform: none;
     transition-property: opacity, filter;
   }
+}
+
+/* Warm commercial call surface, aligned with the product-wide token system. */
+.call-screen.live-call-screen {
+  background:
+    radial-gradient(circle at 50% 37%, rgb(177 105 62 / 20%), transparent 34%),
+    radial-gradient(circle at 9% 11%, rgb(122 74 109 / 12%), transparent 25%),
+    var(--live-bg);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+}
+
+.live-call-screen::before {
+  background-image:
+    radial-gradient(circle, rgb(255 238 187 / 76%) 0 1px, transparent 1.4px),
+    radial-gradient(circle, rgb(196 174 255 / 50%) 0 1px, transparent 1.4px);
+}
+
+.live-call-screen .call-icon {
+  border-color: var(--line);
+  background: rgb(25 25 42 / 78%);
+  color: var(--text-secondary);
+}
+
+.live-call-screen .call-title strong {
+  color: var(--accent-strong);
+  font-weight: var(--weight-semibold);
+}
+
+.live-call-screen .call-title strong > i {
+  background: var(--accent);
+  box-shadow: 0 0 12px rgb(255 205 105 / 85%);
+}
+
+.live-call-screen .call-title span,
+.call-control-item {
+  color: var(--text-secondary);
+}
+
+.live-call-screen .live-orb-wrap::before {
+  border-color: rgb(255 211 137 / 14%);
+  background:
+    radial-gradient(circle, rgb(172 105 67 / 14%), transparent 55%),
+    repeating-radial-gradient(circle, transparent 0 31px, rgb(255 211 137 / 9%) 32px 33px);
+}
+
+.live-call-screen .live-orb-wrap::after {
+  border-color: rgb(255 211 137 / 72%);
+  background: radial-gradient(ellipse, rgb(174 112 70 / 20%), transparent 68%);
+  box-shadow:
+    0 0 0 8px rgb(255 209 125 / 5%),
+    inset 0 0 0 9px rgb(172 150 255 / 5%),
+    inset 0 0 0 10px rgb(172 150 255 / 38%),
+    0 0 24px rgb(167 102 62 / 18%);
+}
+
+.live-state-label {
+  color: var(--accent);
+  font-weight: var(--weight-medium);
+}
+
+.live-state-label::before {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px rgb(255 209 125 / 9%);
+}
+
+.live-assistant-caption,
+.live-caption[data-caption-source='user'] {
+  border-color: var(--line);
+}
+
+.live-assistant-caption {
+  background: linear-gradient(130deg, rgb(53 39 44 / 96%), rgb(27 25 37 / 96%));
+  color: var(--accent-strong);
+}
+
+.live-assistant-caption::before {
+  color: var(--accent);
+}
+
+.live-caption[data-caption-source='user'] {
+  border-color: rgb(184 164 255 / 22%);
+  background: linear-gradient(120deg, rgb(64 55 96 / 76%), rgb(37 34 62 / 86%));
+  color: #f3eeff;
+}
+
+.live-call-screen .control-button {
+  border-color: var(--line);
+  background: rgb(28 27 44 / 94%);
+  color: var(--text-primary);
+}
+
+.live-call-screen .control-button:hover {
+  border-color: rgb(255 211 137 / 26%);
+  background: var(--surface-strong);
+}
+
+.live-call-screen .control-button.is-active {
+  border-color: var(--accent);
+  background: linear-gradient(145deg, #ffe5a5, #ffc970);
+  color: #241b18;
+}
+
+/* Calls stay immersive even though the rest of the product uses daylight tokens. */
+.call-screen.live-call-screen {
+  color-scheme: dark;
+  --live-bg: #080a14;
+  --app-bg: #080a14;
+  --surface: #121422;
+  --surface-raised: #191b2c;
+  --surface-strong: #24263a;
+  --text-primary: #fff2d8;
+  --text-secondary: #c7bfbd;
+  --text-tertiary: #918b98;
+  --line: rgb(255 222 169 / 14%);
+  --accent: #ffd17d;
+  --accent-strong: #ffe2a7;
+  --accent-soft: rgb(255 209 125 / 12%);
+}
+
+/* Calls intentionally remain a dark, focused companion space. */
+.call-screen.live-call-screen {
+  color-scheme: dark;
+  --live-bg: #080a14;
+  --app-bg: #080a14;
+  --surface: #121422;
+  --surface-raised: #191b2c;
+  --surface-strong: #24263a;
+  --text-primary: #fff2d8;
+  --text-secondary: rgb(255 239 213 / 68%);
+  --text-tertiary: rgb(255 239 213 / 43%);
+  --line: rgb(255 211 137 / 15%);
+  --accent: #ffd17d;
+  --accent-strong: #ffe6ad;
+  --accent-soft: rgb(255 209 125 / 12%);
+}
+
+.live-call-screen .end-button {
+  background: linear-gradient(145deg, #ff7474, #e94d5b);
+  box-shadow: 0 12px 30px rgb(204 43 57 / 26%);
 }
 
 .call-screen.live-call-screen {
@@ -788,7 +891,7 @@
   }
 }
 
-/* Quiet, conversation-first shell. Ripple's orb remains the only vivid brand surface. */
+/* Quiet, conversation-first shell. The live pet is the primary brand surface. */
 .call-screen.live-call-screen {
   background:
     radial-gradient(circle at 50% 43%, rgb(52 91 142 / 16%), transparent 38%),
@@ -860,4 +963,447 @@
 
 .live-call-screen .live-error {
   color: #e6c58d;
+}
+
+/* Planet call stage: the ring moves gently while the pet carries the conversation state. */
+.call-screen.live-call-screen {
+  background:
+    radial-gradient(circle at 50% 43%, rgb(104 76 220 / 24%), transparent 38%),
+    radial-gradient(circle at 18% 19%, rgb(34 170 211 / 11%), transparent 25%),
+    var(--live-bg);
+}
+
+.call-screen.live-call-screen::before {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(circle, rgb(255 240 183 / 76%) 0 1px, transparent 1.4px),
+    radial-gradient(circle, rgb(115 214 255 / 58%) 0 1px, transparent 1.4px);
+  background-position: 13px 19px, 67px 89px;
+  background-size: 103px 127px, 149px 173px;
+  content: '';
+  opacity: 0.46;
+  mask-image: linear-gradient(to bottom, black, rgb(0 0 0 / 60%) 72%, transparent);
+}
+
+.live-orb-wrap {
+  position: relative;
+  isolation: isolate;
+}
+
+.live-orb-wrap::before {
+  display: none;
+}
+
+.live-orb-wrap::after {
+  display: none;
+}
+
+.live-orb-wrap > .live-orb-canvas,
+.live-orb-wrap > .live-orb-fallback {
+  position: relative;
+  z-index: 2;
+  width: 204px;
+}
+
+.live-state-label {
+  color: rgb(255 218 143 / 82%);
+}
+
+.live-call-screen .control-button {
+  border-color: rgb(169 150 255 / 21%);
+  background: rgb(25 25 61 / 92%);
+  color: #dad5ff;
+}
+
+.live-call-screen .control-button:hover {
+  border-color: rgb(194 181 255 / 30%);
+  background: rgb(34 33 78 / 94%);
+}
+
+.live-call-screen .control-button.is-active {
+  border-color: rgb(255 222 156 / 42%);
+  background: #ffd984;
+  color: #281934;
+}
+
+@keyframes live-planet-ring {
+  from { transform: rotate(-15deg) scaleX(0.96); }
+  to { transform: rotate(-9deg) scaleX(1.03); }
+}
+
+@keyframes live-figma-planet-frames {
+  0%, 49% { background-position: left center; }
+  50%, 100% { background-position: right center; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-orb-wrap::before,
+  .live-orb-wrap::after { animation: none; }
+
+  .live-call-screen.has-results .live-stage {
+    transform: none;
+    transition: none;
+  }
+
+  .live-call-screen.has-results .live-orb-canvas,
+  .live-call-screen.has-results .live-orb-fallback {
+    animation: none;
+    transform: scale(0.70);
+    transition: none;
+  }
+}
+
+/* Ripple observatory: active conversation product surface. */
+.call-screen.live-call-screen {
+  padding:
+    max(10px, env(safe-area-inset-top))
+    18px
+    calc(112px + max(10px, env(safe-area-inset-bottom)));
+  background:
+    radial-gradient(circle at 50% 37%, rgb(78 86 199 / 22%), transparent 32%),
+    radial-gradient(circle at 9% 11%, rgb(35 92 157 / 12%), transparent 24%),
+    #070a18;
+  color: #fff1d5;
+}
+
+.live-call-screen .call-header {
+  min-height: 54px;
+}
+
+.live-call-screen .call-icon {
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgb(159 166 226 / 18%);
+  background: rgb(20 24 48 / 76%);
+  color: #e5e6f6;
+}
+
+.live-call-screen .call-back {
+  justify-self: start;
+}
+
+.live-call-screen .call-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.live-call-screen .call-title strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #ffdd98;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.live-call-screen .call-title strong > i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ffd174;
+  box-shadow: 0 0 12px rgb(255 205 105 / 85%);
+}
+
+.live-call-screen .call-title span {
+  color: rgb(255 236 205 / 58%);
+  font-size: 12px;
+}
+
+.live-call-screen .live-stage {
+  justify-content: flex-start;
+  padding: 0 0 8px;
+}
+
+.live-call-screen .live-orb-wrap {
+  position: relative;
+  isolation: isolate;
+  width: 100%;
+  height: clamp(260px, 39dvh, 345px);
+  flex: 0 0 auto;
+  transform: none;
+}
+
+.live-call-screen .live-orb-wrap::before {
+  display: block;
+  position: absolute;
+  z-index: -1;
+  width: min(92vw, 420px);
+  aspect-ratio: 1;
+  border: 1px solid rgb(126 138 235 / 16%);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, rgb(85 96 214 / 15%), transparent 55%),
+    repeating-radial-gradient(circle, transparent 0 31px, rgb(121 132 229 / 10%) 32px 33px);
+  content: '';
+  animation: live-observatory-breathe 5s ease-in-out infinite;
+}
+
+.live-call-screen .live-orb-wrap::after {
+  display: block;
+  position: absolute;
+  z-index: -1;
+  bottom: 12px;
+  width: min(92%, 390px);
+  height: 48px;
+  border: 1.5px solid #7f86ff;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgb(90 102 223 / 22%), transparent 68%);
+  box-shadow:
+    0 0 0 8px rgb(120 127 255 / 6%),
+    inset 0 0 0 9px rgb(255 210 128 / 5%),
+    inset 0 0 0 10px rgb(255 210 128 / 50%),
+    0 0 24px rgb(110 122 255 / 18%);
+  content: '';
+  transform: perspective(220px) rotateX(58deg);
+}
+
+.live-orb-wrap > .live-orb-canvas,
+.live-orb-wrap > .live-orb-fallback {
+  width: clamp(190px, 52vw, 228px);
+  max-width: none;
+}
+
+.live-feedback {
+  display: flex;
+  width: min(100%, 390px);
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  margin-top: -4px;
+  gap: 8px;
+}
+
+.live-status {
+  min-height: 19px;
+}
+
+.live-state-label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #aeb4ff;
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.live-state-label::before {
+  width: 10px;
+  height: 10px;
+  border: 2px solid #7e86ff;
+  border-radius: 50%;
+  content: '';
+  box-shadow: 0 0 0 4px rgb(122 132 255 / 8%);
+}
+
+.live-assistant-caption,
+.live-caption[data-caption-source='user'] {
+  max-height: 82px;
+  overflow: hidden;
+  border: 1px solid rgb(166 171 220 / 18%);
+  line-height: 1.5;
+  text-shadow: none;
+  text-wrap: pretty;
+}
+
+.live-assistant-caption {
+  position: relative;
+  width: 100%;
+  margin: 0;
+  padding: 13px 15px 13px 45px;
+  border-radius: 22px 22px 22px 7px;
+  background: linear-gradient(130deg, rgb(28 33 63 / 94%), rgb(14 18 39 / 94%));
+  color: #ffe4ad;
+  font-size: 14px;
+  text-align: left;
+}
+
+.live-assistant-caption::before {
+  position: absolute;
+  top: 13px;
+  left: 14px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  color: #ffd47f;
+  content: '✦';
+}
+
+.live-caption {
+  width: auto;
+  min-height: 0;
+  max-height: none;
+  margin: 0;
+  color: transparent;
+  font-size: 14px;
+}
+
+.live-caption[data-caption-source='user'] {
+  align-self: flex-end;
+  width: fit-content;
+  max-width: 88%;
+  padding: 12px 15px;
+  border-color: rgb(127 136 255 / 23%);
+  border-radius: 22px 22px 7px 22px;
+  background: linear-gradient(120deg, rgb(62 67 137 / 74%), rgb(31 36 83 / 82%));
+  color: #f2f0ff;
+  text-align: left;
+}
+
+.live-call-screen .call-controls {
+  right: auto;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  left: 50%;
+  width: min(calc(100% - 36px), 360px);
+  min-height: 82px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 0 8px;
+  transform: translateX(-50%);
+}
+
+.call-control-item {
+  display: grid;
+  min-width: 78px;
+  justify-items: center;
+  gap: 7px;
+  color: rgb(229 230 247 / 58%);
+  font-size: 10px;
+}
+
+.live-call-screen .control-button,
+.live-call-screen .end-button {
+  width: 58px;
+  height: 58px;
+  box-shadow: 0 10px 28px rgb(0 0 0 / 26%);
+}
+
+.live-call-screen .control-button {
+  border-color: rgb(157 165 226 / 20%);
+  background: rgb(22 27 52 / 92%);
+  color: #e2e4f7;
+}
+
+.live-call-screen .control-button.is-active {
+  border-color: #ffd47c;
+  background: #ffdc96;
+  color: #171526;
+}
+
+.live-call-screen .end-button {
+  background: linear-gradient(145deg, #ff635f, #ed3e4d);
+  box-shadow: 0 12px 30px rgb(204 43 57 / 28%);
+}
+
+.live-call-screen .live-output-tray {
+  z-index: 6;
+  margin-bottom: 8px;
+  padding-bottom: 2px;
+}
+
+@keyframes live-observatory-breathe {
+  0%, 100% { opacity: 0.72; transform: scale(0.98); }
+  50% { opacity: 1; transform: scale(1.015); }
+}
+
+@media (max-height: 720px) {
+  .live-call-screen .live-orb-wrap { height: 230px; }
+  .live-orb-wrap > .live-orb-canvas,
+  .live-orb-wrap > .live-orb-fallback { width: 170px; }
+  .live-call-screen .live-orb-wrap::after { bottom: 4px; }
+  .live-assistant-caption { max-height: 64px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-call-screen .live-orb-wrap::before { animation: none; }
+
+  .live-call-screen.has-results .live-stage {
+    transform: none;
+    transition: none;
+  }
+
+  .live-call-screen.has-results .live-orb-canvas,
+  .live-call-screen.has-results .live-orb-fallback {
+    animation: none;
+    transform: scale(0.70);
+    transition: none;
+  }
+}
+
+/* Final warm call cascade. */
+.call-screen.live-call-screen {
+  background:
+    radial-gradient(circle at 50% 37%, rgb(177 105 62 / 20%), transparent 34%),
+    radial-gradient(circle at 9% 11%, rgb(122 74 109 / 12%), transparent 25%),
+    var(--live-bg);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+}
+
+.live-call-screen .call-icon {
+  border-color: var(--line);
+  background: rgb(25 25 42 / 78%);
+  color: var(--text-secondary);
+}
+
+.live-call-screen .call-title strong,
+.live-state-label {
+  color: var(--accent);
+  font-weight: var(--weight-semibold);
+}
+
+.live-call-screen .call-title strong > i {
+  background: var(--accent);
+}
+
+.live-call-screen .live-orb-wrap::before {
+  border-color: rgb(255 211 137 / 14%);
+  background:
+    radial-gradient(circle, rgb(172 105 67 / 14%), transparent 55%),
+    repeating-radial-gradient(circle, transparent 0 31px, rgb(255 211 137 / 9%) 32px 33px);
+}
+
+.live-call-screen .live-orb-wrap::after {
+  border-color: rgb(255 211 137 / 72%);
+  background: radial-gradient(ellipse, rgb(174 112 70 / 20%), transparent 68%);
+  box-shadow:
+    0 0 0 8px rgb(255 209 125 / 5%),
+    inset 0 0 0 9px rgb(172 150 255 / 5%),
+    inset 0 0 0 10px rgb(172 150 255 / 38%),
+    0 0 24px rgb(167 102 62 / 18%);
+}
+
+.live-state-label::before {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px rgb(255 209 125 / 9%);
+}
+
+.live-assistant-caption {
+  border-color: var(--line);
+  background: linear-gradient(130deg, rgb(53 39 44 / 96%), rgb(27 25 37 / 96%));
+  color: var(--accent-strong);
+}
+
+.live-caption[data-caption-source='user'] {
+  border-color: rgb(184 164 255 / 22%);
+  background: linear-gradient(120deg, rgb(64 55 96 / 76%), rgb(37 34 62 / 86%));
+  color: #f3eeff;
+}
+
+.live-call-screen .control-button {
+  border-color: var(--line);
+  background: rgb(28 27 44 / 94%);
+  color: var(--text-primary);
+}
+
+.live-call-screen .control-button.is-active {
+  border-color: var(--accent);
+  background: linear-gradient(145deg, #ffe5a5, #ffc970);
+  color: #241b18;
 }

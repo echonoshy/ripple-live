@@ -21,6 +21,7 @@ import {
   Video,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import type { ChangeEvent } from 'react'
 import './App.css'
 import './components/AppNavigation.css'
 import appIcon from '../src-tauri/icons/icon.png'
@@ -42,6 +43,7 @@ import {
   memoryMutation,
   renameConversation,
   register,
+  uploadUserAvatar,
   updateMemory,
   todos,
   updateTodo,
@@ -54,6 +56,7 @@ import {
   type VisualMemory,
 } from './api'
 import { LibraryActions } from './components/LibraryActions'
+import { AvatarEditor } from './components/AvatarEditor'
 import { AppDrawer, type AppDestination } from './components/AppDrawer'
 import { ConversationHome } from './components/ConversationHome'
 import {
@@ -65,6 +68,7 @@ import { LibrarySection } from './components/LibrarySection'
 import { LibraryToolbar } from './components/LibraryToolbar'
 import { MarkdownContent } from './components/MarkdownContent'
 import { PersonalizationSection } from './components/PersonalizationSection'
+import { UserAvatar } from './components/UserAvatar'
 import {
   groupLibraryItems,
   libraryOptionsForView,
@@ -95,6 +99,7 @@ import {
   type RippleSignal,
   type RippleSignalId,
 } from './live/ripple'
+import { useEdgeSwipeBack } from './edgeSwipeBack'
 import { LiveMedia } from './media/LiveMedia'
 import { notifyDueTodos } from './reminders'
 import {
@@ -270,6 +275,10 @@ export default function App() {
   const [invitationCode, setInvitationCode] = useState('')
   const [authError, setAuthError] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
+  const [avatarFile, setAvatarFile] = useState<File | null>(null)
+  const [avatarBusy, setAvatarBusy] = useState(false)
+  const [avatarError, setAvatarError] = useState('')
+  const [avatarNotice, setAvatarNotice] = useState('')
   const [historyItems, setHistoryItems] = useState<ConversationSummary[]>([])
   const [historyMessages, setHistoryMessages] = useState<ConversationMessage[]>([])
   const [historyBusy, setHistoryBusy] = useState(false)
@@ -314,7 +323,9 @@ export default function App() {
   const [rippleSignals, setRippleSignals] = useState<readonly RippleSignal[]>([])
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  const appShellRef = useRef<HTMLElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const avatarInputRef = useRef<HTMLInputElement>(null)
   const sessionRef = useRef<RealtimeSession | null>(null)
   const mediaRef = useRef<LiveMedia | null>(null)
   const cameraOrchestratorRef = useRef<ReturnType<
@@ -442,14 +453,16 @@ export default function App() {
   }, [accessToken, server])
 
   useEffect(() => {
-    if (screen !== 'history' || !accessToken) return
+    if ((screen !== 'home' && screen !== 'history') || !accessToken) return
     let active = true
-    setHistoryBusy(true)
+    if (screen === 'history') setHistoryBusy(true)
     setHistoryError('')
     void conversations(
       server,
       accessToken,
-      libraryOptionsForView(historyScope, debouncedHistoryQuery, 100),
+      screen === 'home'
+        ? libraryOptionsForView('all', '', 1)
+        : libraryOptionsForView(historyScope, debouncedHistoryQuery, 100),
     )
       .then((items) => {
         if (active) setHistoryItems(items)
@@ -460,7 +473,7 @@ export default function App() {
         }
       })
       .finally(() => {
-        if (active) setHistoryBusy(false)
+        if (active && screen === 'history') setHistoryBusy(false)
       })
     return () => {
       active = false
@@ -727,6 +740,79 @@ export default function App() {
       }),
     [accessToken, navigateTo, server, stopCall],
   )
+
+  const handleEdgeSwipeBack = useCallback(() => {
+    if (deleteRequest) {
+      setDeleteRequest(null)
+      return
+    }
+    if (renameRequest) {
+      setRenameRequest(null)
+      setRenameDraft('')
+      setRenameError('')
+      return
+    }
+    if (todoEditor) {
+      setTodoEditor(null)
+      return
+    }
+    if (selectedMemoryId) {
+      setSelectedMemoryId(null)
+      setEditingMemoryId(null)
+      setMemoryDraft('')
+      return
+    }
+    if (historySelectionMode) {
+      setHistorySelection(new Set())
+      setHistorySelectionMode(false)
+      return
+    }
+    if (memorySelectionMode) {
+      setMemorySelection(new Set())
+      setMemorySelectionMode(false)
+      return
+    }
+    if (revealedItem) {
+      setRevealedItem(null)
+      return
+    }
+    if (revealedTodo) {
+      setRevealedTodo(null)
+      return
+    }
+    if (screen === 'call') {
+      void leaveCall()
+      return
+    }
+    if (screen === 'conversation') {
+      navigateTo('history')
+      return
+    }
+    if (screen !== 'home') navigateTo('home')
+  }, [
+    deleteRequest,
+    historySelectionMode,
+    leaveCall,
+    memorySelectionMode,
+    navigateTo,
+    renameRequest,
+    revealedItem,
+    revealedTodo,
+    screen,
+    selectedMemoryId,
+    todoEditor,
+  ])
+
+  const edgeSwipeBackEnabled = !navigationOpen && (
+    screen !== 'home' ||
+    Boolean(deleteRequest || renameRequest || todoEditor || selectedMemoryId)
+  )
+
+  useEdgeSwipeBack({
+    rootRef: appShellRef,
+    enabled: edgeSwipeBackEnabled,
+    onBack: handleEdgeSwipeBack,
+  })
 
   useEffect(() => {
     const callLifecycle = callLifecycleRef.current
@@ -1241,6 +1327,9 @@ export default function App() {
     localStorage.removeItem('ripple-access-token')
     setAccessToken('')
     setUser(null)
+    setAvatarFile(null)
+    setAvatarError('')
+    setAvatarNotice('')
     conversationOwnershipRef.current.invalidate()
     setActiveConversationIdState(null)
     setSelectedConversation(null)
@@ -1250,6 +1339,39 @@ export default function App() {
     setMemoryItems([])
     setTodoItems([])
     if (token) await logoutApi(server, token).catch(() => {})
+  }
+
+  function selectAvatarFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    setAvatarNotice('')
+    setAvatarError('')
+    if (file.size > 12 * 1024 * 1024) {
+      setAvatarNotice('图片不能超过 12MB')
+      return
+    }
+    if (file.type && !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setAvatarNotice('请选择 JPEG、PNG 或 WebP 图片')
+      return
+    }
+    setAvatarFile(file)
+  }
+
+  async function saveAvatar(blob: Blob) {
+    if (!accessToken) return
+    setAvatarBusy(true)
+    setAvatarError('')
+    try {
+      const updatedUser = await uploadUserAvatar(server, accessToken, blob)
+      setUser(updatedUser)
+      setAvatarFile(null)
+      setAvatarNotice('头像已更新')
+    } catch (error) {
+      setAvatarError(error instanceof Error ? error.message : '头像上传失败，请重试')
+    } finally {
+      setAvatarBusy(false)
+    }
   }
 
   const saveMemoryEdit = async (memoryId: string) => {
@@ -1747,12 +1869,36 @@ export default function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main
+      ref={appShellRef}
+      className="app-shell"
+      data-edge-swipe-enabled={edgeSwipeBackEnabled ? 'true' : undefined}
+    >
+      <span className="edge-swipe-back-indicator" aria-hidden="true">
+        <ArrowLeft />
+      </span>
       {screen === 'home' && (
         <ConversationHome
+          accountLabel={user.email}
+          recentConversation={historyItems[0]}
           onStartAudio={() => openCall('audio')}
           onStartVideo={() => openCall('video')}
           onOpenMenu={() => setNavigationOpen(true)}
+          onOpenRecent={() => {
+            const recent = historyItems[0]
+            if (!recent) return
+            setSelectedConversation(recent)
+            navigateTo('conversation')
+          }}
+          onOpenHistory={() => navigateTo('history')}
+          onOpenMemories={() => {
+            actionMemoryTargetRef.current = null
+            navigateTo('memories')
+          }}
+          onOpenTodos={() => {
+            actionTodoTargetRef.current = null
+            navigateTo('todos')
+          }}
           historyError={historyError}
         />
       )}
@@ -2323,12 +2469,34 @@ export default function App() {
 
           <div className="profile-groups">
             <div className="profile-identity">
-              <span aria-hidden="true">R</span>
+              <button
+                className="profile-avatar-button"
+                type="button"
+                aria-label="选择并更换头像"
+                onClick={() => avatarInputRef.current?.click()}
+              >
+                <UserAvatar
+                  server={server}
+                  token={accessToken}
+                  email={user.email}
+                  avatarUrl={user.avatar_url}
+                />
+                <span className="profile-avatar-edit" aria-hidden="true"><ImagesSquare /></span>
+              </button>
+              <input
+                ref={avatarInputRef}
+                className="avatar-file-input"
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                aria-label="选择头像图片"
+                onChange={selectAvatarFile}
+              />
               <div>
                 <strong>{user.email}</strong>
-                <small>Ripple Live</small>
+                <small>点击头像更换</small>
               </div>
             </div>
+            {avatarNotice ? <p className="avatar-notice" role="status">{avatarNotice}</p> : null}
             <PersonalizationSection server={server} token={accessToken} />
             <section className="profile-section" aria-labelledby="profile-account-heading">
               <h2 id="profile-account-heading">系统状态</h2>
@@ -2410,10 +2578,26 @@ export default function App() {
           open={navigationOpen}
           active={destinationForScreen(screen)}
           accountLabel={user.email}
+          avatarUrl={user.avatar_url}
+          server={server}
+          token={accessToken}
           onClose={() => setNavigationOpen(false)}
           onSelect={selectDestination}
         />
       )}
+
+      {avatarFile ? (
+        <AvatarEditor
+          file={avatarFile}
+          busy={avatarBusy}
+          error={avatarError}
+          onCancel={() => {
+            setAvatarFile(null)
+            setAvatarError('')
+          }}
+          onSave={saveAvatar}
+        />
+      ) : null}
 
       {deleteRequest && (
         <div className="confirm-dialog-backdrop" role="presentation">

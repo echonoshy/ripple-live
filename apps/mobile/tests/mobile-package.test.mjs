@@ -258,16 +258,17 @@ test('mobile home presents voice as the primary call entry with explicit camera 
   assert.equal(existsSync(homePath), true, 'ConversationHome.tsx should exist')
   const homeSource = readFileSync(homePath, 'utf8')
   assert.match(appSource, /<ConversationHome/)
-  assert.match(homeSource, /有什么可以帮你？/)
-  assert.match(homeSource, /开始语音对话/)
+  assert.match(homeSource, /我在这里，今天想一起做什么？/)
+  assert.match(homeSource, /accountLabel/)
+  assert.match(homeSource, /开始语音/)
   assert.match(homeSource, /aria-label="开始语音对话"/)
   assert.equal((homeSource.match(/<LiveOrb\b/g) ?? []).length, 1)
   assert.match(homeSource, /<LiveOrb\s+state="idle"/)
-  assert.doesNotMatch(homeSource, /继续上次对话|打开记忆|看看今天的待办/)
+  assert.match(homeSource, /继续上次对话/)
   assert.match(homeSource, /aria-label="开启视频对话"/)
   assert.equal((homeSource.match(/onClick=\{onStartAudio\}/g) ?? []).length, 1)
   assert.match(homeSource, /onClick=\{onStartVideo\}/)
-  assert.doesNotMatch(homeSource, /onOpenHistory|onOpenMemories|onOpenTodos/)
+  assert.match(homeSource, /onOpenHistory|onOpenMemories|onOpenTodos/)
   assert.match(appSource, /onStartAudio=\{\(\) => openCall\('audio'\)\}/)
   assert.match(appSource, /onStartVideo=\{\(\) => openCall\('video'\)\}/)
   assert.match(apiSource, /export async function conversation\(/)
@@ -278,39 +279,56 @@ test('mobile home presents voice as the primary call entry with explicit camera 
   assert.doesNotMatch(homeSource, /统计|最近对话|自动保存/)
   assert.doesNotMatch(homeSource, /conversation-core/)
   assert.doesNotMatch(cssSource, /\.conversation-core/)
-  assert.match(navigationCssSource, /\.home-orb\s*\{[^}]*width:\s*clamp\(176px, 52vw, 220px\);[^}]*height:\s*clamp\(176px, 52vw, 220px\);/s)
+  assert.match(navigationCssSource, /\.home-orb-stage\s*\{[^}]*height:\s*clamp\(230px, 34dvh, 300px\)/s)
+  assert.doesNotMatch(homeSource, /home-orbit|home-stage-floor/)
+  assert.match(homeSource, /home-wave-field/)
+  assert.match(homeSource, /aria-label="和 Ripple 精灵互动"/)
+  assert.doesNotMatch(homeSource, /setInterval\(\(\) =>/)
+  assert.match(navigationCssSource, /\.home-navigation\s*\{/)
   assert.doesNotMatch(cssSource, /#9046ff|--ripple-violet|--voice-accent:\s*#b98aff/)
 })
 
-test('mobile uses the approved quiet shared tokens and typography', () => {
+test('mobile uses the approved nocturne commercial tokens and typography', () => {
   const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
   const indexSource = readFileSync(path.join(appRoot, 'src/index.css'), 'utf8')
+  const navigationCssSource = readFileSync(
+    path.join(appRoot, 'src/components/AppNavigation.css'),
+    'utf8',
+  )
 
   for (const token of [
-    '--live-bg: #090909',
-    '--app-bg: #0d0d0d',
-    '--surface: #0d0d0d',
-    '--surface-raised: #181818',
-    '--text-primary: #f4f4f4',
-    '--danger: #ED687A',
-    '--success: #69D49D',
-    '--line: rgb(255 255 255 / 9%)',
-    '--text-secondary: rgb(244 244 244 / 62%)',
-    '--text-tertiary: rgb(244 244 244 / 38%)',
-    '--orb-deep: #0a2e75',
-    '--orb-cobalt: #2f77e6',
-    '--orb-soft-blue: #9bc3ff',
-    '--orb-cream: #fff6e9',
-    '--focus-ring: rgb(255 255 255 / 42%)',
+    '--font-ui: "SF Pro Text"',
+    '--font-display: "SF Pro Display"',
+    '--font-brand: ui-serif',
+    '--weight-regular: 400',
+    '--weight-medium: 500',
+    '--weight-semibold: 600',
+    '--weight-bold: 700',
+    '--live-bg: #080a14',
+    '--app-bg: #070910',
+    '--surface: #12141f',
+    '--surface-raised: #191b29',
+    '--text-primary: #fff2da',
+    '--danger: #f0797d',
+    '--success: #76b795',
+    '--line: rgb(255 222 169 / 13%)',
+    '--orb-cobalt: #8981db',
+    '--orb-soft-blue: #efad5e',
+    '--orb-cream: #fff2d8',
+    '--focus-ring: rgb(255 207 121 / 48%)',
   ]) {
     assert.match(cssSource, new RegExp(token.replace(/[()]/g, '\\$&')))
   }
   assert.match(
     cssSource,
-    /font-family:\s*-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans SC", Helvetica, Arial, system-ui, sans-serif;/,
+    /font-family:\s*var\(--font-ui\);/,
   )
   assert.doesNotMatch(cssSource, /body\s*\{[^}]*letter-spacing:\s*-/s)
-  assert.match(indexSource, /background:\s*#0d0d0d/)
+  assert.match(indexSource, /background:\s*#070910/)
+  assert.match(navigationCssSource, /\.home-wave-field\s*\{/)
+  assert.match(navigationCssSource, /Nocturne interaction layer/)
+  assert.match(navigationCssSource, /Warm commercial home and navigation chrome/)
+  assert.match(navigationCssSource, /@keyframes drawer-enter/)
 })
 
 test('live call owns camera transitions explicitly and renders truthful camera states', () => {
@@ -398,11 +416,19 @@ test('mobile navigation uses a screen-derived side drawer without a bottom bar',
   assert.doesNotMatch(navSource, /drawer-new-conversation|onNewConversation/)
 })
 
-test('mobile live orb uses a single canvas renderer with a static fallback', () => {
+test('mobile live pet uses a single canvas renderer with a static fallback', () => {
   for (const file of [
-    'live/orbRenderer.ts',
+    'live/petRenderer.ts',
     'components/LiveOrb.tsx',
     'live/LiveCall.css',
+    'assets/starry-avatar.webp',
+    'assets/starry-avatar-states@2x.png',
+    'assets/pet-gifs/starry-avatar-idle.gif',
+    'assets/pet-gifs/starry-avatar-waving.gif',
+    'assets/pet-gifs/starry-avatar-failed.gif',
+    'assets/pet-gifs/starry-avatar-waiting.gif',
+    'assets/pet-gifs/starry-avatar-running.gif',
+    'assets/pet-gifs/starry-avatar-review.gif',
   ]) {
     assert.equal(
       existsSync(path.join(appRoot, 'src', file)),
@@ -416,45 +442,47 @@ test('mobile live orb uses a single canvas renderer with a static fallback', () 
     'utf8',
   )
   assert.equal((orbSource.match(/<canvas/g) ?? []).length, 1)
+  assert.match(
+    orbSource,
+    /createPetRenderer\(\s*canvas,\s*starryAvatarUrl,\s*starryAvatarHdUrl,\s*starryAvatarGifUrls,\s*\)/,
+  )
+  const homeSource = readFileSync(
+    path.join(appRoot, 'src/components/ConversationHome.tsx'),
+    'utf8',
+  )
+  const navigationCssSource = readFileSync(
+    path.join(appRoot, 'src/components/AppNavigation.css'),
+    'utf8',
+  )
+  assert.doesNotMatch(homeSource, /running-right|running-left|petPosition|wanderTimer/)
+  assert.doesNotMatch(navigationCssSource, /--pet-facing|scaleX\(var\(--pet-facing/)
+  assert.doesNotMatch(navigationCssSource, /live-orb-directional-gif|--pet-x|--pet-y/)
   assert.doesNotMatch(orbSource, /lottie|video/i)
 })
 
-test('mobile live orb fallback uses only off-center color fields', () => {
+test('mobile live pet fallback uses the packaged atlas without a circular crop', () => {
   const cssSource = readFileSync(
     path.join(appRoot, 'src/live/LiveCall.css'),
     'utf8',
   )
-  const fallbackRule = [...cssSource.matchAll(/^\.live-orb-fallback::before\s*\{([^}]*)\}/gm)]
+  const fallbackRule = [...cssSource.matchAll(/^\.live-orb-fallback\s*\{([^}]*)\}/gm)]
     .map((match) => match[1])
-    .find((body) => body.includes('radial-gradient'))
+    .find((body) => body.includes('starry-avatar.webp'))
 
-  assert.ok(fallbackRule, 'fallback material rule should exist')
-  const radialFieldCount = (fallbackRule.match(/radial-gradient\(/g) ?? []).length
-  const offCenterFieldCount = (
-    fallbackRule.match(/radial-gradient\(circle at (?!50%\s+50%)[^,]+,/g) ?? []
-  ).length
-  assert.ok(radialFieldCount > 0, 'fallback should retain fluid color fields')
-  assert.equal(
-    offCenterFieldCount,
-    radialFieldCount,
-    'every fallback radial field should be explicitly off-center',
-  )
+  assert.ok(fallbackRule, 'fallback pet rule should exist')
+  assert.match(fallbackRule, /starry-avatar\.webp/)
+  assert.match(fallbackRule, /background-size:\s*800% 1100%/)
+  assert.match(cssSource, /aspect-ratio:\s*192 \/ 208/)
+  assert.match(cssSource, /border-radius:\s*0/)
 })
 
-test('mobile live orb fallback near halo stays at or below six percent', () => {
+test('mobile live pet fallback has no legacy orb material pseudo-elements', () => {
   const cssSource = readFileSync(
     path.join(appRoot, 'src/live/LiveCall.css'),
     'utf8',
   )
-  const haloRule = cssSource.match(/^\.live-orb-fallback::after\s*\{([^}]*)\}/ms)?.[1]
-
-  assert.ok(haloRule, 'fallback near-halo pseudo-element should exist')
-  const opacity = haloRule.match(/box-shadow:[^;]*\/\s*([\d.]+)%\)/s)?.[1]
-  assert.ok(opacity, 'fallback near halo should declare percentage opacity')
-  assert.ok(
-    Number(opacity) <= 6,
-    `fallback near halo must not exceed 6% opacity; received ${opacity}%`,
-  )
+  assert.doesNotMatch(cssSource, /\.live-orb-fallback::before/)
+  assert.doesNotMatch(cssSource, /\.live-orb-fallback::after/)
 })
 
 test('mobile live call uses the immersive presentation contract', () => {
@@ -477,14 +505,13 @@ test('mobile live call uses the immersive presentation contract', () => {
   assert.doesNotMatch(callSource, /HandPalm|打断回答/)
   assert.doesNotMatch(callSource, /PhoneDisconnect/)
   assert.doesNotMatch(callSource, /className="call-status"|className="call-mode"/)
-  assert.doesNotMatch(presentationSource, /正在回答|正在聆听|正在思考|连接异常/)
   assert.match(presentationSource, /listening: ''/)
   assert.match(presentationSource, /thinking: '想一想'/)
   assert.match(presentationSource, /speaking: ''/)
   assert.match(presentationSource, /error: '连接断开'/)
   assert.doesNotMatch(callSource, /aria-label="收起通话"|<CaretDown/)
-  assert.match(callSource, /className="call-header-spacer"/)
-  assert.match(callSource, /<strong>Ripple<\/strong>/)
+  assert.match(callSource, /className="icon-button call-icon call-back"/)
+  assert.match(callSource, /正在陪伴/)
   assert.match(callSource, /\{formatDuration\(elapsed\)\}/)
   assert.match(callSource, /aria-label="切换前后摄像头"/)
   assert.match(callSource, /aria-label=\{muted \? '取消静音' : '静音'\}/)
@@ -495,18 +522,17 @@ test('mobile live call uses the immersive presentation contract', () => {
   assert.ok(controlsStart >= 0 && controlsEnd > controlsStart)
   assert.match(
     controlsSource,
-    /aria-label=[\s\S]*开启镜头[\s\S]*aria-label=\{muted \? '取消静音' : '静音'\}[\s\S]*aria-label="结束通话"/,
+    /aria-label=\{muted \? '取消静音' : '静音'\}[\s\S]*aria-label="结束通话"[\s\S]*开启镜头/,
   )
   assert.match(controlsSource, /className="end-button"[\s\S]*<Phone aria-hidden="true"/)
-  assert.doesNotMatch(callSource, /className="control-item"/)
-  assert.doesNotMatch(callSource, /<span>\{muted \? '取消静音' : '静音'\}<\/span>/)
+  assert.match(callSource, /className="call-control-item"/)
+  assert.match(callSource, /<span>\{muted \? '取消静音' : '静音'\}<\/span>/)
   const controlsRule = [...callCssSource.matchAll(
     /\.live-call-screen \.call-controls\s*\{([^}]*)\}/g,
   )].at(-1)?.[1] ?? ''
   assert.doesNotMatch(controlsRule, /background:|border:|backdrop-filter:/)
-  assert.match(callCssSource, /\.live-call-screen \.control-button,\s*\.live-call-screen \.end-button\s*\{[^}]*width:\s*50px;[^}]*height:\s*50px;/)
-  assert.match(callCssSource, /\.live-call-screen \.control-button\s*\{[^}]*width:\s*56px;[^}]*height:\s*56px;/s)
-  assert.match(callCssSource, /\.live-call-screen \.end-button\s*\{[^}]*width:\s*56px;[^}]*height:\s*56px;/s)
+  assert.match(callCssSource, /\.live-call-screen \.control-button,\s*\.live-call-screen \.end-button\s*\{[^}]*width:\s*58px;[^}]*height:\s*58px;/s)
+  assert.match(callCssSource, /\.call-control-item\s*\{/)
   assert.match(callCssSource, /\.live-call-screen \.end-button > svg\s*\{[^}]*rotate\(135deg\)/s)
   assert.match(
     appSource,
@@ -938,6 +964,18 @@ test('history and conversation detail use a compact voice-first hierarchy', () =
   assert.match(
     cssSource,
     /\.library-toolbar\.is-history \.library-search input\s*{[^}]*border-radius:\s*12px;[^}]*font-size:\s*13px;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.library-sticky-header,\s*\.history-library-screen \.library-sticky-header\s*{[^}]*min-height:\s*60px;[^}]*padding-top:\s*max\(6px, env\(safe-area-inset-top\)\);[^}]*padding-bottom:\s*0;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.library-query-row\s*{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 48px;[^}]*align-items:\s*center;/s,
+  )
+  assert.match(
+    cssSource,
+    /\.history-library-screen \.history-page-header h1,\s*\.memory-screen \.history-page-header h1,\s*\.todo-screen \.todo-heading h1,\s*\.todo-screen \.screen-header\.library-sticky-header \.todo-heading h1,\s*\.profile-screen > \.screen-header h1\s*{[^}]*font-size:\s*20px;/s,
   )
   assert.match(
     cssSource,

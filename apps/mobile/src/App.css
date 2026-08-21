@@ -1,34 +1,41 @@
 :root {
   color-scheme: dark;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans SC", Helvetica, Arial, system-ui, sans-serif;
-  --live-bg: #090909;
-  --app-bg: #0d0d0d;
-  --surface: #0d0d0d;
-  --surface-raised: #181818;
-  --text-primary: #f4f4f4;
-  --danger: #ED687A;
-  --success: #69D49D;
-  --line: rgb(255 255 255 / 9%);
-  --text-secondary: rgb(244 244 244 / 62%);
-  --text-tertiary: rgb(244 244 244 / 38%);
-  --orb-deep: #0a2e75;
-  --orb-cobalt: #2f77e6;
-  --orb-soft-blue: #9bc3ff;
-  --orb-cream: #fff6e9;
-  --focus-ring: rgb(255 255 255 / 42%);
+  font-family: var(--font-ui);
+  --font-ui: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Segoe UI", sans-serif;
+  --font-display: "SF Pro Display", "PingFang SC", "Noto Sans SC", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-brand: ui-serif, "Songti SC", "Noto Serif SC", Georgia, serif;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --live-bg: #080a14;
+  --app-bg: #070910;
+  --surface: #12141f;
+  --surface-raised: #191b29;
+  --text-primary: #fff2da;
+  --danger: #f0797d;
+  --success: #76b795;
+  --line: rgb(255 222 169 / 13%);
+  --text-secondary: #c9c0bb;
+  --text-tertiary: #8e8995;
+  --orb-deep: #9c5b3e;
+  --orb-cobalt: #8981db;
+  --orb-soft-blue: #efad5e;
+  --orb-cream: #fff2d8;
+  --focus-ring: rgb(255 207 121 / 48%);
   --canvas: var(--app-bg);
   --raised: var(--surface);
   --strong: var(--surface-raised);
   --hairline: var(--line);
   --primary-ink: var(--text-primary);
   --surface-deep: var(--app-bg);
-  --surface-strong: #222222;
+  --surface-strong: #242638;
   --ink: var(--text-primary);
   --ink-muted: var(--text-secondary);
   --ink-faint: var(--text-tertiary);
-  --accent: #f4f4f4;
-  --accent-strong: #f4f4f4;
-  --accent-soft: rgb(255 255 255 / 9%);
+  --accent: #f0b35f;
+  --accent-strong: #ffd891;
+  --accent-soft: rgb(240 179 95 / 12%);
 }
 
 * {
@@ -53,7 +60,9 @@ textarea {
 
 body {
   margin: 0;
-  background: var(--app-bg);
+  background:
+    radial-gradient(circle at 50% 4%, rgb(145 86 53 / 15%), transparent 42%),
+    var(--app-bg);
   color: var(--text-primary);
   text-rendering: optimizeLegibility;
 }
@@ -64,7 +73,10 @@ button {
 
 .app-shell {
   min-height: 100dvh;
-  background: var(--surface-deep);
+  background:
+    radial-gradient(circle at 82% 8%, rgb(180 109 59 / 11%), transparent 30%),
+    radial-gradient(circle at 12% 78%, rgb(121 111 190 / 8%), transparent 34%),
+    var(--surface-deep);
   color: var(--ink);
 }
 
@@ -388,7 +400,7 @@ button {
 .settings-screen,
 .history-screen,
 .auth-screen {
-  background: var(--surface);
+  background: transparent;
 }
 
 .screen-header {
@@ -2733,6 +2745,710 @@ button {
   }
 }
 
+/* Final warm cascade: intentionally last so legacy screen refinements inherit
+   the same commercial palette without changing their interaction structure. */
+.settings-screen,
+.history-screen,
+.auth-screen,
+.todo-screen,
+.memory-detail-sheet {
+  background:
+    radial-gradient(circle at 86% 4%, rgb(182 119 58 / 9%), transparent 28%),
+    var(--app-bg);
+}
+
+.library-sticky-header,
+.history-library-screen .library-sticky-header,
+.memory-detail-sheet > header {
+  background: rgb(8 10 20 / 88%);
+}
+
+.library-search input,
+.library-toolbar.is-history .library-search input,
+.todo-search input,
+.settings-form input,
+.field-control input,
+.server-field,
+.todo-editor input,
+.memory-card-body textarea {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+.library-search input:focus,
+.todo-search input:focus,
+.settings-form input:focus,
+.field-control input:focus,
+.server-field:focus,
+.todo-editor input:focus,
+.memory-card-body textarea:focus {
+  border-color: rgb(255 209 125 / 52%);
+  box-shadow: 0 0 0 3px rgb(255 209 125 / 11%);
+}
+
+.library-scope-tabs,
+.todo-view-switch {
+  border-color: var(--line);
+  background: rgb(18 20 34 / 82%);
+}
+
+.library-scope-tabs button.is-active,
+.todo-view-switch button.is-active {
+  background: var(--surface-strong);
+  color: var(--accent-strong);
+  box-shadow: inset 0 0 0 1px rgb(255 211 137 / 18%);
+}
+
+.todo-view-switch button.is-active::after {
+  background: var(--accent);
+}
+
+.history-list .library-item-surface,
+.history-list .history-row,
+.todo-card-surface,
+.todo-card.todo-card-surface,
+.todo-list,
+.memory-card.library-swipe-shell,
+.memory-card-hit,
+.memory-card-hit .memory-card-body,
+.settings-form,
+.profile-identity,
+.profile-info-list,
+.profile-copy-row,
+.profile-navigation-row,
+.account-panel {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.todo-screen {
+  --todo-line: var(--line);
+  --todo-surface: var(--surface);
+  --todo-surface-raised: var(--surface-raised);
+  --todo-accent: var(--accent);
+}
+
+.todo-add-button,
+.todo-complete {
+  border-color: rgb(255 211 137 / 20%);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.profile-identity > span {
+  background: linear-gradient(145deg, #ffe3a0, #eeb564);
+  color: #241b18;
+}
+
+.primary-button,
+.history-empty button,
+.todo-editor-actions .primary-button,
+.conversation-continuation-bar .continuation-compose {
+  background: linear-gradient(135deg, #ffe3a2, #ffc96e);
+  color: #241b18;
+  font-weight: var(--weight-semibold);
+}
+
+.memory-detail-sheet,
+.todo-editor,
+.confirm-dialog,
+.library-overflow-menu {
+  border-color: var(--line);
+  background: var(--surface-raised);
+}
+
+.screen-header h1,
+.history-page-header h1,
+.library-sticky-header .todo-heading h1,
+.screen-header.library-sticky-header .todo-heading h1,
+.auth-intro h1 {
+  font-weight: var(--weight-bold);
+}
+
+.library-row-title strong,
+.todo-copy strong,
+.memory-card-hit .memory-card-body strong,
+.profile-copy-row strong,
+.profile-navigation-row strong {
+  font-weight: var(--weight-semibold);
+}
+
+/* User avatar upload and crop flow. */
+.user-avatar { display: grid; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; place-items: center; }
+
+.profile-avatar-button {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  flex: 0 0 56px;
+  padding: 0;
+  border: 1px solid rgb(255 220 157 / 22%);
+  border-radius: 50%;
+  background: linear-gradient(145deg, #ffe3a0, #eeb564);
+  color: #241b18;
+  overflow: visible;
+}
+
+.profile-avatar-button:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; }
+.profile-avatar-button > .user-avatar { overflow: hidden; font-size: 20px; font-weight: var(--weight-bold); }
+
+.profile-avatar-edit {
+  position: absolute;
+  right: -3px;
+  bottom: -2px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--accent);
+  color: #241b18;
+  place-items: center;
+}
+
+.profile-avatar-edit > svg { width: 12px; height: 12px; }
+.avatar-file-input { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.avatar-notice { margin: -2px 4px 0; color: var(--accent-strong); font-size: 12px; }
+
+.avatar-editor-backdrop {
+  position: fixed;
+  z-index: 90;
+  inset: 0;
+  display: grid;
+  align-items: end;
+  padding: 18px 16px max(18px, env(safe-area-inset-bottom));
+  background: rgb(3 4 9 / 76%);
+  backdrop-filter: blur(14px);
+}
+
+.avatar-editor {
+  display: grid;
+  width: min(100%, 420px);
+  max-height: calc(100dvh - 36px - env(safe-area-inset-bottom));
+  margin: 0 auto;
+  padding: 20px;
+  gap: 18px;
+  border: 1px solid var(--line);
+  border-radius: 26px;
+  background: var(--surface-raised);
+  box-shadow: 0 28px 70px rgb(0 0 0 / 48%);
+  overflow: auto;
+}
+
+.avatar-editor > header { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.avatar-editor h2, .avatar-editor p { margin: 0; }
+.avatar-editor h2 { font-size: 21px; }
+.avatar-editor header p { margin-top: 5px; color: var(--text-secondary); font-size: 13px; }
+
+.avatar-editor header button {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--surface-strong);
+  color: var(--text-primary);
+  place-items: center;
+}
+
+.avatar-editor header button > svg { width: 20px; height: 20px; }
+
+.avatar-crop-stage {
+  position: relative;
+  width: min(280px, calc(100vw - 72px));
+  aspect-ratio: 1;
+  margin: 0 auto;
+  border-radius: 22px;
+  background: #080910;
+  cursor: grab;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.avatar-crop-stage:active { cursor: grabbing; }
+.avatar-crop-stage > img { position: absolute; top: 50%; left: 50%; max-width: none; user-select: none; pointer-events: none; transform-origin: center; }
+.avatar-crop-ring { position: absolute; inset: 0; border: 16px solid rgb(0 0 0 / 48%); border-radius: 22px; box-shadow: inset 0 0 0 2px rgb(255 226 176 / 72%); pointer-events: none; }
+
+.avatar-zoom-control { display: grid; grid-template-columns: 24px 1fr 24px; align-items: center; gap: 12px; color: var(--text-secondary); }
+.avatar-zoom-control > svg { width: 18px; height: 18px; }
+.avatar-zoom-control input { width: 100%; accent-color: var(--accent); }
+.avatar-editor-error { color: var(--danger); font-size: 13px; line-height: 1.45; }
+.avatar-editor-actions { display: grid; grid-template-columns: 1fr 1.35fr; gap: 10px; }
+
+.avatar-editor-actions button {
+  min-height: 48px;
+  border-radius: 14px;
+  background: var(--surface-strong);
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.avatar-editor-actions .primary-action { background: linear-gradient(135deg, #ffe3a2, #ffc96e); color: #241b18; }
+.avatar-editor-actions button:disabled { opacity: 0.52; }
+
+@media (min-width: 640px) and (min-height: 560px) {
+  .avatar-editor-backdrop { align-items: center; }
+}
+
+@media (max-height: 620px) and (orientation: landscape) {
+  .avatar-editor { grid-template-columns: minmax(200px, 280px) 1fr; align-items: center; width: min(100%, 680px); }
+  .avatar-editor > header { grid-column: 1 / -1; }
+  .avatar-crop-stage { grid-row: span 3; }
+}
+
+/* Final warm-white palette lock. Keep this block last so legacy dark-page
+   selectors cannot override the daylight product surfaces. */
+.settings-screen,
+.history-screen,
+.auth-screen,
+.todo-screen,
+.memory-detail-sheet {
+  background: radial-gradient(circle at 86% 4%, rgb(182 119 58 / 9%), transparent 28%), var(--app-bg);
+}
+
+.library-sticky-header,
+.history-library-screen .library-sticky-header,
+.memory-detail-sheet > header {
+  border-bottom-color: var(--line);
+  background: rgb(247 241 232 / 90%);
+  box-shadow: 0 8px 22px rgb(88 62 38 / 4%);
+}
+
+.library-search input,
+.library-toolbar.is-history .library-search input,
+.todo-search input,
+.settings-form input,
+.field-control input,
+.server-field,
+.todo-editor input,
+.memory-card-body textarea {
+  border-color: var(--line);
+  background: #eee4d7;
+  color: var(--text-primary);
+}
+
+.library-search input:focus,
+.todo-search input:focus,
+.settings-form input:focus,
+.field-control input:focus,
+.server-field:focus,
+.todo-editor input:focus,
+.memory-card-body textarea:focus {
+  border-color: rgb(201 133 61 / 48%);
+  box-shadow: 0 0 0 3px rgb(201 133 61 / 10%);
+}
+
+.library-scope-tabs,
+.todo-view-switch {
+  border-color: var(--line);
+  background: #eee4d7;
+}
+
+.library-scope-tabs button.is-active,
+.todo-view-switch button.is-active {
+  background: var(--surface);
+  color: var(--accent-strong);
+  box-shadow: 0 3px 10px rgb(88 62 38 / 8%), inset 0 0 0 1px rgb(201 133 61 / 10%);
+}
+
+.history-list .library-item-surface,
+.history-list .history-row,
+.todo-card-surface,
+.todo-card.todo-card-surface,
+.todo-list,
+.memory-card.library-swipe-shell,
+.memory-card-hit,
+.memory-card-hit .memory-card-body,
+.settings-form,
+.profile-identity,
+.profile-info-list,
+.profile-copy-row,
+.profile-navigation-row,
+.account-panel {
+  border-color: var(--line);
+  background: var(--surface);
+  box-shadow: 0 10px 28px rgb(88 62 38 / 5%);
+}
+
+.todo-screen {
+  --todo-line: var(--line);
+  --todo-surface: var(--surface);
+  --todo-surface-raised: var(--surface-raised);
+  --todo-accent: var(--accent);
+}
+
+.todo-add-button,
+.todo-complete {
+  border-color: rgb(201 133 61 / 18%);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.profile-identity > span {
+  background: linear-gradient(145deg, #f6c777, #d99548);
+  color: #302219;
+}
+
+.primary-button,
+.history-empty button,
+.todo-editor-actions .primary-button,
+.conversation-continuation-bar .continuation-compose {
+  background: linear-gradient(135deg, #efb960, #d69549);
+  color: #302219;
+  box-shadow: 0 12px 28px rgb(151 91 35 / 17%);
+}
+
+.memory-detail-sheet,
+.todo-editor,
+.confirm-dialog,
+.library-overflow-menu {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--text-primary);
+  box-shadow: 0 24px 70px rgb(80 54 32 / 16%);
+}
+
+.edge-swipe-back-indicator {
+  border-color: rgb(201 133 61 / 22%);
+  background: rgb(255 253 249 / 94%);
+  color: var(--accent-strong);
+  box-shadow: 0 10px 28px rgb(88 62 38 / 14%);
+}
+
+/* Warm-white daylight product theme. Live calls override these tokens locally. */
+body,
+.app-shell {
+  background:
+    radial-gradient(circle at 78% 3%, rgb(225 171 105 / 13%), transparent 27%),
+    radial-gradient(circle at 6% 86%, rgb(120 111 166 / 5%), transparent 30%),
+    var(--app-bg);
+  color: var(--text-primary);
+}
+
+.settings-screen,
+.history-screen,
+.auth-screen,
+.todo-screen,
+.memory-detail-sheet {
+  background:
+    radial-gradient(circle at 88% 0%, rgb(225 171 105 / 9%), transparent 24%),
+    var(--app-bg);
+}
+
+.library-sticky-header,
+.history-library-screen .library-sticky-header,
+.memory-detail-sheet > header {
+  border-bottom-color: var(--line);
+  background: rgb(247 241 232 / 90%);
+  box-shadow: 0 8px 22px rgb(88 62 38 / 4%);
+}
+
+.icon-button,
+.library-overflow-button,
+.library-manage-button,
+.memory-detail-sheet > header button {
+  border-color: var(--line);
+  background: rgb(255 253 249 / 78%);
+  color: var(--text-secondary);
+  box-shadow: 0 7px 18px rgb(88 62 38 / 5%);
+}
+
+.icon-button:hover,
+.library-overflow-button:hover,
+.library-manage-button:hover,
+.memory-detail-sheet > header button:hover {
+  border-color: rgb(201 133 61 / 24%);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.screen-header h1,
+.history-page-header h1,
+.library-sticky-header .todo-heading h1,
+.screen-header.library-sticky-header .todo-heading h1,
+.auth-intro h1,
+.memory-detail-sheet > h3,
+.conversation-header-title {
+  color: var(--text-primary);
+}
+
+.library-search input,
+.library-toolbar.is-history .library-search input,
+.todo-search input,
+.settings-form input,
+.field-control input,
+.server-field,
+.todo-editor input,
+.memory-card-body textarea {
+  border-color: var(--line);
+  background: #eee4d7;
+  color: var(--text-primary);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 52%);
+}
+
+.library-search input::placeholder,
+.todo-search input::placeholder,
+.settings-form input::placeholder,
+.field-control input::placeholder,
+.server-field::placeholder,
+.todo-editor input::placeholder,
+.memory-card-body textarea::placeholder {
+  color: var(--text-tertiary);
+}
+
+.library-search input:focus,
+.todo-search input:focus,
+.settings-form input:focus,
+.field-control input:focus,
+.server-field:focus,
+.todo-editor input:focus,
+.memory-card-body textarea:focus {
+  border-color: rgb(201 133 61 / 48%);
+  box-shadow: 0 0 0 3px rgb(201 133 61 / 10%);
+}
+
+.library-scope-tabs,
+.todo-view-switch {
+  border-color: var(--line);
+  background: #eee4d7;
+}
+
+.library-scope-tabs button,
+.todo-view-switch button,
+.library-toolbar.is-history .library-scope-tabs button {
+  color: var(--text-secondary);
+}
+
+.library-scope-tabs button.is-active,
+.todo-view-switch button.is-active {
+  background: var(--surface);
+  color: var(--accent-strong);
+  box-shadow: 0 3px 10px rgb(88 62 38 / 8%), inset 0 0 0 1px rgb(201 133 61 / 10%);
+}
+
+.todo-view-switch button.is-active::after {
+  background: var(--accent);
+}
+
+.history-list .library-item-surface,
+.history-list .history-row,
+.todo-card-surface,
+.todo-card.todo-card-surface,
+.todo-list,
+.memory-card.library-swipe-shell,
+.memory-card-hit,
+.memory-card-hit .memory-card-body,
+.settings-form,
+.profile-identity,
+.profile-info-list,
+.profile-copy-row,
+.profile-navigation-row,
+.account-panel {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.history-list .library-item-surface,
+.todo-list,
+.memory-card.library-swipe-shell,
+.profile-identity,
+.profile-info-list,
+.profile-copy-row,
+.profile-navigation-row {
+  box-shadow: 0 10px 28px rgb(88 62 38 / 5%);
+}
+
+.history-list .history-row:hover,
+.library-item-surface:hover,
+.todo-card.todo-card-surface:hover,
+.memory-card-hit:hover,
+.profile-navigation-row:hover {
+  background: #fff9f0;
+}
+
+.library-section-header h3,
+.history-list .library-section-header h3,
+.profile-section > h2,
+.todo-heading p {
+  color: var(--text-tertiary);
+}
+
+.library-row-title strong,
+.todo-copy strong,
+.memory-card-hit .memory-card-body strong,
+.profile-copy-row strong,
+.profile-navigation-row strong,
+.history-list strong {
+  color: var(--text-primary);
+}
+
+.library-row-title time,
+.library-row-preview,
+.todo-copy p,
+.todo-copy time,
+.memory-card-hit .memory-card-body time,
+.profile-copy-row p,
+.profile-navigation-row small,
+.history-list time,
+.history-list p {
+  color: var(--text-secondary);
+}
+
+.todo-screen {
+  --todo-line: var(--line);
+  --todo-surface: var(--surface);
+  --todo-surface-raised: var(--surface-raised);
+  --todo-accent: var(--accent);
+}
+
+.todo-add-button,
+.todo-complete {
+  border-color: rgb(201 133 61 / 18%);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.todo-card.is-completed .todo-complete {
+  color: var(--success);
+}
+
+.profile-identity > span {
+  background: linear-gradient(145deg, #f6c777, #d99548);
+  color: #302219;
+  box-shadow: 0 9px 20px rgb(151 91 35 / 15%);
+}
+
+.auth-brand strong {
+  color: var(--accent-strong);
+}
+
+.auth-intro > p,
+.auth-switch {
+  color: var(--accent-strong);
+}
+
+.primary-button,
+.history-empty button,
+.todo-editor-actions .primary-button,
+.conversation-continuation-bar .continuation-compose {
+  background: linear-gradient(135deg, #efb960, #d69549);
+  color: #302219;
+  box-shadow: 0 12px 28px rgb(151 91 35 / 17%);
+}
+
+.message-history article.is-user {
+  background: #efe4d7;
+  color: var(--text-primary);
+}
+
+.message-history article.is-assistant {
+  color: var(--text-primary);
+}
+
+.conversation-actions button,
+.conversation-continuation-bar,
+.conversation-continuation-bar .continuation-video {
+  border-color: var(--line) !important;
+  background: rgb(255 253 249 / 94%);
+  color: var(--text-secondary);
+  box-shadow: 0 10px 28px rgb(88 62 38 / 6%);
+}
+
+.conversation-continuation-bar .continuation-video {
+  color: var(--orb-cobalt);
+}
+
+.memory-detail-sheet,
+.todo-editor,
+.confirm-dialog,
+.library-overflow-menu {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--text-primary);
+  box-shadow: 0 24px 70px rgb(80 54 32 / 16%);
+}
+
+.confirm-dialog-backdrop,
+.memory-detail-backdrop {
+  background: rgb(78 58 42 / 24%);
+}
+
+.profile-logout {
+  border-color: rgb(200 92 98 / 17%);
+  background: rgb(200 92 98 / 7%);
+  color: #ad454b;
+}
+
+.edge-swipe-back-indicator {
+  border-color: rgb(201 133 61 / 22%);
+  background: rgb(255 253 249 / 94%);
+  color: var(--accent-strong);
+  box-shadow: 0 10px 28px rgb(88 62 38 / 14%);
+}
+
+/* Native-feeling Android edge swipe. It starts only inside the left 28px so
+   horizontal row actions remain available everywhere else. */
+.app-shell[data-edge-swipe-enabled='true'] {
+  touch-action: pan-y;
+}
+
+.app-shell[data-edge-swipe-state] > section {
+  position: relative;
+  z-index: 1;
+  transform: translate3d(var(--edge-swipe-offset, 0), 0, 0);
+  will-change: transform;
+}
+
+.app-shell[data-edge-swipe-state='dragging'] > section {
+  transition: none;
+}
+
+.app-shell[data-edge-swipe-state='settling'] > section {
+  transition: transform 140ms cubic-bezier(0.2, 0.76, 0.24, 1);
+}
+
+.edge-swipe-back-indicator {
+  position: fixed;
+  top: 50%;
+  left: 8px;
+  z-index: 80;
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 1px solid rgb(255 211 137 / 24%);
+  border-radius: 50%;
+  background: rgb(28 27 44 / 92%);
+  color: var(--accent);
+  opacity: var(--edge-swipe-progress, 0);
+  pointer-events: none;
+  box-shadow: 0 10px 28px rgb(0 0 0 / 28%);
+  transform: translate3d(calc((var(--edge-swipe-progress, 0) * 8px) - 8px), -50%, 0) scale(calc(0.84 + var(--edge-swipe-progress, 0) * 0.16));
+  transition: opacity 100ms ease, transform 100ms ease;
+}
+
+.edge-swipe-back-indicator > svg {
+  width: 19px;
+  height: 19px;
+  stroke-width: 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell[data-edge-swipe-state] > section,
+  .edge-swipe-back-indicator {
+    transition: none;
+  }
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline-color: var(--focus-ring);
+}
+
 /* Todo page: compact, touch-first hierarchy for phone-sized viewports. */
 .todo-screen {
   width: min(100%, 560px);
@@ -3209,6 +3925,300 @@ button {
   }
 }
 
+/* Commercial warm system: one palette and one typographic hierarchy across
+   authentication, libraries, conversations, settings, editors, and dialogs. */
+body,
+button,
+input,
+textarea {
+  font-family: var(--font-ui);
+}
+
+body {
+  font-weight: var(--weight-regular);
+}
+
+button,
+label,
+.library-row-title strong,
+.todo-copy strong,
+.profile-copy-row strong,
+.profile-navigation-row strong {
+  font-weight: var(--weight-medium);
+}
+
+.screen-header h1,
+.history-page-header h1,
+.library-sticky-header .todo-heading h1,
+.screen-header.library-sticky-header .todo-heading h1,
+.auth-intro h1,
+.memory-detail-sheet > h3 {
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.035em;
+}
+
+.settings-screen,
+.history-screen,
+.auth-screen,
+.todo-screen,
+.memory-detail-sheet {
+  background:
+    radial-gradient(circle at 86% 4%, rgb(182 119 58 / 9%), transparent 28%),
+    var(--app-bg);
+}
+
+.library-sticky-header,
+.history-library-screen .library-sticky-header,
+.memory-detail-sheet > header {
+  border-bottom-color: var(--line);
+  background: rgb(8 10 20 / 88%);
+}
+
+.icon-button,
+.library-overflow-button,
+.library-manage-button,
+.memory-detail-sheet > header button {
+  border-color: var(--line);
+  background: rgb(25 27 44 / 76%);
+  color: var(--text-secondary);
+}
+
+.icon-button:hover,
+.library-overflow-button:hover,
+.library-manage-button:hover,
+.memory-detail-sheet > header button:hover {
+  border-color: rgb(255 211 137 / 25%);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.library-search input,
+.library-toolbar.is-history .library-search input,
+.todo-search input,
+.settings-form input,
+.field-control input,
+.server-field,
+.todo-editor input,
+.memory-card-body textarea {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-weight: var(--weight-regular);
+}
+
+.library-search input::placeholder,
+.todo-search input::placeholder,
+.settings-form input::placeholder,
+.field-control input::placeholder,
+.server-field::placeholder,
+.todo-editor input::placeholder,
+.memory-card-body textarea::placeholder {
+  color: var(--text-tertiary);
+}
+
+.library-search input:focus,
+.todo-search input:focus,
+.settings-form input:focus,
+.field-control input:focus,
+.server-field:focus,
+.todo-editor input:focus,
+.memory-card-body textarea:focus {
+  border-color: rgb(255 209 125 / 52%);
+  box-shadow: 0 0 0 3px rgb(255 209 125 / 11%);
+}
+
+.library-scope-tabs,
+.todo-view-switch {
+  border-color: var(--line);
+  background: rgb(18 20 34 / 82%);
+}
+
+.library-scope-tabs button,
+.todo-view-switch button,
+.library-toolbar.is-history .library-scope-tabs button {
+  color: var(--text-secondary);
+  font-weight: var(--weight-medium);
+}
+
+.library-scope-tabs button.is-active,
+.todo-view-switch button.is-active {
+  background: var(--surface-strong);
+  color: var(--accent-strong);
+  box-shadow: inset 0 0 0 1px rgb(255 211 137 / 18%);
+}
+
+.todo-view-switch button.is-active::after {
+  background: var(--accent);
+}
+
+.history-list .library-item-surface,
+.history-list .history-row,
+.todo-card-surface,
+.todo-card.todo-card-surface,
+.todo-list,
+.memory-card.library-swipe-shell,
+.memory-card-hit,
+.memory-card-hit .memory-card-body {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.history-list .history-row:hover,
+.library-item-surface:hover,
+.todo-card.todo-card-surface:hover,
+.memory-card-hit:hover {
+  background: var(--surface-raised);
+}
+
+.todo-screen {
+  --todo-line: var(--line);
+  --todo-surface: var(--surface);
+  --todo-surface-raised: var(--surface-raised);
+  --todo-accent: var(--accent);
+}
+
+.todo-add-button,
+.todo-complete {
+  border-color: rgb(255 211 137 / 20%);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.todo-copy strong,
+.library-row-title strong,
+.memory-card-hit .memory-card-body strong,
+.profile-copy-row strong,
+.profile-navigation-row strong {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.todo-copy p,
+.todo-copy time,
+.library-row-preview,
+.library-row-title time,
+.memory-card-hit .memory-card-body time,
+.profile-copy-row p,
+.profile-navigation-row small {
+  color: var(--text-secondary);
+}
+
+.todo-copy time.is-overdue {
+  color: #e9b96d;
+}
+
+.todo-card.is-completed .todo-complete {
+  color: var(--success);
+}
+
+.settings-form,
+.profile-identity,
+.profile-info-list,
+.profile-copy-row,
+.profile-navigation-row,
+.account-panel {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.profile-identity > span {
+  background: linear-gradient(145deg, #ffe3a0, #eeb564);
+  color: #241b18;
+  box-shadow: 0 10px 24px rgb(167 104 45 / 18%);
+}
+
+.auth-brand strong {
+  color: var(--accent-strong);
+  font-family: var(--font-brand);
+  font-size: 20px;
+  font-weight: var(--weight-bold);
+}
+
+.auth-intro > p,
+.auth-switch {
+  color: var(--accent);
+  font-weight: var(--weight-semibold);
+}
+
+.auth-form > label,
+.settings-form label {
+  color: var(--text-secondary);
+  font-weight: var(--weight-medium);
+}
+
+.primary-button,
+.history-empty button,
+.todo-editor-actions .primary-button,
+.conversation-continuation-bar .continuation-compose {
+  background: linear-gradient(135deg, #ffe3a2, #ffc96e);
+  color: #241b18;
+  font-weight: var(--weight-semibold);
+  box-shadow: 0 12px 30px rgb(185 117 47 / 17%);
+}
+
+.primary-button:hover,
+.history-empty button:hover,
+.todo-editor-actions .primary-button:hover {
+  background: linear-gradient(135deg, #ffebbd, #ffd98e);
+}
+
+.message-history article.is-user {
+  background: linear-gradient(140deg, rgb(56 45 55 / 92%), rgb(35 31 44 / 94%));
+  color: var(--text-primary);
+}
+
+.message-history article.is-assistant {
+  color: var(--text-primary);
+}
+
+.conversation-actions button,
+.conversation-continuation-bar,
+.conversation-continuation-bar .continuation-video {
+  border-color: var(--line) !important;
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+
+.memory-detail-sheet,
+.todo-editor,
+.confirm-dialog {
+  border: 1px solid var(--line);
+  background: var(--surface-raised);
+  box-shadow: 0 24px 70px rgb(0 0 0 / 44%);
+}
+
+.confirm-dialog-backdrop,
+.memory-detail-backdrop {
+  background: rgb(4 4 10 / 80%);
+}
+
+.library-overflow-menu {
+  border-color: var(--line);
+  background: var(--surface-strong);
+  box-shadow: 0 18px 42px rgb(0 0 0 / 38%);
+}
+
+.profile-logout,
+.danger-action,
+.form-error {
+  color: #ff9b9f;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible,
+.icon-button:focus-visible,
+.primary-button:focus-visible,
+.auth-switch:focus-visible,
+.history-list button:focus-visible,
+.history-empty button:focus-visible,
+.account-panel button:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
 /* Memory detail is a full-screen destination, not a bottom sheet. */
 .memory-detail-backdrop {
   align-items: stretch;
@@ -3299,6 +4309,528 @@ button {
 .memory-detail-sheet .memory-actions {
   margin-top: 24px;
   padding-bottom: 4px;
+}
+
+/* Shared deep-orbit application surfaces. */
+.settings-screen,
+.history-screen,
+.auth-screen,
+.todo-screen,
+.memory-detail-sheet,
+.confirm-dialog,
+.todo-editor {
+  color: var(--text-primary);
+}
+
+.history-screen,
+.settings-screen,
+.todo-screen {
+  padding-inline: clamp(18px, 4vw, 28px);
+}
+
+.library-sticky-header,
+.history-library-screen .library-sticky-header,
+.memory-detail-sheet > header {
+  margin-inline: clamp(-28px, -4vw, -18px);
+  padding-right: clamp(18px, 4vw, 28px);
+  padding-left: clamp(18px, 4vw, 28px);
+  border-bottom-color: var(--line);
+  background: rgb(7 11 24 / 88%);
+  backdrop-filter: blur(20px) saturate(120%);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
+}
+
+.library-sticky-header .icon-button {
+  background: transparent;
+}
+
+.icon-button,
+.library-overflow-button,
+.library-manage-button,
+.memory-detail-sheet > header button {
+  min-width: 48px;
+  min-height: 48px;
+  color: var(--text-secondary);
+}
+
+.icon-button:hover,
+.library-overflow-button:hover,
+.library-manage-button:hover,
+.memory-detail-sheet > header button:hover {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
+.screen-header h1,
+.history-page-header h1,
+.library-sticky-header .todo-heading h1,
+.screen-header.library-sticky-header .todo-heading h1 {
+  color: var(--text-primary);
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
+.library-region,
+.history-library-screen .library-region {
+  margin-top: 18px;
+}
+
+.library-toolbar,
+.library-toolbar.is-history {
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.library-search input,
+.library-toolbar.is-history .library-search input,
+.todo-search input,
+.settings-form input,
+.field-control input,
+.server-field,
+.todo-editor input,
+.memory-card-body textarea {
+  min-height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+.library-search input:focus,
+.todo-search input:focus,
+.settings-form input:focus,
+.field-control input:focus,
+.server-field:focus,
+.todo-editor input:focus,
+.memory-card-body textarea:focus {
+  border-color: rgb(112 215 245 / 48%);
+  outline: none;
+  box-shadow: 0 0 0 3px rgb(112 215 245 / 12%);
+}
+
+.library-scope-tabs,
+.todo-view-switch {
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #0d1524;
+}
+
+.library-scope-tabs button,
+.todo-view-switch button,
+.library-toolbar.is-history .library-scope-tabs button {
+  min-height: 48px;
+  border-radius: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 570;
+}
+
+.library-scope-tabs button.is-active,
+.todo-view-switch button.is-active {
+  background: var(--surface-raised);
+  color: #ffd98a;
+  box-shadow: inset 0 0 0 1px rgb(255 217 138 / 22%);
+}
+
+.library-section-header,
+.history-list .library-section-header {
+  margin-bottom: 6px;
+}
+
+.library-section-header h3,
+.history-list .library-section-header h3 {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 570;
+}
+
+.history-list .library-swipe-shell,
+.history-list .history-row {
+  background: transparent;
+}
+
+.history-list .library-item-surface {
+  background: var(--app-bg);
+}
+
+.history-list .library-swipe-shell {
+  border-bottom-color: var(--line);
+}
+
+.history-list .history-row {
+  min-height: 80px;
+  padding: 14px 4px;
+  border-radius: 0;
+  transition: background-color 160ms ease;
+}
+
+.history-list .history-row:hover,
+.library-item-surface:hover {
+  border-color: transparent;
+  background: var(--surface);
+}
+
+.library-row-title strong,
+.todo-card strong,
+.profile-copy-row strong,
+.profile-navigation-row strong {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 610;
+}
+
+.library-row-title time,
+.library-row-preview,
+.todo-card p,
+.profile-copy-row p,
+.profile-navigation-row small {
+  color: var(--text-secondary);
+}
+
+.memory-card.library-swipe-shell,
+.memory-card-hit,
+.memory-card-hit .memory-card-body {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.memory-card.library-swipe-shell {
+  border-radius: 18px;
+  box-shadow: 0 12px 34px rgb(0 0 0 / 16%);
+}
+
+.memory-card-hit:active,
+.history-list .history-row:active,
+.todo-card:active,
+.profile-navigation-row:active {
+  background: var(--surface-raised);
+}
+
+.todo-card-surface,
+.todo-card,
+.todo-swipe-shell {
+  background: transparent;
+}
+
+.todo-swipe-shell {
+  border-bottom-color: var(--line);
+}
+
+.todo-complete {
+  width: 48px;
+  height: 48px;
+  border-color: rgb(112 215 245 / 24%);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.todo-add-button {
+  width: 48px;
+  height: 48px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.profile-identity,
+.profile-info-list,
+.profile-copy-row,
+.profile-navigation-row {
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.profile-identity {
+  border-radius: 18px;
+  padding: 16px;
+}
+
+.profile-identity > span {
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px rgb(112 215 245 / 26%);
+}
+
+.profile-section > h2 {
+  color: var(--text-tertiary);
+}
+
+.profile-logout {
+  min-height: 52px;
+  border: 1px solid rgb(255 113 142 / 16%);
+  background: rgb(255 113 142 / 8%);
+  color: #ff9daf;
+}
+
+.confirm-dialog-backdrop,
+.memory-detail-backdrop {
+  background: rgb(2 6 14 / 78%);
+}
+
+.confirm-dialog,
+.todo-editor {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgb(0 0 0 / 42%);
+}
+
+.primary-button,
+.history-empty button,
+.todo-editor-actions .primary-button {
+  min-height: 48px;
+  background: #ffd98a;
+  color: #171a24;
+}
+
+.conversation-continuation-bar .continuation-video {
+  border-color: rgb(112 215 245 / 28%) !important;
+  background: var(--surface);
+  color: var(--accent);
+}
+
+.conversation-continuation-bar .continuation-compose {
+  background: #ffd98a;
+  color: #171a24;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+@media (min-width: 760px) {
+  .history-screen,
+  .settings-screen,
+  .todo-screen {
+    border-right: 1px solid var(--line);
+    border-left: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 380px) {
+  .history-screen,
+  .settings-screen,
+  .todo-screen {
+    padding-inline: 16px;
+  }
+
+  .library-sticky-header,
+  .history-library-screen .library-sticky-header {
+    margin-inline: -16px;
+    padding-inline: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Palette lock: this remains the last cascade in the application stylesheet. */
+.settings-screen,
+.history-screen,
+.auth-screen,
+.todo-screen,
+.memory-detail-sheet {
+  background: radial-gradient(circle at 86% 4%, rgb(182 119 58 / 9%), transparent 28%), var(--app-bg);
+}
+
+.library-sticky-header,
+.history-library-screen .library-sticky-header,
+.memory-detail-sheet > header {
+  background: rgb(8 10 20 / 88%);
+}
+
+.library-search input,
+.library-toolbar.is-history .library-search input,
+.todo-search input,
+.settings-form input,
+.field-control input,
+.server-field,
+.todo-editor input,
+.memory-card-body textarea {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+.library-search input:focus,
+.todo-search input:focus,
+.settings-form input:focus,
+.field-control input:focus,
+.server-field:focus,
+.todo-editor input:focus,
+.memory-card-body textarea:focus {
+  border-color: rgb(255 209 125 / 52%);
+  box-shadow: 0 0 0 3px rgb(255 209 125 / 11%);
+}
+
+.library-scope-tabs,
+.todo-view-switch {
+  border-color: var(--line);
+  background: rgb(18 20 34 / 82%);
+}
+
+.library-scope-tabs button.is-active,
+.todo-view-switch button.is-active {
+  background: var(--surface-strong);
+  color: var(--accent-strong);
+  box-shadow: inset 0 0 0 1px rgb(255 211 137 / 18%);
+}
+
+.todo-view-switch button.is-active::after {
+  background: var(--accent);
+}
+
+.history-list .library-item-surface,
+.history-list .history-row,
+.todo-card-surface,
+.todo-card.todo-card-surface,
+.todo-list,
+.memory-card.library-swipe-shell,
+.memory-card-hit,
+.memory-card-hit .memory-card-body,
+.settings-form,
+.profile-identity,
+.profile-info-list,
+.profile-copy-row,
+.profile-navigation-row,
+.account-panel {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.todo-screen {
+  --todo-line: var(--line);
+  --todo-surface: var(--surface);
+  --todo-surface-raised: var(--surface-raised);
+  --todo-accent: var(--accent);
+}
+
+.todo-add-button,
+.todo-complete {
+  border-color: rgb(255 211 137 / 20%);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.profile-identity > span {
+  background: linear-gradient(145deg, #ffe3a0, #eeb564);
+  color: #241b18;
+}
+
+.primary-button,
+.history-empty button,
+.todo-editor-actions .primary-button,
+.conversation-continuation-bar .continuation-compose {
+  background: linear-gradient(135deg, #ffe3a2, #ffc96e);
+  color: #241b18;
+  font-weight: var(--weight-semibold);
+}
+
+.memory-detail-sheet,
+.todo-editor,
+.confirm-dialog,
+.library-overflow-menu {
+  border-color: var(--line);
+  background: var(--surface-raised);
+}
+
+.screen-header h1,
+.history-page-header h1,
+.library-sticky-header .todo-heading h1,
+.screen-header.library-sticky-header .todo-heading h1,
+.auth-intro h1 {
+  font-weight: var(--weight-bold);
+}
+
+.library-row-title strong,
+.todo-copy strong,
+.memory-card-hit .memory-card-body strong,
+.profile-copy-row strong,
+.profile-navigation-row strong {
+  font-weight: var(--weight-semibold);
+}
+
+/* Compact top-level tab headers and keep library controls on one visual axis. */
+.library-sticky-header,
+.history-library-screen .library-sticky-header {
+  box-sizing: border-box;
+  min-height: 60px;
+  padding-top: max(6px, env(safe-area-inset-top));
+  padding-bottom: 0;
+}
+
+.history-library-screen .history-page-header h1,
+.memory-screen .history-page-header h1,
+.todo-screen .todo-heading h1,
+.todo-screen .screen-header.library-sticky-header .todo-heading h1,
+.profile-screen > .screen-header h1 {
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.profile-screen > .screen-header {
+  min-height: 56px;
+}
+
+.library-query-row {
+  display: grid;
+  min-height: 48px;
+  grid-template-columns: minmax(0, 1fr) 48px;
+  align-items: center;
+  gap: 8px;
+}
+
+.library-search {
+  display: flex;
+  height: 48px;
+  align-items: center;
+}
+
+.library-search input,
+.library-toolbar.is-history .library-search input {
+  height: 48px;
+  min-height: 48px;
+  padding-top: 0;
+  padding-bottom: 0;
+  line-height: 1.2;
+}
+
+.library-overflow {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  align-self: center;
+}
+
+.library-query-row .library-overflow-button {
+  width: 48px;
+  height: 48px;
+  min-width: 48px;
+  min-height: 48px;
+}
+
+.library-query-row .library-overflow-button > svg {
+  width: 18px;
+  height: 18px;
 }
 
 .personalization-intro {

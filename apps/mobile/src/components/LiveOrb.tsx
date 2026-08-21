@@ -5,13 +5,28 @@ import {
   type QualityTier,
   type VisualState,
 } from '../live/motion'
-import {
-  createOrbRenderer,
-  type OrbRenderer,
-} from '../live/orbRenderer'
+import type { OrbRenderer } from '../live/orbRenderer'
+import { createPetRenderer } from '../live/petRenderer'
 import { startOrbLifecycle } from '../live/orbLifecycle'
 import type { RippleSignal, RippleSignalId } from '../live/ripple'
+import starryAvatarUrl from '../assets/starry-avatar.webp'
+import starryAvatarHdUrl from '../assets/starry-avatar-states@2x.png'
+import starryAvatarFailedGifUrl from '../assets/pet-gifs/starry-avatar-failed.gif'
+import starryAvatarIdleGifUrl from '../assets/pet-gifs/starry-avatar-idle.gif'
+import starryAvatarReviewGifUrl from '../assets/pet-gifs/starry-avatar-review.gif'
+import starryAvatarRunningGifUrl from '../assets/pet-gifs/starry-avatar-running.gif'
+import starryAvatarWaitingGifUrl from '../assets/pet-gifs/starry-avatar-waiting.gif'
+import starryAvatarWavingGifUrl from '../assets/pet-gifs/starry-avatar-waving.gif'
 import '../live/LiveCall.css'
+
+const starryAvatarGifUrls = {
+  idle: starryAvatarIdleGifUrl,
+  waving: starryAvatarWavingGifUrl,
+  failed: starryAvatarFailedGifUrl,
+  waiting: starryAvatarWaitingGifUrl,
+  running: starryAvatarRunningGifUrl,
+  review: starryAvatarReviewGifUrl,
+} as const
 
 export type LiveOrbProps = {
   state: VisualState
@@ -72,7 +87,12 @@ export function LiveOrb(props: LiveOrbProps) {
 
     let renderer: OrbRenderer
     try {
-      renderer = createOrbRenderer(canvas)
+      renderer = createPetRenderer(
+        canvas,
+        starryAvatarUrl,
+        starryAvatarHdUrl,
+        starryAvatarGifUrls,
+      )
     } catch {
       setFallback(true)
       return

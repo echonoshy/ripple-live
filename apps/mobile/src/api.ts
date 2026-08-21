@@ -3,6 +3,7 @@ import type { LibraryAction, LibraryListOptions } from './library'
 export type AuthUser = {
   id: string
   email: string
+  avatar_url: string | null
 }
 
 export type AuthSession = {
@@ -29,6 +30,29 @@ export type ConversationSummary = {
   updated_at: number
   is_pinned: boolean
   archived_at: number | null
+}
+
+export type ProjectRecord = {
+  id: string
+  name: string
+  description: string
+  instructions: string
+  created_at: number
+  updated_at: number
+  archived_at: number | null
+}
+
+export type ProjectCreate = {
+  name: string
+  description?: string
+  instructions?: string
+}
+
+export type ProjectPatch = {
+  name?: string
+  description?: string
+  instructions?: string
+  archived?: boolean
 }
 
 export type ConversationMessage = {
@@ -111,7 +135,9 @@ async function request<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
-  if (init.body) headers.set('Content-Type', 'application/json')
+  if (typeof init.body === 'string' && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
   if (token) headers.set('Authorization', `Bearer ${token}`)
   const response = await fetch(`${httpBase(server)}${path}`, {
     ...init,
@@ -188,6 +214,30 @@ export async function updateUserProfile(
   return payload.data
 }
 
+export async function uploadUserAvatar(server: string, token: string, avatar: Blob) {
+  const payload = await request<{ user: AuthUser }>(
+    server,
+    '/v1/auth/me/avatar',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'image/jpeg' },
+      body: avatar,
+    },
+    token,
+  )
+  return payload.user
+}
+
+export async function clearUserAvatar(server: string, token: string) {
+  const payload = await request<{ user: AuthUser }>(
+    server,
+    '/v1/auth/me/avatar',
+    { method: 'DELETE' },
+    token,
+  )
+  return payload.user
+}
+
 function librarySearchParams(options: LibraryListOptions) {
   const params = new URLSearchParams({
     scope: options.scope,
@@ -214,6 +264,104 @@ export async function conversations(
     token,
   )
   return payload.data
+}
+
+export async function projects(
+  server: string,
+  token: string,
+  options: LibraryListOptions = {
+    scope: 'active',
+    query: '',
+    limit: 50,
+  },
+) {
+  const payload = await request<{ data: ProjectRecord[] }>(
+    server,
+    `/v1/projects?${librarySearchParams(options)}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function project(server: string, token: string, id: string) {
+  const payload = await request<{ data: ProjectRecord }>(
+    server,
+    `/v1/projects/${encodeURIComponent(id)}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function createProject(
+  server: string,
+  token: string,
+  input: ProjectCreate,
+) {
+  const payload = await request<{ data: ProjectRecord }>(
+    server,
+    '/v1/projects',
+    { method: 'POST', body: JSON.stringify(input) },
+    token,
+  )
+  return payload.data
+}
+
+export async function updateProject(
+  server: string,
+  token: string,
+  id: string,
+  patch: ProjectPatch,
+) {
+  const payload = await request<{ data: ProjectRecord }>(
+    server,
+    `/v1/projects/${encodeURIComponent(id)}`,
+    { method: 'PATCH', body: JSON.stringify(patch) },
+    token,
+  )
+  return payload.data
+}
+
+export function archiveProject(server: string, token: string, id: string) {
+  return request<void>(
+    server,
+    `/v1/projects/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+    token,
+  )
+}
+
+export async function projectConversations(
+  server: string,
+  token: string,
+  projectId: string,
+  options: LibraryListOptions = {
+    scope: 'active',
+    query: '',
+    limit: 50,
+  },
+) {
+  const payload = await request<{ data: ConversationSummary[] }>(
+    server,
+    `/v1/projects/${encodeURIComponent(projectId)}/conversations?${librarySearchParams(options)}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function createProjectConversation(
+  server: string,
+  token: string,
+  projectId: string,
+) {
+  return request<{ id: string; project_id: string }>(
+    server,
+    `/v1/projects/${encodeURIComponent(projectId)}/conversations`,
+    { method: 'POST' },
+    token,
+  )
 }
 
 export async function conversation(

@@ -8,6 +8,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useEffect } from 'react'
+import { UserAvatar } from './UserAvatar'
 
 export type AppDestination =
   | 'home'
@@ -32,12 +33,18 @@ export function AppDrawer({
   open,
   active,
   accountLabel,
+  avatarUrl,
+  server,
+  token,
   onClose,
   onSelect,
 }: {
   open: boolean
   active: AppDestination
   accountLabel: string
+  avatarUrl: string | null
+  server: string
+  token: string
   onClose(): void
   onSelect(destination: AppDestination): void
 }) {
@@ -84,7 +91,12 @@ export function AppDrawer({
         </nav>
 
         <footer className="app-drawer-account">
-          <span aria-hidden="true">R</span>
+          <UserAvatar
+            server={server}
+            token={token}
+            email={accountLabel}
+            avatarUrl={avatarUrl}
+          />
           <div>
             <strong>{accountLabel}</strong>
             <small>Ripple Live</small>

@@ -1,4 +1,5 @@
 import {
+  ArrowLeft,
   SwitchCamera as CameraRotate,
   Mic as Microphone,
   MicOff as MicrophoneSlash,
@@ -154,12 +155,17 @@ export function LiveCallScreen({
       )}
 
       <header className="call-header">
-        <span className="call-header-spacer" />
+        <button
+          className="icon-button call-icon call-back"
+          type="button"
+          aria-label="结束并返回"
+          onClick={() => void onLeave()}
+        >
+          <ArrowLeft aria-hidden="true" />
+        </button>
         <div className="call-title">
-          <strong>Ripple</strong>
-          <span aria-label={`通话时长 ${formatDuration(elapsed)}`}>
-            {formatDuration(elapsed)}
-          </span>
+          <strong><i aria-hidden="true" />正在陪伴</strong>
+          <span aria-label={`通话时长 ${formatDuration(elapsed)}`}>{formatDuration(elapsed)}</span>
         </div>
         {videoMode ? (
           <button
@@ -196,6 +202,11 @@ export function LiveCallScreen({
               <span className="live-camera-label">{labels.camera}</span>
             )}
           </div>
+          {assistantText && (
+            <p className="live-assistant-caption" aria-live="polite">
+              {assistantText}
+            </p>
+          )}
           <LiveCaption
             userText={userText}
             assistantText={assistantText}
@@ -231,47 +242,52 @@ export function LiveCallScreen({
       )}
 
       <footer className="call-controls">
-        <button
-          className={`control-button camera-control ${videoMode ? 'is-active' : ''}`}
-          type="button"
-          aria-label={
-            !cameraControlReady
-              ? '镜头尚未就绪'
-              : cameraPhase === 'opening'
-                ? '正在开启镜头'
-                : cameraPhase === 'closing'
-                  ? '正在关闭镜头'
-                  : videoMode
-                    ? '关闭镜头'
-                    : cameraPhase === 'error'
-                      ? '重试镜头'
-                      : '开启镜头'
-          }
-          disabled={!cameraControlReady || cameraBusy}
-          onClick={() => { void onToggleCamera().catch(() => {}) }}
-        >
-          {videoMode
-            ? <VideoCameraSlash aria-hidden="true" />
-            : <VideoCamera aria-hidden="true" />}
-        </button>
-        <button
-          className={`control-button ${muted ? 'is-active' : ''}`}
-          type="button"
-          aria-label={muted ? '取消静音' : '静音'}
-          onClick={onToggleMute}
-        >
-          {muted
-            ? <MicrophoneSlash aria-hidden="true" />
-            : <Microphone aria-hidden="true" />}
-        </button>
-        <button
-          className="end-button"
-          type="button"
-          aria-label="结束通话"
-          onClick={() => void onLeave()}
-        >
-          <Phone aria-hidden="true" />
-        </button>
+        <div className="call-control-item">
+          <button
+            className={`control-button ${muted ? 'is-active' : ''}`}
+            type="button"
+            aria-label={muted ? '取消静音' : '静音'}
+            onClick={onToggleMute}
+          >
+            {muted ? <MicrophoneSlash aria-hidden="true" /> : <Microphone aria-hidden="true" />}
+          </button>
+          <span>{muted ? '取消静音' : '静音'}</span>
+        </div>
+        <div className="call-control-item">
+          <button
+            className="end-button"
+            type="button"
+            aria-label="结束通话"
+            onClick={() => void onLeave()}
+          >
+            <Phone aria-hidden="true" />
+          </button>
+          <span>结束</span>
+        </div>
+        <div className="call-control-item">
+          <button
+            className={`control-button camera-control ${videoMode ? 'is-active' : ''}`}
+            type="button"
+            aria-label={
+              !cameraControlReady
+                ? '镜头尚未就绪'
+                : cameraPhase === 'opening'
+                  ? '正在开启镜头'
+                  : cameraPhase === 'closing'
+                    ? '正在关闭镜头'
+                    : videoMode
+                      ? '关闭镜头'
+                      : cameraPhase === 'error'
+                        ? '重试镜头'
+                        : '开启镜头'
+            }
+            disabled={!cameraControlReady || cameraBusy}
+            onClick={() => { void onToggleCamera().catch(() => {}) }}
+          >
+            {videoMode ? <VideoCameraSlash aria-hidden="true" /> : <VideoCamera aria-hidden="true" />}
+          </button>
+          <span>{videoMode ? '关闭视频' : '切换到视频'}</span>
+        </div>
       </footer>
     </section>
   )

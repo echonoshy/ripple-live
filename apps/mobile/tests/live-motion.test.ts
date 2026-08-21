@@ -75,7 +75,7 @@ test('uses approved motion timing', () => {
   })
 })
 
-test('live orb uses the compact state scale ranges and RMS inputs', () => {
+test('live pet preserves compact motion and RMS-driven feedback', () => {
   const cssSource = readFileSync(
     new URL('../src/live/LiveCall.css', import.meta.url),
     'utf8',
@@ -84,15 +84,18 @@ test('live orb uses the compact state scale ranges and RMS inputs', () => {
     new URL('../src/components/LiveCallScreen.tsx', import.meta.url),
     'utf8',
   )
+  const petSource = readFileSync(
+    new URL('../src/live/petRenderer.ts', import.meta.url),
+    'utf8',
+  )
 
   assert.match(cssSource, /width:\s*232px/)
-  assert.match(
-    cssSource,
-    /@keyframes live-orb-idle-breath\s*\{\s*from\s*\{[^}]*scale\(0\.992\)[^}]*\}\s*to\s*\{[^}]*scale\(1\.008\)/,
-  )
-  assert.match(cssSource, /animation:\s*live-orb-idle-breath 7\.2s/)
+  assert.match(cssSource, /aspect-ratio:\s*192 \/ 208/)
+  assert.match(cssSource, /starry-avatar\.webp/)
   assert.match(cssSource, /is-listening[^}]*scale\(1\)/)
-  assert.match(cssSource, /is-idle,[\s\S]*is-speaking[\s\S]*animation:\s*live-orb-idle-breath 7\.2s/)
+  assert.doesNotMatch(cssSource, /live-orb-idle-breath/)
+  assert.match(petSource, /frame\.state === 'listening'[^\n]*frame\.inputLevel/)
+  assert.match(petSource, /frame\.state === 'speaking'[^\n]*frame\.outputLevel/)
   assert.doesNotMatch(callSource, /--live-(?:input|output)-scale/)
   assert.match(
     cssSource,
