@@ -64,6 +64,7 @@ import { LiveCallScreen } from './components/LiveCallScreen'
 import { LibrarySection } from './components/LibrarySection'
 import { LibraryToolbar } from './components/LibraryToolbar'
 import { MarkdownContent } from './components/MarkdownContent'
+import { PersonalizationSection } from './components/PersonalizationSection'
 import {
   groupLibraryItems,
   libraryOptionsForView,
@@ -2328,6 +2329,7 @@ export default function App() {
                 <small>Ripple Live</small>
               </div>
             </div>
+            <PersonalizationSection server={server} token={accessToken} />
             <section className="profile-section" aria-labelledby="profile-account-heading">
               <h2 id="profile-account-heading">系统状态</h2>
               <dl className="profile-info-list">

@@ -11,6 +11,16 @@ export type AuthSession = {
   user: AuthUser
 }
 
+export type UserProfile = {
+  ai_identity: string
+  user_identity: string
+  preferred_name: string
+  basic_memory: string
+  updated_at: number | null
+}
+
+export type UserProfileUpdate = Omit<UserProfile, 'updated_at'>
+
 export type ConversationSummary = {
   id: string
   title: string
@@ -152,6 +162,30 @@ export async function currentUser(server: string, token: string) {
 
 export function logout(server: string, token: string) {
   return request<void>(server, '/v1/auth/logout', { method: 'POST' }, token)
+}
+
+export async function userProfile(server: string, token: string) {
+  const payload = await request<{ data: UserProfile }>(
+    server,
+    '/v1/profile',
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function updateUserProfile(
+  server: string,
+  token: string,
+  profile: UserProfileUpdate,
+) {
+  const payload = await request<{ data: UserProfile }>(
+    server,
+    '/v1/profile',
+    { method: 'PUT', body: JSON.stringify(profile) },
+    token,
+  )
+  return payload.data
 }
 
 function librarySearchParams(options: LibraryListOptions) {

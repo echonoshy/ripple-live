@@ -3300,3 +3300,95 @@ button {
   margin-top: 24px;
   padding-bottom: 4px;
 }
+
+.personalization-intro {
+  padding: 14px 16px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.personalization-intro strong,
+.personalization-form label > span {
+  display: block;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.personalization-intro p,
+.personalization-form label > small {
+  display: block;
+  margin: 5px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.personalization-form {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.personalization-form label {
+  display: grid;
+  gap: 7px;
+}
+
+.personalization-form input,
+.personalization-form textarea {
+  width: 100%;
+  min-height: 48px;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.5;
+  padding: 12px 13px;
+  resize: vertical;
+}
+
+.personalization-form textarea {
+  min-height: 92px;
+}
+
+.personalization-form input::placeholder,
+.personalization-form textarea::placeholder {
+  color: var(--text-tertiary);
+}
+
+.personalization-form input:focus-visible,
+.personalization-form textarea:focus-visible,
+.personalization-form button:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.personalization-form button {
+  min-height: 48px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--accent);
+  color: var(--app-bg);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.personalization-form button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.personalization-feedback {
+  margin: -4px 0 0;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.personalization-feedback.is-error {
+  color: var(--danger);
+}

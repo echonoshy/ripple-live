@@ -89,6 +89,32 @@ test('mobile app keeps the service address out of visible forms', () => {
   assert.doesNotMatch(appSource, /htmlFor="server">服务地址/)
 })
 
+test('settings exposes persistent personalization separately from visual memory', () => {
+  const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
+  const apiSource = readFileSync(path.join(appRoot, 'src/api.ts'), 'utf8')
+  const profileSource = readFileSync(
+    path.join(appRoot, 'src/components/PersonalizationSection.tsx'),
+    'utf8',
+  )
+  const cssSource = readFileSync(path.join(appRoot, 'src/App.css'), 'utf8')
+
+  assert.match(appSource, /<PersonalizationSection server=\{server\} token=\{accessToken\} \/>/)
+  assert.match(apiSource, /'\/v1\/profile'/)
+  for (const label of ['Ripple 的身份', '你的身份', '希望怎么称呼你', '基础资料']) {
+    assert.match(profileSource, new RegExp(label))
+  }
+  assert.match(profileSource, /不会混入通话里保存的视觉记忆/)
+  assert.match(profileSource, /已保存，将从下一轮对话开始生效/)
+  assert.match(
+    cssSource,
+    /\.personalization-form input,[\s\S]*?min-height:\s*48px;/,
+  )
+  assert.match(
+    cssSource,
+    /\.personalization-form button\s*{[^}]*min-height:\s*48px;/s,
+  )
+})
+
 test('mobile uses protocol v5 semantic endpointing and mode changes', () => {
   const appSource = readFileSync(path.join(appRoot, 'src/App.tsx'), 'utf8')
   const mediaSource = readFileSync(
