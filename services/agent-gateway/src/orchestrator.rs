@@ -1255,9 +1255,7 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
-            .await
-            .unwrap();
+        let context = ContextStore::open_test().await.unwrap();
         let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
             .await
             .unwrap();
@@ -1371,9 +1369,7 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
-            .await
-            .unwrap();
+        let context = ContextStore::open_test().await.unwrap();
         context.touch_session("gate-session").await.unwrap();
         let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
             .await
@@ -1414,9 +1410,7 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
-            .await
-            .unwrap();
+        let context = ContextStore::open_test().await.unwrap();
         context
             .touch_session("gate-reasoning-session")
             .await
@@ -1620,9 +1614,7 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
-            .await
-            .unwrap();
+        let context = ContextStore::open_test().await.unwrap();
         context.touch_session("metrics-session").await.unwrap();
         let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
             .await
@@ -1694,9 +1686,7 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
-            .await
-            .unwrap();
+        let context = ContextStore::open_test().await.unwrap();
         context.touch_session("recovery-session").await.unwrap();
         let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
             .await

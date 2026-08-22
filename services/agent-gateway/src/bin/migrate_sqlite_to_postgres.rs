@@ -99,7 +99,6 @@ async fn main() -> anyhow::Result<()> {
 
     reset_identity(&postgres, "events").await?;
     reset_identity(&postgres, "turns").await?;
-    reset_identity(&postgres, "memories").await?;
     validate_counts(&sqlite, &postgres).await?;
     println!("SQLite -> PostgreSQL migration completed and row counts match");
     Ok(())
@@ -216,15 +215,45 @@ async fn copy_sessions_events_turns(
         .fetch_all(sqlite)
         .await?
     {
+        let id = row.get::<i64, _>("id");
+        let session_id = row.get::<String, _>("session_id");
+        let content = row.get::<String, _>("content");
+        let created_at = row.get::<f64, _>("created_at");
         sqlx::query(
-            "INSERT INTO memories(id, session_id, content, created_at) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO legacy_memory_archive(id, session_id, content, created_at)
+             VALUES ($1, $2, $3, $4)",
         )
-        .bind(row.get::<i64, _>("id"))
-        .bind(row.get::<String, _>("session_id"))
-        .bind(row.get::<String, _>("content"))
-        .bind(row.get::<f64, _>("created_at"))
+        .bind(id)
+        .bind(&session_id)
+        .bind(&content)
+        .bind(created_at)
         .execute(&mut **tx)
         .await?;
+
+        let user_id =
+            sqlx::query_scalar::<_, String>("SELECT user_id FROM conversations WHERE id = ?1")
+                .bind(&session_id)
+                .fetch_optional(sqlite)
+                .await?;
+        if let Some(user_id) = user_id {
+            sqlx::query(
+                "INSERT INTO memory_items(
+                    id, user_id, scope_type, project_id, conversation_id,
+                    source_turn_id, source_response_id, kind, user_note,
+                    visual_summary, cover_asset_id, captured_at, created_at,
+                    updated_at, is_pinned, archived_at
+                 ) VALUES ($1, $2, 'personal', NULL, $3, NULL,
+                           'legacy-session-import', 'text', $4, '', NULL,
+                           NULL, $5, $5, 0, NULL)",
+            )
+            .bind(format!("legacy-session-{id}"))
+            .bind(user_id)
+            .bind(session_id)
+            .bind(content)
+            .bind(created_at)
+            .execute(&mut **tx)
+            .await?;
+        }
     }
     Ok(())
 }
@@ -439,8 +468,6 @@ async fn validate_counts(sqlite: &SqlitePool, postgres: &PgPool) -> anyhow::Resu
         "sessions",
         "events",
         "turns",
-        "memories",
-        "memory_items",
         "assets",
         "memory_assets",
         "turn_attachments",
@@ -457,5 +484,35 @@ async fn validate_counts(sqlite: &SqlitePool, postgres: &PgPool) -> anyhow::Resu
         }
         println!("{table}: {target}");
     }
+
+    let source_legacy: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories")
+        .fetch_one(sqlite)
+        .await?;
+    let target_archive: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM legacy_memory_archive")
+        .fetch_one(postgres)
+        .await?;
+    if source_legacy != target_archive {
+        anyhow::bail!("旧记忆归档数量不一致: sqlite={source_legacy}, postgres={target_archive}");
+    }
+
+    let source_explicit: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_items")
+        .fetch_one(sqlite)
+        .await?;
+    let source_attributable_legacy: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM memories m JOIN conversations c ON c.id = m.session_id",
+    )
+    .fetch_one(sqlite)
+    .await?;
+    let target_explicit: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_items")
+        .fetch_one(postgres)
+        .await?;
+    let expected_explicit = source_explicit + source_attributable_legacy;
+    if expected_explicit != target_explicit {
+        anyhow::bail!(
+            "显式记忆数量不一致: expected={expected_explicit}, postgres={target_explicit}"
+        );
+    }
+    println!("legacy_memory_archive: {target_archive}");
+    println!("memory_items: {target_explicit}");
     Ok(())
 }

@@ -10,7 +10,8 @@ This deployment is a fully self-hosted cascaded speech Agent:
 - Qwen3-TTS-12Hz-1.7B-CustomVoice runs behind vLLM-Omni's two-stage batched
   serving pipeline with the Chinese-native Serena voice, explicit natural
   speaking-style instructions, and 24 kHz output.
-- SQLite keeps sessions, turns, tool events, and explicit long-term memories.
+- PostgreSQL keeps accounts, sessions, turns, tool events, projects, memories,
+  and retrieval indexes; binary assets remain in the configured data directory.
 
 ## Prerequisites
 
@@ -135,16 +136,15 @@ Configure `RIPPLE_TAVILY_API_KEY` plus the QWeather API host and either an API
 key or the JWT project ID, credential ID, and Ed25519 private-key path in `.env`. The Gateway passes only
 the manifest allowlisted variables to each short-lived CLI process. Set
 `RIPPLE_SEARCH_PROXY` when the Gateway host needs a dedicated outbound proxy.
-Tool results use a stable JSON envelope, share a SQLite cache, and never treat
+Tool results use a stable JSON envelope, share a small local cache, and never treat
 an empty or failed result as evidence.
 
 ## Context extension
 
-The initial context manager is intentionally behind `ContextStore`. It
-persists a complete event log, recent conversational turns, and explicit
-memories in `runtime-data/agent-gateway/context.sqlite3`. A later Redis/PostgreSQL or
-vector-memory implementation can replace this class without changing the
-Android protocol or model adapters.
+`ContextStore` persists the event log, recent conversational turns, projects,
+profiles, and explicit memories in PostgreSQL. Search combines PostgreSQL text
+matching with pgvector retrieval; binary assets remain under
+`RIPPLE_DATA_DIR/assets`.
 
 Calls started from Home create a new conversation, while calls started from a
 conversation detail screen continue that conversation. Server-side events
@@ -153,8 +153,8 @@ input commit, transcript, context load, Agent rounds, TTS segments, completion,
 cancellation, or failure. Inspect the latest flow with:
 
 ```bash
-sqlite3 runtime-data/agent-gateway/context.sqlite3 \
-  "SELECT datetime(created_at, 'unixepoch', 'localtime'), session_id, kind, payload FROM events ORDER BY id DESC LIMIT 100;"
+psql "$RIPPLE_DATABASE_URL" -c \
+  "SELECT to_timestamp(created_at), session_id, kind, payload FROM events ORDER BY id DESC LIMIT 100;"
 ```
 
 Gateway logs carry the same `session_id` and, for per-turn work, `response_id`:

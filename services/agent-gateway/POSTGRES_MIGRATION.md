@@ -36,7 +36,9 @@ cargo run --release --bin migrate_sqlite_to_postgres
 
 The importer preserves IDs and source relationships, resets PostgreSQL identity
 sequences, and verifies row counts for users, conversations, sessions, events,
-turns, legacy memories, explicit memories, assets, attachments, and todos.
+explicit memories, assets, attachments, and todos. Legacy session memories are
+copied to `legacy_memory_archive`; rows whose conversation still identifies an
+owner are also converted into user-owned `memory_items`.
 
 ## Production cutover
 

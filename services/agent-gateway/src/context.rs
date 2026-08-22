@@ -1,4 +1,4 @@
-use std::{path::Path, str::FromStr};
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -107,7 +107,7 @@ impl ContextStore {
     }
 
     #[doc(hidden)]
-    pub async fn open(_path: &Path) -> anyhow::Result<Self> {
+    pub async fn open_test() -> anyhow::Result<Self> {
         let database_url = std::env::var("RIPPLE_TEST_DATABASE_URL").unwrap_or_else(|_| {
             "postgres://postgres:postgres@127.0.0.1:55432/ripple_test".to_owned()
         });
@@ -804,7 +804,6 @@ impl ContextStore {
                 ),
                 ("DELETE FROM turns WHERE session_id IN (", false),
                 ("DELETE FROM events WHERE session_id IN (", false),
-                ("DELETE FROM memories WHERE session_id IN (", false),
                 ("DELETE FROM sessions WHERE id IN (", false),
             ] {
                 let mut delete = QueryBuilder::<Postgres>::new(prefix);
@@ -1081,37 +1080,6 @@ impl ContextStore {
         Ok((fragments.join(" "), count))
     }
 
-    pub async fn remember(&self, session_id: &str, content: &str) -> anyhow::Result<i64> {
-        let row = sqlx::query(
-            "INSERT INTO memories(session_id, content, created_at)
-                 VALUES ($1, $2, $3) RETURNING id",
-        )
-        .bind(session_id)
-        .bind(content)
-        .bind(unix_time())
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(row.get("id"))
-    }
-
-    pub async fn recent_memories(
-        &self,
-        session_id: &str,
-        limit: i64,
-    ) -> anyhow::Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT content FROM memories WHERE session_id = $1 ORDER BY id DESC LIMIT $2",
-        )
-        .bind(session_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| row.get::<String, _>("content"))
-            .collect())
-    }
-
     pub async fn relevant_explicit_memories(
         &self,
         user_id: &str,
@@ -1169,38 +1137,6 @@ impl ContextStore {
                     format!("[{label}] {note}；画面：{visual}")
                 }
             })
-            .collect())
-    }
-
-    pub async fn recall(
-        &self,
-        session_id: &str,
-        query: &str,
-        limit: i64,
-    ) -> anyhow::Result<Vec<String>> {
-        let rows = if query.is_empty() {
-            sqlx::query(
-                "SELECT content FROM memories WHERE session_id = $1
-                 ORDER BY id DESC LIMIT $2",
-            )
-            .bind(session_id)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query(
-                "SELECT content FROM memories WHERE session_id = $1 AND content LIKE $2
-                 ORDER BY id DESC LIMIT $3",
-            )
-            .bind(session_id)
-            .bind(format!("%{query}%"))
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?
-        };
-        Ok(rows
-            .into_iter()
-            .map(|row| row.get::<String, _>("content"))
             .collect())
     }
 }
@@ -1322,25 +1258,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stores_and_recalls_memory() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ContextStore::open(&directory.path().join("test.sqlite3"))
-            .await
-            .unwrap();
-        store.touch_session("s1").await.unwrap();
-        store.remember("s1", "用户喜欢乌龙茶").await.unwrap();
-        assert_eq!(
-            store.recall("s1", "乌龙", 5).await.unwrap(),
-            vec!["用户喜欢乌龙茶"]
-        );
-    }
-
-    #[tokio::test]
     async fn stores_user_profile_per_user() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ContextStore::open(&directory.path().join("profile.sqlite3"))
-            .await
-            .unwrap();
+        let store = ContextStore::open_test().await.unwrap();
         let user = registered_user(&store, "profile@example.com", "profile-invite").await;
 
         assert_eq!(
@@ -1365,10 +1284,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_messages_include_source_actions() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ContextStore::open(&directory.path().join("actions.sqlite3"))
-            .await
-            .unwrap();
+        let store = ContextStore::open_test().await.unwrap();
         let user = registered_user(&store, "actions@example.com", "actions-invite").await;
         let other =
             registered_user(&store, "other-actions@example.com", "other-actions-invite").await;
@@ -1484,10 +1400,7 @@ mod tests {
 
     #[tokio::test]
     async fn joins_unanswered_user_fragments_for_routing() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ContextStore::open(&directory.path().join("routing.sqlite3"))
-            .await
-            .unwrap();
+        let store = ContextStore::open_test().await.unwrap();
         store.touch_session("s1").await.unwrap();
         store
             .add_turn("s1", "user", "帮我搜索一下", None)
@@ -1520,10 +1433,7 @@ mod tests {
 
     #[tokio::test]
     async fn enforces_invite_limits_expiration_and_conversation_isolation() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ContextStore::open(&directory.path().join("auth.sqlite3"))
-            .await
-            .unwrap();
+        let store = ContextStore::open_test().await.unwrap();
         store
             .seed_invitation_codes(&["invite-one".to_owned(), "invite-two".to_owned()], 2, 24)
             .await
@@ -1573,9 +1483,7 @@ mod tests {
         store.revoke_token(&token).await.unwrap();
         assert!(store.authenticate(&token).await.unwrap().is_none());
 
-        let expired_store = ContextStore::open(&directory.path().join("expired.sqlite3"))
-            .await
-            .unwrap();
+        let expired_store = ContextStore::open_test().await.unwrap();
         expired_store
             .seed_invitation_codes(&["expired-invite".to_owned()], 5, 0)
             .await
@@ -1595,10 +1503,7 @@ mod tests {
 
     #[tokio::test]
     async fn organizes_conversations_and_rejects_non_owned_batches_atomically() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ContextStore::open(&directory.path().join("library.sqlite3"))
-            .await
-            .unwrap();
+        let store = ContextStore::open_test().await.unwrap();
         let user = registered_user(&store, "library@example.com", "library-invite").await;
         let other = registered_user(&store, "other-library@example.com", "other-invite").await;
         let conversation = store.create_conversation(&user.id).await.unwrap();
@@ -1682,10 +1587,7 @@ mod tests {
 
     #[tokio::test]
     async fn projects_isolate_their_conversations_from_personal_chat() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ContextStore::open(&directory.path().join("projects.pg-test"))
-            .await
-            .unwrap();
+        let store = ContextStore::open_test().await.unwrap();
         let user = registered_user(&store, "projects@example.com", "projects-invite").await;
         let personal = store.create_conversation(&user.id).await.unwrap();
         let project = store
@@ -1734,10 +1636,7 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_conversation_detaches_todo_sources_before_removing_turns() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ContextStore::open(&directory.path().join("delete.sqlite3"))
-            .await
-            .unwrap();
+        let store = ContextStore::open_test().await.unwrap();
         let user = registered_user(&store, "delete@example.com", "delete-invite").await;
         let conversation = store.create_conversation(&user.id).await.unwrap();
         let source_turn = store

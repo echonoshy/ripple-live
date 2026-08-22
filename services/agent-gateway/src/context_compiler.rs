@@ -34,18 +34,10 @@ impl ContextCompiler {
         current_query: &str,
     ) -> anyhow::Result<CompiledContext> {
         let profile = self.store.user_profile(user_id).await?;
-        let mut memories = self
+        let memories = self
             .store
             .relevant_explicit_memories(user_id, session_id, current_query, 5)
             .await?;
-        if memories.len() < 5 {
-            for legacy in self.store.recent_memories(session_id, 5).await? {
-                if memories.len() >= 5 {
-                    break;
-                }
-                memories.push(format!("[旧会话记忆] {legacy}"));
-            }
-        }
         let project = self
             .store
             .project_for_conversation(user_id, session_id)
@@ -153,13 +145,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn compiles_memories_and_recent_history_with_a_budget() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ContextStore::open(&directory.path().join("context.sqlite3"))
-            .await
-            .unwrap();
+    async fn compiles_recent_history_with_a_budget() {
+        let store = ContextStore::open_test().await.unwrap();
         store.touch_session("s1").await.unwrap();
-        store.remember("s1", "用户喜欢乌龙茶").await.unwrap();
         for index in 0..8 {
             store
                 .add_turn("s1", "user", &format!("第 {index} 条消息"), None)
@@ -168,12 +156,12 @@ mod tests {
         }
 
         let compiled = ContextCompiler::new(store, 8, 1_000)
-            .compile("", "s1", "乌龙茶")
+            .compile("", "s1", "本轮消息")
             .await
             .unwrap();
-        assert_eq!(compiled.memories, 1);
+        assert_eq!(compiled.memories, 0);
         assert_eq!(compiled.history_messages, 8);
-        assert!(compiled.instructions.as_deref().unwrap().contains("乌龙茶"));
+        assert!(compiled.instructions.is_none());
         assert!(
             compiled
                 .messages
@@ -184,10 +172,7 @@ mod tests {
 
     #[tokio::test]
     async fn injects_user_profile_as_stable_context() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ContextStore::open(&directory.path().join("profile-context.sqlite3"))
-            .await
-            .unwrap();
+        let store = ContextStore::open_test().await.unwrap();
         store
             .seed_invitation_codes(&["profile-context-invite".to_owned()], 1, 24)
             .await

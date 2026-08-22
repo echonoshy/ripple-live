@@ -32,7 +32,7 @@ Android 摄像头 ── sampled JPEG ─┼── Rust Agent Gateway :8700
                                │     ├── Qwen3-ASR :8711
                                │     ├── Qwen3.5-35B-A3B :8712
                                │     ├── allowlisted tools / skills
-                               │     ├── SQLite conversation & memory store
+                               │     ├── PostgreSQL + pgvector context store
 Android 扬声器 ◀─ 24 kHz PCM ───┘     └── Qwen3-TTS + vLLM-Omni :8723
 ```
 
@@ -46,7 +46,7 @@ Gateway 负责会话轮次、Responses API、工具循环、上下文存储和�
 | 原生宿主 | Rust、Android WebView、Gradle |
 | Agent Gateway | Rust、Responses API、WebSocket realtime |
 | 语音与视觉 | Qwen3-ASR、Qwen3.5-35B-A3B、Qwen3-TTS、vLLM-Omni |
-| 数据 | SQLite、本地附件存储 |
+| 数据 | PostgreSQL、pgvector/pg_trgm、本地附件存储 |
 | 工具 | `SKILL.md` + `tools.json` + JSON 子进程协议 |
 
 ## 仓库结构

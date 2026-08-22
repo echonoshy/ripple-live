@@ -94,12 +94,6 @@ fn mode_snapshot_after_change(
     }
 }
 
-impl PendingTurn {
-    fn matches_response(&self, response_id: Option<&str>) -> bool {
-        response_id.is_some_and(|response_id| response_id == self.response_id)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EndpointPhase {
     Speaking,
@@ -3351,18 +3345,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_video_turn_only_accepts_its_own_response_id() {
-        let pending = PendingTurn {
-            response_id: "response-current".to_owned(),
-            transcript: "看一下这个设备".to_owned(),
-        };
-
-        assert!(pending.matches_response(Some("response-current")));
-        assert!(!pending.matches_response(Some("response-stale")));
-        assert!(!pending.matches_response(None));
-    }
-
-    #[test]
     fn failed_response_is_public_and_correlated() {
         let event = failed_response_event(
             "response-9",
@@ -3424,9 +3406,7 @@ mod tests {
         settings.asr_backend = "mock".to_owned();
         settings.agent_backend = "mock".to_owned();
         settings.tts_backend = "mock".to_owned();
-        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
-            .await
-            .unwrap();
+        let context = ContextStore::open_test().await.unwrap();
 
         let report = check_readiness(&settings, &context).await;
 
@@ -3737,9 +3717,7 @@ mod tests {
             .await
             .unwrap();
         let settings = Arc::new(settings);
-        let context = ContextStore::open(&settings.data_dir.join("context.pg-test"))
-            .await
-            .unwrap();
+        let context = ContextStore::open_test().await.unwrap();
         context
             .seed_invitation_codes(&["route-one".to_owned(), "route-two".to_owned()], 1, 24)
             .await

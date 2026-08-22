@@ -1073,9 +1073,7 @@ mod tests {
     #[tokio::test]
     async fn creates_completes_lists_and_attaches_todo_evidence() {
         let directory = tempfile::tempdir().unwrap();
-        let context = ContextStore::open(&directory.path().join("context.sqlite3"))
-            .await
-            .unwrap();
+        let context = ContextStore::open_test().await.unwrap();
         context
             .seed_invitation_codes(&["todo-invite".to_owned()], 1, 24)
             .await
@@ -1176,9 +1174,7 @@ mod tests {
     #[tokio::test]
     async fn persists_recalls_attaches_and_deletes_visual_memory() {
         let directory = tempfile::tempdir().unwrap();
-        let context = ContextStore::open(&directory.path().join("context.sqlite3"))
-            .await
-            .unwrap();
+        let context = ContextStore::open_test().await.unwrap();
         context
             .seed_invitation_codes(&["memory-invite".to_owned()], 2, 24)
             .await
@@ -1313,9 +1309,7 @@ mod tests {
     #[tokio::test]
     async fn saved_memory_survives_its_conversation_and_batch_is_atomic() {
         let directory = tempfile::tempdir().unwrap();
-        let context = ContextStore::open(&directory.path().join("survival.sqlite3"))
-            .await
-            .unwrap();
+        let context = ContextStore::open_test().await.unwrap();
         context
             .seed_invitation_codes(
                 &["survival-invite".to_owned(), "survival-other".to_owned()],
@@ -1430,9 +1424,7 @@ mod tests {
     #[tokio::test]
     async fn project_memories_are_recalled_only_inside_their_project() {
         let directory = tempfile::tempdir().unwrap();
-        let context = ContextStore::open(&directory.path().join("project-memory.pg-test"))
-            .await
-            .unwrap();
+        let context = ContextStore::open_test().await.unwrap();
         context
             .seed_invitation_codes(&["project-memory-invite".to_owned()], 1, 24)
             .await
