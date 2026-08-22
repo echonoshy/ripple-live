@@ -4873,6 +4873,110 @@ button:disabled {
   line-height: 1.5;
 }
 
+.personalization-current {
+  padding: 16px;
+  border-top: 1px solid var(--line);
+  background: #080709;
+}
+
+.personalization-current-header,
+.personalization-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.personalization-kicker {
+  display: block;
+  color: var(--accent);
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.personalization-current-header h3,
+.personalization-form-heading strong {
+  display: block;
+  margin: 4px 0 0;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.personalization-save-state {
+  flex: none;
+  padding: 5px 8px;
+  border: 1px solid rgb(155 77 255 / 35%);
+  border-radius: 6px;
+  background: rgb(155 77 255 / 8%);
+  color: #c89cff;
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
+  font-size: 10px;
+}
+
+.personalization-save-state.is-dirty {
+  border-color: rgb(255 190 92 / 35%);
+  background: rgb(255 190 92 / 8%);
+  color: #f1bd70;
+}
+
+.personalization-current-list {
+  display: grid;
+  margin: 14px 0 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.personalization-current-list > div {
+  display: grid;
+  grid-template-columns: minmax(86px, 0.32fr) 1fr;
+  gap: 12px;
+  padding: 11px 12px;
+  background: #0d0b10;
+}
+
+.personalization-current-list > div + div {
+  border-top: 1px solid var(--line);
+}
+
+.personalization-current-list dt,
+.personalization-current-list dd {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.personalization-current-list dt {
+  color: var(--text-tertiary);
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
+}
+
+.personalization-current-list dd {
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.personalization-current-list dd.is-empty,
+.personalization-current-empty,
+.personalization-updated-at {
+  color: var(--text-tertiary);
+}
+
+.personalization-current-empty,
+.personalization-updated-at {
+  margin: 12px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.personalization-form-heading {
+  padding-bottom: 2px;
+}
+
 .personalization-form {
   display: grid;
   gap: 16px;
@@ -4925,6 +5029,16 @@ button:disabled {
   color: var(--app-bg);
   font-size: 14px;
   font-weight: 750;
+}
+
+.personalization-actions > button {
+  flex: 1 1 0;
+}
+
+.personalization-form .personalization-restore {
+  border: 1px solid var(--line);
+  background: #0d0b10;
+  color: var(--text-secondary);
 }
 
 .personalization-form button:disabled {

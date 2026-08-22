@@ -9,7 +9,7 @@
     "web:dev:lan": "vite --host 0.0.0.0 --port 1420",
     "build": "tsc -b && vite build",
     "test:library": "tsc src/library.ts --outDir .test-dist --module nodenext --moduleResolution nodenext --target es2022 --ignoreConfig && node --test tests/library.test.mjs; task_status=$?; rm -f .test-dist/library.js; rmdir .test-dist 2>/dev/null || true; exit $task_status",
-    "test:mobile": "node --test tests/mobile-package.test.mjs && tsx --test tests/conversation-actions.test.tsx tests/user-avatar.test.ts && npm run test:library",
+    "test:mobile": "node --test tests/mobile-package.test.mjs && tsx --test tests/conversation-actions.test.tsx tests/personalization-model.test.ts tests/project-ui.test.tsx tests/user-avatar.test.ts && npm run test:library",
     "test:playback": "tsx --test tests/playback-telemetry.test.ts",
     "test:media": "tsx --test tests/live-media-lifecycle.test.ts tests/camera-orchestration.test.ts tests/camera-activation.test.ts",
     "test:live-media": "tsx --test tests/live-media.test.ts tests/live-media-lifecycle.test.ts",
