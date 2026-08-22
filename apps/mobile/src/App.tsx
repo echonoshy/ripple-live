@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   MessageCircle as ChatCircleDots,
   Circle,
-  Database,
   Mail as EnvelopeSimple,
   FolderKanban,
   Image as ImagesSquare,
@@ -75,6 +74,7 @@ import {
 import { ConversationActions } from './components/ConversationActions'
 import { LiveCallScreen } from './components/LiveCallScreen'
 import { LibrarySection } from './components/LibrarySection'
+import { LibraryResourcesScreen } from './components/LibraryResourcesScreen'
 import { LibraryToolbar } from './components/LibraryToolbar'
 import { MarkdownContent } from './components/MarkdownContent'
 import { MeetingRecords } from './components/MeetingRecords'
@@ -2761,7 +2761,11 @@ export default function App() {
       )}
 
       {screen === 'materials' && (
-        <SecondaryScaffold title="资料库" icon={Database} onBack={() => navigateTo('home')} />
+        <LibraryResourcesScreen
+          server={server}
+          token={accessToken}
+          onBack={() => navigateTo('home')}
+        />
       )}
 
       {screen === 'call' && (

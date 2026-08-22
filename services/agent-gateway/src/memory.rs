@@ -407,6 +407,7 @@ impl MemoryService {
                 (SELECT COUNT(*) FROM turn_attachments WHERE asset_id = $1) +
                 (SELECT COUNT(*) FROM todos WHERE cover_asset_id = $1) +
                 (SELECT COUNT(*) FROM project_resources WHERE asset_id = $1) +
+                (SELECT COUNT(*) FROM library_resources WHERE asset_id = $1) +
                 (SELECT COUNT(*) FROM memory_evidence WHERE asset_id = $1) +
                 (SELECT COUNT(*) FROM users WHERE avatar_asset_id = $1)",
         )
@@ -1050,6 +1051,7 @@ impl MemoryService {
                         (SELECT COUNT(*) FROM turn_attachments WHERE asset_id = $1) +
                         (SELECT COUNT(*) FROM todos WHERE cover_asset_id = $1) +
                         (SELECT COUNT(*) FROM project_resources WHERE asset_id = $1) +
+                        (SELECT COUNT(*) FROM library_resources WHERE asset_id = $1) +
                         (SELECT COUNT(*) FROM memory_evidence WHERE asset_id = $1) +
                         (SELECT COUNT(*) FROM users WHERE avatar_asset_id = $1)",
                 )

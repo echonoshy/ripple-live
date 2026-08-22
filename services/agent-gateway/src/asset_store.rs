@@ -6,6 +6,7 @@ use tokio::fs;
 use uuid::Uuid;
 
 const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_IMAGE_SIDE: u32 = 4_096;
 const MAX_IMAGE_PIXELS: u64 = 16_000_000;
 
@@ -75,6 +76,48 @@ impl AssetStore {
         })
     }
 
+    pub async fn store_document(
+        &self,
+        user_id: &str,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> anyhow::Result<StoredAsset> {
+        if bytes.is_empty() || bytes.len() > MAX_DOCUMENT_BYTES {
+            anyhow::bail!("文件大小必须在 1 字节到 10MB 之间");
+        }
+        let (mime_type, extension) = match mime_type.trim().to_ascii_lowercase().as_str() {
+            "application/pdf" => ("application/pdf", "pdf"),
+            "text/plain" => ("text/plain", "txt"),
+            "text/markdown" | "text/x-markdown" => ("text/markdown", "md"),
+            _ => anyhow::bail!("当前仅支持 PDF、TXT 和 Markdown 文件"),
+        };
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let safe_user = safe_segment(user_id)?;
+        let relative = format!("{safe_user}/{sha256}.{extension}");
+        let final_path = self.root.join(&relative);
+        if fs::metadata(&final_path).await.is_err() {
+            let user_dir = self.root.join(&safe_user);
+            fs::create_dir_all(&user_dir).await?;
+            let temporary = user_dir.join(format!(".{}.tmp", Uuid::new_v4().simple()));
+            fs::write(&temporary, bytes).await?;
+            if fs::metadata(&final_path).await.is_ok() {
+                let _ = fs::remove_file(&temporary).await;
+            } else if let Err(error) = fs::rename(&temporary, &final_path).await {
+                let _ = fs::remove_file(&temporary).await;
+                return Err(error.into());
+            }
+        }
+        Ok(StoredAsset {
+            id: format!("asset_{}", Uuid::new_v4().simple()),
+            sha256,
+            mime_type: mime_type.to_owned(),
+            storage_key: relative,
+            width: 0,
+            height: 0,
+            size_bytes: bytes.len(),
+        })
+    }
+
     pub fn resolve(&self, storage_key: &str) -> anyhow::Result<PathBuf> {
         let path = Path::new(storage_key);
         if path.is_absolute()
@@ -117,6 +160,24 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = AssetStore::new(temp.path().to_owned()).await.unwrap();
         assert!(store.store_jpeg("user_1", b"not an image").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stores_only_supported_documents() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AssetStore::new(temp.path().to_owned()).await.unwrap();
+        let stored = store
+            .store_document("user_1", "text/markdown", b"# Ripple")
+            .await
+            .unwrap();
+        assert_eq!(stored.mime_type, "text/markdown");
+        assert!(store.resolve(&stored.storage_key).unwrap().exists());
+        assert!(
+            store
+                .store_document("user_1", "application/zip", b"zip")
+                .await
+                .is_err()
+        );
     }
 
     #[test]

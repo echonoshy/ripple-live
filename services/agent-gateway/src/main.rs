@@ -9,7 +9,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{
-        Path, Query, State,
+        DefaultBodyLimit, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, HeaderValue, Method, StatusCode},
@@ -25,6 +25,7 @@ use ripple_agent_gateway::{
     config::Settings,
     context::{ContextStore, LibraryAction, LibraryScope},
     endpointing::{EndpointEvaluation, is_stop_command},
+    library_resources::{CreateLibraryResource, LibraryResourceService, UpdateLibraryResource},
     meetings::MeetingService,
     memory::{MemoryService, TodoUpdate},
     orchestrator::AgentOrchestrator,
@@ -49,6 +50,7 @@ struct AppState {
     settings: Arc<Settings>,
     context: ContextStore,
     memories: MemoryService,
+    resources: LibraryResourceService,
     meetings: MeetingService,
     orchestrator: AgentOrchestrator,
 }
@@ -749,6 +751,8 @@ async fn main() -> anyhow::Result<()> {
     }
     let adapters = ModelAdapters::new((*settings).clone())?;
     let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets")).await?;
+    let resources =
+        LibraryResourceService::new(context.clone(), settings.data_dir.join("assets")).await?;
     let meetings = MeetingService::new(context.clone(), adapters.clone());
     let orchestrator = AgentOrchestrator::new(
         Arc::clone(&settings),
@@ -760,6 +764,7 @@ async fn main() -> anyhow::Result<()> {
         settings: Arc::clone(&settings),
         context,
         memories,
+        resources,
         meetings,
         orchestrator,
     };
@@ -839,6 +844,16 @@ fn app(state: AppState) -> Router {
             "/v1/memory-facts/{fact_id}",
             axum::routing::patch(update_memory_fact).delete(delete_memory_fact),
         )
+        .route(
+            "/v1/library-resources",
+            get(list_library_resources).post(create_library_resource),
+        )
+        .route(
+            "/v1/library-resources/{resource_id}",
+            get(get_library_resource)
+                .patch(update_library_resource)
+                .delete(delete_library_resource),
+        )
         .route("/v1/memories", get(list_memories))
         .route("/v1/memories/batch", post(batch_memories))
         .route(
@@ -853,6 +868,7 @@ fn app(state: AppState) -> Router {
         .route("/v1/assets/{asset_id}/content", get(asset_content))
         .route("/v1/responses", post(create_response))
         .route("/v1/agent/realtime", get(realtime))
+        .layer(DefaultBodyLimit::max(15 * 1024 * 1024))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http().make_span_with(
@@ -979,6 +995,38 @@ struct MemoryFactCreate {
 struct MemoryFactPatch {
     kind: Option<String>,
     summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LibraryResourceQuery {
+    #[serde(default)]
+    query: String,
+    #[serde(rename = "type")]
+    resource_type: Option<String>,
+    #[serde(default)]
+    archived: bool,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LibraryResourceCreate {
+    #[serde(rename = "type")]
+    resource_type: String,
+    title: String,
+    content: Option<String>,
+    url: Option<String>,
+    project_id: Option<String>,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    data_base64: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LibraryResourcePatch {
+    title: Option<String>,
+    content: Option<String>,
+    url: Option<String>,
+    archived: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1608,6 +1656,124 @@ fn spawn_meeting_generation(meetings: MeetingService, user_id: String, meeting_i
                 .await;
         }
     });
+}
+
+async fn list_library_resources(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<LibraryResourceQuery>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .resources
+        .list(
+            &user.id,
+            &query.query,
+            query.resource_type.as_deref(),
+            query.archived,
+            query.limit.unwrap_or(100).clamp(1, 100) as usize,
+        )
+        .await
+    {
+        Ok(resources) => Json(json!({"data": resources})).into_response(),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn get_library_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(resource_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.resources.get(&user.id, &resource_id).await {
+        Ok(Some(resource)) => Json(json!({"data": resource})).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "资料不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn create_library_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<LibraryResourceCreate>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .resources
+        .create(
+            &user.id,
+            CreateLibraryResource {
+                resource_type: request.resource_type,
+                title: request.title,
+                content: request.content,
+                source_url: request.url,
+                project_id: request.project_id,
+                file_name: request.file_name,
+                mime_type: request.mime_type,
+                data_base64: request.data_base64,
+            },
+        )
+        .await
+    {
+        Ok(resource) => (StatusCode::CREATED, Json(json!({"data": resource}))).into_response(),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn update_library_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(resource_id): Path<String>,
+    Json(request): Json<LibraryResourcePatch>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .resources
+        .update(
+            &user.id,
+            &resource_id,
+            UpdateLibraryResource {
+                title: request.title,
+                content: request.content,
+                source_url: request.url,
+                archived: request.archived,
+            },
+        )
+        .await
+    {
+        Ok(Some(resource)) => Json(json!({"data": resource})).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "资料不存在"),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn delete_library_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(resource_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.resources.delete(&user.id, &resource_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "资料不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
 }
 
 async fn list_memory_facts(
@@ -4103,6 +4269,10 @@ mod tests {
         let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
             .await
             .unwrap();
+        let resources =
+            LibraryResourceService::new(context.clone(), settings.data_dir.join("assets"))
+                .await
+                .unwrap();
         let adapters = ModelAdapters::new((*settings).clone()).unwrap();
         let meetings = MeetingService::new(context.clone(), adapters.clone());
         let orchestrator = AgentOrchestrator::new(
@@ -4118,6 +4288,7 @@ mod tests {
                 settings,
                 context,
                 memories,
+                resources,
                 meetings,
                 orchestrator,
             },

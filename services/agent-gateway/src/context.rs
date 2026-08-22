@@ -1190,6 +1190,58 @@ impl ContextStore {
             })
             .collect())
     }
+
+    pub async fn relevant_library_chunks(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        query: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "WITH current_scope AS (
+                SELECT project_id FROM conversations
+                WHERE id = $1 AND user_id = $2
+             )
+             SELECT d.title, c.content, similarity(c.content, $3) AS score
+             FROM retrieval_chunks c
+             JOIN retrieval_documents d ON d.id = c.document_id
+             CROSS JOIN current_scope s
+             JOIN library_resources r
+               ON d.source_type = 'library_resource' AND d.source_id = r.id
+             WHERE d.user_id = $2 AND d.status = 'active' AND r.archived_at IS NULL
+               AND (
+                    (s.project_id IS NULL AND d.scope_type = 'personal')
+                    OR (s.project_id IS NOT NULL AND
+                        (d.scope_type = 'personal' OR d.project_id = s.project_id))
+               )
+               AND (
+                    similarity(c.content, $3) >= 0.05
+                    OR c.content ILIKE '%' || $3 || '%'
+                    OR d.title ILIKE '%' || $3 || '%'
+               )
+             ORDER BY score DESC, c.importance DESC, r.updated_at DESC
+             LIMIT $4",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(query)
+        .bind(limit.clamp(1, 8))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let title: String = row.get("title");
+                let content: String = row.get("content");
+                format!("[资料：{title}] {content}")
+            })
+            .collect())
+    }
 }
 
 fn validate_library_ids(ids: &[String]) -> anyhow::Result<()> {

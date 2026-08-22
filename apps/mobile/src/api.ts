@@ -115,6 +115,44 @@ export type MemoryFactPatch = {
   summary?: string
 }
 
+export type LibraryResourceType = 'note' | 'link' | 'file'
+
+export type LibraryResource = {
+  id: string
+  title: string
+  resource_type: LibraryResourceType
+  scope_type: 'personal' | 'project'
+  project_id: string | null
+  project_name: string | null
+  source_url: string | null
+  mime_type: string | null
+  asset_id: string | null
+  content: string
+  metadata: Record<string, unknown>
+  status: 'ready' | 'stored' | 'error'
+  created_at: number
+  updated_at: number
+  archived_at: number | null
+}
+
+export type LibraryResourceCreate = {
+  type: LibraryResourceType
+  title: string
+  content?: string
+  url?: string
+  project_id?: string
+  file_name?: string
+  mime_type?: string
+  data_base64?: string
+}
+
+export type LibraryResourcePatch = {
+  title?: string
+  content?: string
+  url?: string
+  archived?: boolean
+}
+
 export type TodoItem = {
   id: string
   memory_id: string | null
@@ -880,6 +918,87 @@ export function deleteMemoryFact(
   return request<void>(
     server,
     `/v1/memory-facts/${encodeURIComponent(factId)}`,
+    { method: 'DELETE' },
+    token,
+  )
+}
+
+export async function libraryResources(
+  server: string,
+  token: string,
+  options: {
+    query?: string
+    type?: LibraryResourceType
+    archived?: boolean
+    limit?: number
+  } = {},
+) {
+  const params = new URLSearchParams({
+    query: options.query ?? '',
+    archived: String(options.archived ?? false),
+    limit: String(options.limit ?? 100),
+  })
+  if (options.type) params.set('type', options.type)
+  const payload = await request<{ data: LibraryResource[] }>(
+    server,
+    `/v1/library-resources?${params}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function libraryResource(
+  server: string,
+  token: string,
+  resourceId: string,
+) {
+  const payload = await request<{ data: LibraryResource }>(
+    server,
+    `/v1/library-resources/${encodeURIComponent(resourceId)}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function createLibraryResource(
+  server: string,
+  token: string,
+  input: LibraryResourceCreate,
+) {
+  const payload = await request<{ data: LibraryResource }>(
+    server,
+    '/v1/library-resources',
+    { method: 'POST', body: JSON.stringify(input) },
+    token,
+  )
+  return payload.data
+}
+
+export async function updateLibraryResource(
+  server: string,
+  token: string,
+  resourceId: string,
+  patch: LibraryResourcePatch,
+) {
+  const payload = await request<{ data: LibraryResource }>(
+    server,
+    `/v1/library-resources/${encodeURIComponent(resourceId)}`,
+    { method: 'PATCH', body: JSON.stringify(patch) },
+    token,
+  )
+  return payload.data
+}
+
+export function deleteLibraryResource(
+  server: string,
+  token: string,
+  resourceId: string,
+) {
+  return request<void>(
+    server,
+    `/v1/library-resources/${encodeURIComponent(resourceId)}`,
     { method: 'DELETE' },
     token,
   )
