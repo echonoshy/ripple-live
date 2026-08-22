@@ -1,41 +1,23 @@
 import {
-  ArrowRight,
-  Brain,
-  History,
-  House,
-  ListTodo,
+  Menu,
   Mic as Microphone,
-  Settings,
   Video as VideoCamera,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import type { ConversationSummary } from '../api'
 import { LiveOrb } from './LiveOrb'
 
 const PET_REPLIES = ['我在呀', '要一起做点什么吗？', '抓到我啦', '今天也陪着你'] as const
 
 export function ConversationHome({
   accountLabel,
-  recentConversation,
   onStartAudio,
   onStartVideo,
   onOpenMenu,
-  onOpenRecent,
-  onOpenHistory,
-  onOpenMemories,
-  onOpenTodos,
-  historyError,
 }: {
   accountLabel: string
-  recentConversation?: ConversationSummary
   onStartAudio(): void
   onStartVideo(): void
   onOpenMenu(): void
-  onOpenRecent(): void
-  onOpenHistory(): void
-  onOpenMemories(): void
-  onOpenTodos(): void
-  historyError?: string
 }) {
   const [petReply, setPetReply] = useState<string | null>(null)
   const replyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -55,13 +37,14 @@ export function ConversationHome({
     <section className="conversation-home">
       <header className="conversation-home-header">
         <strong className="home-brand"><span aria-hidden="true" />Ripple</strong>
-        <button type="button" aria-label="打开设置与更多功能" onClick={onOpenMenu}>
-          <Settings aria-hidden="true" />
+        <button type="button" aria-label="打开菜单" onClick={onOpenMenu}>
+          <Menu aria-hidden="true" />
         </button>
       </header>
 
       <div className="conversation-home-content">
         <h1>你好，{accountLabel.split('@')[0] || '朋友'}</h1>
+        <p className="home-companion-prompt">今天想聊点什么？</p>
         <div className="home-orb-stage" aria-label="Ripple 精灵正在等待对话">
           <div className="home-wave-field" aria-hidden="true">
             {Array.from({ length: 13 }, (_, index) => <i key={index} />)}
@@ -82,26 +65,6 @@ export function ConversationHome({
           </button>
           <div className="home-wave-shadow" aria-hidden="true"><i /><i /><i /></div>
         </div>
-
-        <p className="home-companion-prompt">我在这里，今天想一起做什么？</p>
-
-        {historyError && (
-          <p className="history-error" role="status">{historyError}</p>
-        )}
-
-        {recentConversation && (
-          <section className="home-recent" aria-labelledby="home-recent-title">
-            <span id="home-recent-title">继续上次对话</span>
-            <button type="button" onClick={onOpenRecent}>
-              <span className="home-recent-icon" aria-hidden="true"><History /></span>
-              <span className="home-recent-copy">
-                <strong>{recentConversation.title || '未命名对话'}</strong>
-                <small>{recentConversation.preview || '继续刚才的话题'}</small>
-              </span>
-              <ArrowRight aria-hidden="true" />
-            </button>
-          </section>
-        )}
       </div>
 
       <div className="home-actions" aria-label="开始对话">
@@ -116,20 +79,6 @@ export function ConversationHome({
         </button>
       </div>
 
-      <nav className="home-navigation" aria-label="主导航">
-        <button className="is-active" type="button" aria-current="page">
-          <House aria-hidden="true" /><span>陪伴</span>
-        </button>
-        <button type="button" onClick={onOpenHistory}>
-          <History aria-hidden="true" /><span>对话</span>
-        </button>
-        <button type="button" onClick={onOpenMemories}>
-          <Brain aria-hidden="true" /><span>记忆</span>
-        </button>
-        <button type="button" onClick={onOpenTodos}>
-          <ListTodo aria-hidden="true" /><span>待办</span>
-        </button>
-      </nav>
     </section>
   )
 }

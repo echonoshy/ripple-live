@@ -1,13 +1,15 @@
 import {
   RotateCcw as ArrowCounterClockwise,
   ArrowLeft,
+  CalendarDays,
   MessageCircle as ChatCircleDots,
   Circle,
+  Database,
   Mail as EnvelopeSimple,
+  FolderKanban,
   Image as ImagesSquare,
   LockKeyhole as LockKey,
   ListTodo as ListChecks,
-  Menu,
   Mic as Microphone,
   MoreVertical as DotsThreeVertical,
   Pin as PushPin,
@@ -68,6 +70,7 @@ import { LibrarySection } from './components/LibrarySection'
 import { LibraryToolbar } from './components/LibraryToolbar'
 import { MarkdownContent } from './components/MarkdownContent'
 import { PersonalizationSection } from './components/PersonalizationSection'
+import { SecondaryScaffold } from './components/SecondaryScaffold'
 import { UserAvatar } from './components/UserAvatar'
 import {
   groupLibraryItems,
@@ -119,9 +122,13 @@ type Screen =
   | 'call'
   | 'settings'
   | 'history'
+  | 'meetings'
+  | 'projects'
+  | 'materials'
   | 'conversation'
   | 'memories'
   | 'todos'
+  | 'personalization'
 
 function destinationForScreen(screen: Screen): AppDestination {
   switch (screen) {
@@ -131,10 +138,18 @@ function destinationForScreen(screen: Screen): AppDestination {
       return 'home'
     case 'history':
       return 'history'
+    case 'meetings':
+      return 'meetings'
+    case 'projects':
+      return 'projects'
+    case 'materials':
+      return 'materials'
     case 'memories':
       return 'memories'
     case 'todos':
       return 'todos'
+    case 'personalization':
+      return 'personalization'
     case 'settings':
       return 'settings'
   }
@@ -1194,6 +1209,15 @@ export default function App() {
       case 'history':
         navigateTo('history')
         break
+      case 'meetings':
+        navigateTo('meetings')
+        break
+      case 'projects':
+        navigateTo('projects')
+        break
+      case 'materials':
+        navigateTo('materials')
+        break
       case 'memories':
         actionMemoryTargetRef.current = null
         navigateTo('memories')
@@ -1201,6 +1225,9 @@ export default function App() {
       case 'todos':
         actionTodoTargetRef.current = null
         navigateTo('todos')
+        break
+      case 'personalization':
+        navigateTo('personalization')
         break
       case 'settings':
         navigateTo('settings')
@@ -1880,26 +1907,9 @@ export default function App() {
       {screen === 'home' && (
         <ConversationHome
           accountLabel={user.email}
-          recentConversation={historyItems[0]}
           onStartAudio={() => openCall('audio')}
           onStartVideo={() => openCall('video')}
           onOpenMenu={() => setNavigationOpen(true)}
-          onOpenRecent={() => {
-            const recent = historyItems[0]
-            if (!recent) return
-            setSelectedConversation(recent)
-            navigateTo('conversation')
-          }}
-          onOpenHistory={() => navigateTo('history')}
-          onOpenMemories={() => {
-            actionMemoryTargetRef.current = null
-            navigateTo('memories')
-          }}
-          onOpenTodos={() => {
-            actionTodoTargetRef.current = null
-            navigateTo('todos')
-          }}
-          historyError={historyError}
         />
       )}
 
@@ -1909,12 +1919,12 @@ export default function App() {
             <button
               className="icon-button"
               type="button"
-              aria-label="打开导航"
-              onClick={() => setNavigationOpen(true)}
+              aria-label="返回首页"
+              onClick={() => navigateTo('home')}
             >
-              <Menu />
+              <ArrowLeft />
             </button>
-            <h1>聊天历史</h1>
+            <h1>对话记录</h1>
             <button
               className="icon-button"
               type="button"
@@ -2059,8 +2069,8 @@ export default function App() {
       {screen === 'todos' && (
         <section className="history-screen todo-screen">
           <header className="screen-header history-page-header library-sticky-header todo-header">
-            <button className="icon-button" type="button" aria-label="打开导航" onClick={() => setNavigationOpen(true)}>
-              <Menu />
+            <button className="icon-button" type="button" aria-label="返回首页" onClick={() => navigateTo('home')}>
+              <ArrowLeft />
             </button>
             <div className="todo-heading">
               <h1>待办</h1>
@@ -2202,8 +2212,8 @@ export default function App() {
       {screen === 'memories' && (
         <section className="history-screen memory-screen">
           <header className="screen-header history-page-header library-sticky-header">
-            <button className="icon-button" type="button" aria-label="打开导航" onClick={() => setNavigationOpen(true)}>
-              <Menu />
+            <button className="icon-button" type="button" aria-label="返回首页" onClick={() => navigateTo('home')}>
+              <ArrowLeft />
             </button>
             <h1>记忆</h1>
             <span className="header-spacer" />
@@ -2460,8 +2470,8 @@ export default function App() {
       {screen === 'settings' && (
         <section className="settings-screen profile-screen">
           <header className="screen-header">
-            <button className="icon-button" type="button" aria-label="打开导航" onClick={() => setNavigationOpen(true)}>
-              <Menu />
+            <button className="icon-button" type="button" aria-label="返回首页" onClick={() => navigateTo('home')}>
+              <ArrowLeft />
             </button>
             <h1>设置</h1>
             <span className="header-spacer" />
@@ -2497,7 +2507,6 @@ export default function App() {
               </div>
             </div>
             {avatarNotice ? <p className="avatar-notice" role="status">{avatarNotice}</p> : null}
-            <PersonalizationSection server={server} token={accessToken} />
             <section className="profile-section" aria-labelledby="profile-account-heading">
               <h2 id="profile-account-heading">系统状态</h2>
               <dl className="profile-info-list">
@@ -2537,6 +2546,33 @@ export default function App() {
             </button>
           </div>
         </section>
+      )}
+
+      {screen === 'personalization' && (
+        <section className="settings-screen profile-screen personalization-screen">
+          <header className="screen-header">
+            <button className="icon-button" type="button" aria-label="返回首页" onClick={() => navigateTo('home')}>
+              <ArrowLeft />
+            </button>
+            <h1>个性化</h1>
+            <span className="header-spacer" />
+          </header>
+          <div className="profile-groups">
+            <PersonalizationSection server={server} token={accessToken} />
+          </div>
+        </section>
+      )}
+
+      {screen === 'meetings' && (
+        <SecondaryScaffold title="会议记录" icon={CalendarDays} onBack={() => navigateTo('home')} />
+      )}
+
+      {screen === 'projects' && (
+        <SecondaryScaffold title="项目" icon={FolderKanban} onBack={() => navigateTo('home')} />
+      )}
+
+      {screen === 'materials' && (
+        <SecondaryScaffold title="资料库" icon={Database} onBack={() => navigateTo('home')} />
       )}
 
       {screen === 'call' && (

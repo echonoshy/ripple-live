@@ -8,34 +8,34 @@
   --weight-medium: 500;
   --weight-semibold: 600;
   --weight-bold: 700;
-  --live-bg: #080a14;
-  --app-bg: #070910;
-  --surface: #12141f;
-  --surface-raised: #191b29;
-  --text-primary: #fff2da;
-  --danger: #f0797d;
-  --success: #76b795;
-  --line: rgb(255 222 169 / 13%);
-  --text-secondary: #c9c0bb;
-  --text-tertiary: #8e8995;
-  --orb-deep: #9c5b3e;
-  --orb-cobalt: #8981db;
-  --orb-soft-blue: #efad5e;
-  --orb-cream: #fff2d8;
-  --focus-ring: rgb(255 207 121 / 48%);
+  --live-bg: #030303;
+  --app-bg: #030303;
+  --surface: #111015;
+  --surface-raised: #1b1820;
+  --text-primary: #f4f1ed;
+  --danger: #ef6f84;
+  --success: #69c69c;
+  --line: rgb(244 241 237 / 14%);
+  --text-secondary: #aaa5ad;
+  --text-tertiary: #74717a;
+  --orb-deep: #7135bf;
+  --orb-cobalt: #9b4dff;
+  --orb-soft-blue: #b576ff;
+  --orb-cream: #f4f1ed;
+  --focus-ring: rgb(155 77 255 / 42%);
   --canvas: var(--app-bg);
   --raised: var(--surface);
   --strong: var(--surface-raised);
   --hairline: var(--line);
   --primary-ink: var(--text-primary);
   --surface-deep: var(--app-bg);
-  --surface-strong: #242638;
+  --surface-strong: #24212a;
   --ink: var(--text-primary);
   --ink-muted: var(--text-secondary);
   --ink-faint: var(--text-tertiary);
-  --accent: #f0b35f;
-  --accent-strong: #ffd891;
-  --accent-soft: rgb(240 179 95 / 12%);
+  --accent: #9b4dff;
+  --accent-strong: #bf83ff;
+  --accent-soft: rgb(155 77 255 / 12%);
 }
 
 * {
@@ -60,9 +60,7 @@ textarea {
 
 body {
   margin: 0;
-  background:
-    radial-gradient(circle at 50% 4%, rgb(145 86 53 / 15%), transparent 42%),
-    var(--app-bg);
+  background: #030303;
   color: var(--text-primary);
   text-rendering: optimizeLegibility;
 }
@@ -4519,12 +4517,32 @@ textarea:focus-visible,
   border-bottom-color: var(--line);
 }
 
+.todo-card {
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 8px;
+}
+
 .todo-complete {
-  width: 48px;
-  height: 48px;
-  border-color: rgb(112 215 245 / 24%);
-  background: var(--accent-soft);
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-color: transparent;
+  background: transparent;
   color: var(--accent);
+}
+
+.todo-complete::before {
+  position: absolute;
+  inset: 7px;
+  border: 1px solid rgb(112 215 245 / 24%);
+  border-radius: 50%;
+  background: var(--accent-soft);
+  content: '';
+}
+
+.todo-complete > svg {
+  position: relative;
+  z-index: 1;
 }
 
 .todo-add-button {
@@ -4923,4 +4941,118 @@ button:disabled {
 
 .personalization-feedback.is-error {
   color: var(--danger);
+}
+
+/* Keep the completion control easy to tap without letting its visual disc
+   crowd the todo copy. Theme rules above may recolor the inner indicator,
+   but the full 44px hit target must remain visually transparent. */
+.todo-card .todo-complete {
+  border-color: transparent;
+  background: transparent;
+}
+
+/* Kiro-inspired shared surfaces for menu destinations. */
+.app-shell,
+.history-screen,
+.settings-screen,
+.auth-screen {
+  background:
+    radial-gradient(circle at 78% 7%, rgb(155 77 255 / 6%), transparent 24%),
+    #030303;
+  color: var(--text-primary);
+}
+
+.screen-header,
+.library-sticky-header,
+.history-library-screen .library-sticky-header {
+  border-bottom-color: var(--line);
+  background: rgb(3 3 3 / 92%);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.screen-header h1,
+.history-page-header h1,
+.library-sticky-header .todo-heading h1,
+.screen-header.library-sticky-header .todo-heading h1,
+.profile-screen > .screen-header h1 {
+  color: var(--text-primary);
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, "PingFang SC", monospace;
+  font-weight: 680;
+  letter-spacing: -0.045em;
+}
+
+.screen-header > button,
+.history-page-header > button,
+.library-overflow-button,
+.todo-add-button {
+  border-color: var(--line);
+  border-radius: 10px;
+  background: #0d0b10;
+  color: var(--text-secondary);
+  box-shadow: none;
+}
+
+.library-search,
+.library-search input,
+.todo-search input,
+.personalization-form input,
+.personalization-form textarea {
+  border-color: var(--line);
+  background: #0d0b10;
+  color: var(--text-primary);
+}
+
+.library-search:focus-within,
+.todo-search:focus-within,
+.personalization-form input:focus-visible,
+.personalization-form textarea:focus-visible {
+  border-color: rgb(181 118 255 / 54%);
+  box-shadow: 0 0 0 3px rgb(155 77 255 / 10%);
+}
+
+.library-item-surface,
+.todo-swipe-shell,
+.memory-card-hit,
+.profile-navigation,
+.profile-card,
+.settings-group,
+.personalization-intro,
+.personalization-form {
+  border-color: var(--line);
+  background: #0d0b10;
+  box-shadow: none;
+}
+
+.primary-button,
+.history-empty button,
+.todo-editor-actions .primary-button,
+.conversation-continuation-bar .continuation-compose,
+.personalization-form button {
+  border: 1px solid #ad68ff;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #8738ef, #a54fff);
+  color: #fff;
+  box-shadow: inset 0 1px rgb(255 255 255 / 18%);
+}
+
+.todo-view-switch {
+  border-color: var(--line);
+  background: #0d0b10;
+}
+
+.todo-view-switch button.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.todo-add-button,
+.todo-complete {
+  color: var(--accent-strong);
+}
+
+.profile-identity > span,
+.app-drawer-account > .user-avatar {
+  background: linear-gradient(145deg, #8d3ff0, #b66eff);
+  color: #fff;
 }
