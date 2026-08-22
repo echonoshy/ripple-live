@@ -28,7 +28,7 @@ use ripple_agent_gateway::{
     meetings::MeetingService,
     memory::{MemoryService, TodoUpdate},
     orchestrator::AgentOrchestrator,
-    protocol::{ClientEvent, SessionMode, VideoFrame},
+    protocol::{ClientEvent, SessionMode, SessionPurpose, VideoFrame},
     response_gate::{GateDecision, GateOutcome},
 };
 use serde::Deserialize;
@@ -2134,6 +2134,7 @@ async fn handle_socket(
     let mut activation_mode = ActivationMode::Continuous;
     let mut awake_until: Option<Instant> = None;
     let mut session_mode = SessionMode::Audio;
+    let mut session_purpose = SessionPurpose::Conversation;
     let mut negotiated_protocol_version: Option<u32> = None;
     let mut session_ready = false;
     let mut pending_turn: Option<PendingTurn> = None;
@@ -2274,6 +2275,7 @@ async fn handle_socket(
                             activation_mode,
                             &mut awake_until,
                             accepted_mode,
+                            session_purpose,
                             &mut frames,
                             &mut pending_turn,
                             &turn_id,
@@ -2518,8 +2520,23 @@ async fn handle_socket(
                     .await?;
                     break;
                 };
+                let requested_purpose = event.extra.get("purpose").and_then(Value::as_str);
+                let Ok(accepted_purpose) = SessionPurpose::parse(requested_purpose) else {
+                    send_event(
+                        &event_sender,
+                        json!({
+                            "type": "error",
+                            "code": "invalid_purpose",
+                            "message": "会话用途只支持 conversation 或 meeting",
+                            "purpose": requested_purpose
+                        }),
+                    )
+                    .await?;
+                    break;
+                };
                 negotiated_protocol_version = Some(accepted_protocol_version);
                 session_mode = accepted_mode;
+                session_purpose = accepted_purpose;
                 session_ready = true;
                 let result = send_event(
                     &event_sender,
@@ -2533,7 +2550,8 @@ async fn handle_socket(
                         "protocol_version": accepted_protocol_version,
                         "sample_rate_in": state.settings.sample_rate_in,
                         "sample_rate_out": state.settings.sample_rate_out,
-                        "mode": session_mode.as_str()
+                        "mode": session_mode.as_str(),
+                        "purpose": session_purpose.as_str()
                     }),
                 )
                 .await;
@@ -2545,6 +2563,7 @@ async fn handle_socket(
                         "server.session.ready",
                         &json!({
                             "mode": session_mode.as_str(),
+                            "purpose": session_purpose.as_str(),
                             "protocol_version": accepted_protocol_version
                         }),
                     )
@@ -2823,6 +2842,7 @@ async fn handle_socket(
                         activation_mode,
                         &mut awake_until,
                         session_mode,
+                        session_purpose,
                         &mut frames,
                         &mut pending_turn,
                         turn_id,
@@ -2932,6 +2952,18 @@ async fn handle_socket(
                     }),
                 )
                 .await;
+                if session_purpose == SessionPurpose::Meeting {
+                    record_meeting_transcript(
+                        &state,
+                        &session_id,
+                        &event_sender,
+                        None,
+                        &response_id,
+                        &text,
+                    )
+                    .await?;
+                    continue;
+                }
                 active_response = Some(spawn_turn(
                     state.orchestrator.clone(),
                     state.context.clone(),
@@ -3055,6 +3087,7 @@ async fn queue_voice_transcript(
     activation_mode: ActivationMode,
     awake_until: &mut Option<Instant>,
     session_mode: SessionMode,
+    session_purpose: SessionPurpose,
     frames: &mut VecDeque<VideoFrame>,
     pending_turn: &mut Option<PendingTurn>,
     turn_id: &str,
@@ -3064,6 +3097,19 @@ async fn queue_voice_transcript(
     gate_generation: &mut u64,
     gate_results: &mpsc::Sender<GateTaskResult>,
 ) -> anyhow::Result<()> {
+    if session_purpose == SessionPurpose::Meeting {
+        frames.clear();
+        *pending_turn = None;
+        return record_meeting_transcript(
+            state,
+            session_id,
+            event_sender,
+            Some(turn_id),
+            &response_id,
+            &transcript,
+        )
+        .await;
+    }
     if is_stop_command(&transcript) {
         frames.clear();
         *pending_turn = None;
@@ -3158,6 +3204,50 @@ async fn queue_voice_transcript(
         gate_results.clone(),
     ));
     Ok(())
+}
+
+async fn record_meeting_transcript(
+    state: &AppState,
+    session_id: &str,
+    event_sender: &mpsc::Sender<Value>,
+    turn_id: Option<&str>,
+    response_id: &str,
+    transcript: &str,
+) -> anyhow::Result<()> {
+    let transcript = transcript.trim();
+    if transcript.is_empty() {
+        return Ok(());
+    }
+    state
+        .context
+        .add_turn(
+            session_id,
+            "user",
+            transcript,
+            Some(&json!({"source": "meeting_transcript"})),
+        )
+        .await?;
+    record_event_best_effort(
+        &state.context,
+        session_id,
+        "server.meeting.transcript_recorded",
+        &json!({
+            "turn_id": turn_id,
+            "response_id": response_id,
+            "text_chars": transcript.chars().count()
+        }),
+    )
+    .await;
+    send_event(
+        event_sender,
+        json!({
+            "type": "input.transcript.final",
+            "turn_id": turn_id,
+            "response_id": response_id,
+            "text": transcript
+        }),
+    )
+    .await
 }
 
 #[cfg(test)]

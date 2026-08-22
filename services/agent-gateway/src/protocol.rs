@@ -7,6 +7,30 @@ pub enum SessionMode {
     Video,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionPurpose {
+    #[default]
+    Conversation,
+    Meeting,
+}
+
+impl SessionPurpose {
+    pub fn parse(value: Option<&str>) -> anyhow::Result<Self> {
+        match value.unwrap_or("conversation") {
+            "conversation" => Ok(Self::Conversation),
+            "meeting" => Ok(Self::Meeting),
+            other => anyhow::bail!("不支持的会话用途: {other}"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::Meeting => "meeting",
+        }
+    }
+}
+
 impl SessionMode {
     pub fn parse(value: Option<&str>) -> anyhow::Result<Self> {
         match value {
@@ -59,7 +83,7 @@ pub struct VideoFrame {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionMode;
+    use super::{SessionMode, SessionPurpose};
 
     #[test]
     fn session_mode_accepts_only_audio_and_video() {
@@ -77,5 +101,18 @@ mod tests {
         );
         assert!(SessionMode::parse(None).is_err());
         assert!(SessionMode::parse(Some("continuous_video")).is_err());
+    }
+
+    #[test]
+    fn session_purpose_defaults_to_conversation_and_accepts_meeting() {
+        assert_eq!(
+            SessionPurpose::parse(None).unwrap(),
+            SessionPurpose::Conversation
+        );
+        assert_eq!(
+            SessionPurpose::parse(Some("meeting")).unwrap(),
+            SessionPurpose::Meeting
+        );
+        assert!(SessionPurpose::parse(Some("assistant")).is_err());
     }
 }

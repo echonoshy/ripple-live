@@ -1,4 +1,5 @@
 export type RealtimeMode = 'audio' | 'video'
+export type SessionPurpose = 'conversation' | 'meeting'
 
 export const REALTIME_PROTOCOL_VERSION = 5
 
@@ -7,12 +8,16 @@ const clientBuild =
     ? __RIPPLE_CLIENT_BUILD__
     : '0.1.1-test'
 
-export function createSessionStart(mode: RealtimeMode) {
+export function createSessionStart(
+  mode: RealtimeMode,
+  purpose: SessionPurpose = 'conversation',
+) {
   return {
     type: 'session.start',
     protocol_version: REALTIME_PROTOCOL_VERSION,
     client_build: clientBuild,
     mode,
+    purpose,
   }
 }
 

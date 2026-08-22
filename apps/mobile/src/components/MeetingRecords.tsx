@@ -7,6 +7,7 @@ import {
   ListTodo,
   LoaderCircle,
   Mic,
+  Plus,
   RefreshCw,
   Video,
 } from 'lucide-react'
@@ -51,6 +52,7 @@ export function MeetingRecords({
   onCloseDetail,
   onRetry,
   onPromoteAction,
+  onStart,
 }: {
   items: MeetingRecord[]
   detail: MeetingDetail | null
@@ -61,6 +63,7 @@ export function MeetingRecords({
   onCloseDetail(): void
   onRetry(id: string): void
   onPromoteAction(meetingId: string, actionId: string): void
+  onStart(): void
 }) {
   if (detail) {
     return (
@@ -149,6 +152,14 @@ export function MeetingRecords({
         <span />
       </header>
       <main className="meeting-list-content">
+        <button className="meeting-start-button" type="button" onClick={onStart}>
+          <span><Mic /></span>
+          <span>
+            <strong>开始会议记录</strong>
+            <small>只记录和整理，Ripple 不会回答</small>
+          </span>
+          <Plus />
+        </button>
         {busy ? <div className="meeting-list-loading"><LoaderCircle /><span>读取会议记录</span></div> : null}
         {error ? <div className="meeting-list-error">{error}</div> : null}
         {!busy && !error && items.length === 0 ? (
@@ -156,7 +167,7 @@ export function MeetingRecords({
             <CalendarDays />
             <small>MEETING / EMPTY</small>
             <h2>还没有会议记录</h2>
-            <p>结束一次音频或视频对话后，逐字稿和摘要会出现在这里。</p>
+            <p>开始一次独立会议记录，结束后会自动生成标题、摘要和行动项。</p>
           </div>
         ) : null}
         <div className="meeting-record-list">

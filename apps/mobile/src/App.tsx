@@ -117,6 +117,7 @@ import {
   RealtimeSession,
   type ResponseArtifact,
   type RealtimeMode,
+  type SessionPurpose,
   type SessionState,
   type LiveTranscriptTurn,
 } from './realtime/RealtimeSession'
@@ -270,6 +271,7 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>('home')
   const [navigationOpen, setNavigationOpen] = useState(false)
   const [mode, setMode] = useState<RealtimeMode>('audio')
+  const [callPurpose, setCallPurpose] = useState<SessionPurpose>('conversation')
   const server = DEFAULT_SERVER
   const [sessionState, setSessionState] = useState<SessionState>('idle')
   const [errorMessage, setErrorMessage] = useState('')
@@ -952,6 +954,7 @@ export default function App() {
       }
 
       const requestedMeetingMode: RealtimeMode = initialCameraRequestRef.current ? 'video' : 'audio'
+      const isMeeting = callPurpose === 'meeting'
       setMode('audio')
       setErrorMessage('')
       setCameraErrorMessage('')
@@ -995,7 +998,7 @@ export default function App() {
           )
         if (confirmedConversationId) {
           setActiveConversationIdState(confirmedConversationId)
-          if (!meetingStartPromiseRef.current) {
+          if (isMeeting && !meetingStartPromiseRef.current) {
             const start = startMeeting(
               server,
               accessToken,
@@ -1041,6 +1044,7 @@ export default function App() {
         accessToken,
         conversationId: activeConversationId ?? undefined,
         mode: 'audio',
+        purpose: callPurpose,
         onState: (state) => {
           cameraActivation.transition(state)
           if (!ownsSession()) return
@@ -1230,7 +1234,7 @@ export default function App() {
         await closing
       }
     },
-    [accessToken, activeConversationId, cameraFacing, server],
+    [accessToken, activeConversationId, callPurpose, cameraFacing, server],
   )
 
   useEffect(() => {
@@ -1251,10 +1255,12 @@ export default function App() {
   const openCall = (
     nextMode: RealtimeMode,
     conversationId?: string,
+    purpose: SessionPurpose = 'conversation',
   ) => {
     if (!callLifecycleRef.current.requestOpen()) return
     const conversationOwner = conversationOwnershipRef.current.begin(conversationId)
     setActiveConversationIdState(conversationOwner.conversationId)
+    setCallPurpose(purpose)
     if (!conversationOwner.conversationId) {
       setSelectedConversation(null)
       setHistoryMessages([])
@@ -1273,6 +1279,11 @@ export default function App() {
     dispatchLiveResults({ type: 'clear' })
     setRippleSignals([])
     navigateTo('call')
+  }
+
+  const openMeetingCapture = () => {
+    setSelectedMeeting(null)
+    openCall('audio', undefined, 'meeting')
   }
 
   const openConversationMemory = async (targetId: string) => {
@@ -2730,6 +2741,7 @@ export default function App() {
           onCloseDetail={() => setSelectedMeeting(null)}
           onRetry={(id) => void retryMeetingGeneration(id)}
           onPromoteAction={(meetingId, actionId) => void addMeetingActionToTodos(meetingId, actionId)}
+          onStart={openMeetingCapture}
         />
       )}
 
@@ -2743,6 +2755,7 @@ export default function App() {
 
       {screen === 'call' && (
         <LiveCallScreen
+          purpose={callPurpose}
           mode={mode}
           cameraPhase={cameraPhase}
           cameraPreviewVisible={cameraPreviewVisible}

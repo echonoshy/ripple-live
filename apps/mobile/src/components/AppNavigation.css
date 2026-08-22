@@ -3837,6 +3837,13 @@
 .meeting-screen-header small, .meeting-detail-section header small, .meeting-list-empty > small { color: #9b4dff; font: 700 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; }
 .meeting-screen-header h1 { overflow: hidden; margin: 3px 0 0; color: #f4f1ed; font-size: 17px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
 .meeting-list-content, .meeting-detail-content { padding: 22px 18px max(32px, env(safe-area-inset-bottom)); }
+.meeting-start-button { display: grid; width: 100%; grid-template-columns: 46px minmax(0, 1fr) 18px; align-items: center; gap: 13px; margin-bottom: 18px; padding: 15px; border: 1px solid rgb(155 77 255 / 46%); border-radius: 16px; background: linear-gradient(135deg, rgb(155 77 255 / 17%), rgb(155 77 255 / 5%)); color: #f4f1ed; text-align: left; box-shadow: inset 0 1px rgb(255 255 255 / 5%); }
+.meeting-start-button > span:first-child { display: grid; width: 44px; height: 44px; place-items: center; border: 1px solid rgb(155 77 255 / 42%); border-radius: 13px; background: #9b4dff; color: #080609; }
+.meeting-start-button > span:first-child svg, .meeting-start-button > svg { width: 18px; height: 18px; }
+.meeting-start-button > span:nth-child(2) { display: grid; min-width: 0; gap: 4px; }
+.meeting-start-button strong { font-size: 15px; font-weight: 760; }
+.meeting-start-button small { color: #aaa5ae; font-size: 11px; line-height: 1.35; }
+.meeting-start-button > svg { color: #ae6cff; }
 .meeting-list-loading, .meeting-list-error { display: flex; min-height: 120px; align-items: center; justify-content: center; gap: 10px; color: #918d95; font-size: 13px; }
 .meeting-list-loading svg, .meeting-processing-panel > svg { animation: meeting-spin 1s linear infinite; }
 .meeting-list-error { color: #ff8989; }

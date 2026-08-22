@@ -292,6 +292,29 @@
   font-size: 11px;
 }
 
+.live-transcript-empty {
+  display: block !important;
+  color: #77727b !important;
+  font-size: 11px !important;
+  text-align: center;
+}
+
+.live-call-screen.is-meeting-mode .live-state-label {
+  color: rgb(174 108 255 / 82%);
+  font: 700 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .04em;
+}
+
+.live-call-screen.is-meeting-mode .live-transcript {
+  border-color: rgb(155 77 255 / 42%);
+  background: rgb(7 6 9 / 94%);
+}
+
+.live-call-screen .call-controls.meeting-controls {
+  justify-content: center;
+  gap: 46px;
+}
+
 @media (max-height: 720px) {
   .live-transcript {
     bottom: calc(96px + env(safe-area-inset-bottom));

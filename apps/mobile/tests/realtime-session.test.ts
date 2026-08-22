@@ -254,8 +254,13 @@ test('session start declares protocol version and native build', () => {
 
   assert.equal(event.protocol_version, 5)
   assert.equal(event.client_build.length > 0, true)
+  assert.equal(event.purpose, 'conversation')
   assert.equal(REALTIME_PROTOCOL_VERSION, 5)
   assert.equal('activation_mode' in event, false)
+})
+
+test('meeting session start declares a passive meeting purpose', () => {
+  assert.equal(createSessionStart('audio', 'meeting').purpose, 'meeting')
 })
 
 test('protocol v5 creates only strict audio and video mode-set events', () => {

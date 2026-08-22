@@ -607,6 +607,7 @@ impl ContextStore {
                 COALESCE((SELECT content FROM turns t WHERE t.session_id = c.id
                           ORDER BY t.id DESC LIMIT 1), '') AS preview
              FROM conversations c WHERE c.user_id = $1 AND c.project_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM meetings m WHERE m.conversation_id = c.id)
                AND ($2 = 2 OR ($3 = 0 AND c.archived_at IS NULL)
                     OR ($4 = 1 AND c.archived_at IS NOT NULL))
                AND ($5 = 0 OR c.is_pinned = 1)

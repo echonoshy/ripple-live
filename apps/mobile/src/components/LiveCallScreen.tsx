@@ -18,6 +18,7 @@ import { liveCallLabels } from '../live/callPresentation'
 import type { RippleSignal, RippleSignalId } from '../live/ripple'
 import type {
   RealtimeMode,
+  SessionPurpose,
   ResponseArtifact,
   SessionState,
   LiveTranscriptTurn,
@@ -71,6 +72,7 @@ function AuthenticatedArtifact({
 }
 
 export type LiveCallScreenProps = {
+  purpose: SessionPurpose
   mode: RealtimeMode
   cameraPhase: CameraPhase
   cameraPreviewVisible: boolean
@@ -103,6 +105,7 @@ export type LiveCallScreenProps = {
 }
 
 export function LiveCallScreen({
+  purpose,
   mode,
   cameraPhase,
   cameraPreviewVisible,
@@ -133,17 +136,20 @@ export function LiveCallScreen({
   onDismissResult,
   onLeave,
 }: LiveCallScreenProps) {
-  const [transcriptExpanded, setTranscriptExpanded] = useState(false)
+  const meetingMode = purpose === 'meeting'
+  const [transcriptExpanded, setTranscriptExpanded] = useState(meetingMode)
   const videoMode = cameraPreviewVisible
   const cameraBusy = cameraPhase === 'opening' || cameraPhase === 'closing'
   const hasOutput = results.length > 0 || artifacts.length > 0
   const labels = liveCallLabels(state, cameraPhase, toolStatus)
   const visibleErrorMessage = errorMessage === 'Permission dismissed'
     ? '未授予麦克风或摄像头权限'
-    : errorMessage
+    : /Requested device not found|NotFoundError/i.test(errorMessage)
+      ? '未检测到可用的麦克风'
+      : errorMessage
   return (
     <section
-      className={`call-screen live-call-screen ${videoMode ? 'has-video' : 'has-audio'} server-${mode} camera-phase-${cameraPhase} ${hasOutput ? 'has-results' : ''}`}
+      className={`call-screen live-call-screen ${videoMode ? 'has-video' : 'has-audio'} server-${mode} camera-phase-${cameraPhase} ${hasOutput ? 'has-results' : ''} ${meetingMode ? 'is-meeting-mode' : ''}`}
     >
       <div className="camera-layer" aria-hidden={!videoMode}>
         <video
@@ -172,10 +178,10 @@ export function LiveCallScreen({
           <ArrowLeft aria-hidden="true" />
         </button>
         <div className="call-title">
-          <strong><i aria-hidden="true" />正在陪伴</strong>
+          <strong><i aria-hidden="true" />{meetingMode ? '会议记录中' : '正在陪伴'}</strong>
           <span aria-label={`通话时长 ${formatDuration(elapsed)}`}>{formatDuration(elapsed)}</span>
         </div>
-        {videoMode ? (
+        {!meetingMode && videoMode ? (
           <button
             className="icon-button call-icon"
             type="button"
@@ -203,23 +209,27 @@ export function LiveCallScreen({
 
         <div className="live-feedback">
           <div className="live-status" role="status" aria-live="polite">
-            {labels.primary && (
+            {meetingMode ? (
+              <span className="live-state-label">只记录，不回答</span>
+            ) : labels.primary ? (
               <span className="live-state-label">{labels.primary}</span>
-            )}
-            {labels.camera && (
+            ) : null}
+            {!meetingMode && labels.camera && (
               <span className="live-camera-label">{labels.camera}</span>
             )}
           </div>
-          {assistantText && (
+          {!meetingMode && assistantText && (
             <p className="live-assistant-caption" aria-live="polite">
               {assistantText}
             </p>
           )}
-          <LiveCaption
-            userText={userText}
-            assistantText={assistantText}
-            state={state}
-          />
+          {!meetingMode ? (
+            <LiveCaption
+              userText={userText}
+              assistantText={assistantText}
+              state={state}
+            />
+          ) : null}
           {visibleErrorMessage && (
             <div className="live-error" role="alert">
               <X aria-hidden="true" />
@@ -229,7 +239,7 @@ export function LiveCallScreen({
         </div>
       </div>
 
-      {hasOutput && (
+      {!meetingMode && hasOutput && (
         <div className="live-output-tray">
           <LiveResultSheet results={results} onDismiss={onDismissResult} />
           {artifacts.length > 0 && (
@@ -249,7 +259,7 @@ export function LiveCallScreen({
         </div>
       )}
 
-      {(transcript.length > 0 || transcriptError) && (
+      {(meetingMode || transcript.length > 0 || transcriptError) && (
         <aside className={`live-transcript ${transcriptExpanded ? 'is-expanded' : ''}`} aria-label="会议逐字稿">
           <button
             className="live-transcript-heading"
@@ -257,15 +267,18 @@ export function LiveCallScreen({
             aria-expanded={transcriptExpanded}
             onClick={() => setTranscriptExpanded((value) => !value)}
           >
-            <span><i aria-hidden="true" />逐字稿</span>
+            <span><i aria-hidden="true" />{meetingMode ? '实时逐字稿' : '逐字稿'}</span>
             <small>{transcript.length} 段</small>
             {transcriptExpanded ? <ChevronDown aria-hidden="true" /> : <ChevronUp aria-hidden="true" />}
           </button>
           {transcriptError ? <p className="live-transcript-error">{transcriptError}</p> : null}
           <div className="live-transcript-list">
+            {meetingMode && transcript.length === 0 ? (
+              <p className="live-transcript-empty">开始说话后，识别内容会显示在这里。</p>
+            ) : null}
             {transcript.slice(transcriptExpanded ? 0 : -2).map((turn, index) => (
               <p key={`${turn.createdAt}-${index}`}>
-                <strong>{turn.role === 'user' ? '我' : 'Ripple'}</strong>
+                <strong>{meetingMode ? '现场' : turn.role === 'user' ? '我' : 'Ripple'}</strong>
                 <span>{turn.text}</span>
               </p>
             ))}
@@ -273,7 +286,7 @@ export function LiveCallScreen({
         </aside>
       )}
 
-      <footer className="call-controls">
+      <footer className={`call-controls ${meetingMode ? 'meeting-controls' : ''}`}>
         <div className="call-control-item">
           <button
             className={`control-button ${muted ? 'is-active' : ''}`}
@@ -289,14 +302,14 @@ export function LiveCallScreen({
           <button
             className="end-button"
             type="button"
-            aria-label="结束通话"
+            aria-label={meetingMode ? '结束记录' : '结束通话'}
             onClick={() => void onLeave()}
           >
             <Phone aria-hidden="true" />
           </button>
-          <span>结束</span>
+          <span>{meetingMode ? '完成记录' : '结束'}</span>
         </div>
-        <div className="call-control-item">
+        {!meetingMode ? <div className="call-control-item">
           <button
             className={`control-button camera-control ${videoMode ? 'is-active' : ''}`}
             type="button"
@@ -319,7 +332,7 @@ export function LiveCallScreen({
             {videoMode ? <VideoCameraSlash aria-hidden="true" /> : <VideoCamera aria-hidden="true" />}
           </button>
           <span>{videoMode ? '关闭视频' : '切换到视频'}</span>
-        </div>
+        </div> : null}
       </footer>
     </section>
   )

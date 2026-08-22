@@ -6,10 +6,10 @@ import {
   createSessionStart,
   createTurnId,
 } from './protocol'
-import type { RealtimeMode } from './protocol'
+import type { RealtimeMode, SessionPurpose } from './protocol'
 import type { ToolCompletion } from './toolResults'
 
-export type { RealtimeMode } from './protocol'
+export type { RealtimeMode, SessionPurpose } from './protocol'
 export type SessionState =
   | 'idle'
   | 'connecting'
@@ -95,6 +95,7 @@ export type SessionOptions = {
   accessToken: string
   conversationId?: string
   mode: RealtimeMode
+  purpose?: SessionPurpose
   onState: (state: SessionState) => void
   onError: (message: string) => void
   onResponseFailed: (message: string) => void
@@ -455,7 +456,7 @@ export class RealtimeSession {
     if (!this.transport || !this.isActiveConnection(generation)) return
     this.options.onState('preparing')
     await this.sendEvent(
-      createSessionStart(this.options.mode),
+      createSessionStart(this.options.mode, this.options.purpose),
     )
   }
 
