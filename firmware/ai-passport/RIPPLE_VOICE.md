@@ -60,7 +60,8 @@ idf.py -p /dev/cu.usbmodem21201 flash monitor
 
 分区针对实机 8 MB Flash：NVS 24 KB、PHY 4 KB、Factory App 7 MB。当前镜像约
 1.46 MB。ESP32-C3 没有 PSRAM，因此录音以 40 ms 小块上传，播放队列限制为
-4 块，并在打断时立即释放。
+4 块，并在打断时立即释放。播放会先积累两块后启动，对应约 200 ms 的首播与
+断粮重缓冲窗口，在响应速度和网络抖动容忍度之间取平衡。
 
 ## 验收清单
 

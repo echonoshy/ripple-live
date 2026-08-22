@@ -22,6 +22,7 @@
 #define RECORDING BIT1
 #define RESPONSE_DONE BIT2
 #define INPUT_SAMPLES 640
+#define PLAYBACK_PREBUFFER_CHUNKS 2
 
 typedef enum { CONTROL_PRESS = 1, CONTROL_RELEASE = 2 } control_event_t;
 
@@ -146,7 +147,36 @@ static void playback_task(void *arg)
     (void)arg;
     audio_chunk_t chunk;
     bool format_ready = false;
+    bool buffering = true;
+    uint32_t underruns = 0;
     for (;;) {
+        if (!s_accept_audio) {
+            format_ready = false;
+            buffering = true;
+        }
+
+        EventBits_t flags = xEventGroupGetBits(s_flags);
+        UBaseType_t queued = uxQueueMessagesWaiting(s_audio);
+        if (buffering) {
+            bool response_finished = (flags & RESPONSE_DONE) != 0;
+            if (s_accept_audio &&
+                (queued >= PLAYBACK_PREBUFFER_CHUNKS || (response_finished && queued > 0))) {
+                buffering = false;
+                ESP_LOGI(TAG, "playback started with %lu ms buffered",
+                         (unsigned long)queued * 100UL);
+            } else {
+                if (response_finished && queued == 0) {
+                    xEventGroupClearBits(s_flags, RESPONSE_DONE);
+                    format_ready = false;
+                    if (websocket_ready() && !(flags & RECORDING)) {
+                        passport_ui_set(PASSPORT_UI_READY, "Connected");
+                    }
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+        }
+
         if (xQueueReceive(s_audio, &chunk, pdMS_TO_TICKS(100)) == pdTRUE) {
             if (s_accept_audio) {
                 xSemaphoreTake(s_audio_lock, portMAX_DELAY);
@@ -164,11 +194,15 @@ static void playback_task(void *arg)
         } else if (xEventGroupGetBits(s_flags) & RESPONSE_DONE) {
             xEventGroupClearBits(s_flags, RESPONSE_DONE);
             format_ready = false;
+            buffering = true;
             if (websocket_ready() && !(xEventGroupGetBits(s_flags) & RECORDING)) {
                 passport_ui_set(PASSPORT_UI_READY, "Connected");
             }
+        } else if (s_accept_audio) {
+            buffering = true;
+            ESP_LOGW(TAG, "playback underrun #%lu; buffering %u chunks",
+                     (unsigned long)++underruns, PLAYBACK_PREBUFFER_CHUNKS);
         }
-        if (!s_accept_audio) format_ready = false;
     }
 }
 
