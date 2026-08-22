@@ -9,6 +9,24 @@ Gateway 的极简按键语音终端：按住 `OK` 说话，松开后提交，然
 本分支只包含设备固件。Ripple Live 移动端、Gateway 源码、部署栈和工具不属于
 这里；运行时只把兼容的 Ripple Agent Gateway 当作外部服务依赖。
 
+## FoloToy 硬件与上游资料
+
+本固件面向 **FoloToy AI Passport**，硬件接口和 BSP 基线来自 FoloToy 公开的
+AI Passport 开发资料：
+
+- [FoloToy/ai-passport](https://github.com/FoloToy/ai-passport)：官方 AI Passport
+  开发基线，包含硬件接口、示例和面向 Agent 的开发说明。
+- [FoloToy GitHub 组织](https://github.com/FoloToy)：官方源码和相关项目入口。
+- [FoloToy 官方文档](https://docs.folotoy.com/)：产品、驱动、诊断和通用设备资料。
+- [FoloToy Web Tool](https://tool.folotoy.com/) 与
+  [官方固件下载](https://github.com/FoloToy/folotoy-bin/releases)：用于查看日志或
+  恢复原厂固件。
+
+Ripple AI Passport 是独立的应用固件，不使用 FoloToy 原厂 MQTT / Server 协议；
+原厂服务器不能代替下文的 Ripple Agent Gateway。FoloToy Web Tool 的原厂刷机流程
+要求把完整固件写到 `0x0`，不要把本项目单独的应用镜像
+`build/Ripple-AI-Passport.bin` 写到 `0x0`。
+
 ## 已实现功能
 
 - 麦克风以 16 kHz 单声道采集并通过 WebSocket 流式上传。
@@ -40,7 +58,70 @@ Gateway 的极简按键语音终端：按住 `OK` 说话，松开后提交，然
   协议，并在服务端配置匿名设备账号。
 - 2.4 GHz Wi-Fi。ESP32-C3 不能连接仅开放 5 GHz 的网络。
 
+## 获取固件源码
+
+```bash
+git clone --branch ai-passport-firmware --single-branch \
+  https://github.com/echonoshy/ripple-live.git ripple-ai-passport
+cd ripple-ai-passport
+```
+
+## 部署 Ripple Agent Gateway
+
+Passport 是轻量终端：语音识别、Responses API 编排、工具、记忆和语音合成都运行
+在 Gateway。可以选择：
+
+1. 使用已经部署好的兼容 Gateway，向管理员获取 `主机:端口`。
+2. 从本仓库 `master` 分支自建完整 Ripple 服务。
+3. 按照[实时协议](docs/PROTOCOL.md)实现自己的兼容 Gateway。
+
+### 自建参考服务
+
+参考 Gateway 和部署脚本在同一 Git 仓库的 `master` 分支，不放在这个固件分支中：
+
+```bash
+git clone --branch master --single-branch \
+  https://github.com/echonoshy/ripple-live.git ripple-live-server
+cd ripple-live-server
+cp deploy/agent-stack/.env.example deploy/agent-stack/.env
+```
+
+安装前先阅读 `deploy/agent-stack/README.md` 并按服务器修改 `.env`。已验证环境是
+Linux + NVIDIA GPU，使用 Rust、Python 3.12、`uv`、PostgreSQL、Qwen3-ASR、
+Responses API 模型和 Qwen3-TTS。参考 Agent 使用两张 GPU 做张量并行，ASR 与 TTS
+各使用一张独立 GPU；必须根据自己的机器调整 GPU 编号、模型路径、CUDA 版本和密钥。
+
+```bash
+./deploy/agent-stack/install.sh
+./deploy/agent-stack/download-models.sh
+./deploy/agent-stack/start.sh
+./deploy/agent-stack/status.sh
+curl --fail http://127.0.0.1:8700/health
+curl --fail http://127.0.0.1:8700/ready
+```
+
+当前设备固件故意不携带登录 Token。需要先创建一个真实 Gateway 用户，再把该用户
+配置为开发环境的匿名设备账号：
+
+```bash
+curl --fail --request POST http://127.0.0.1:8700/v1/auth/register \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "email":"passport-device@example.com",
+    "password":"replace-with-a-private-password",
+    "invitation_code":"the-code-from-RIPPLE_INVITE_CODES"
+  }'
+```
+
+从返回 JSON 中复制 `user.id`，写入 `deploy/agent-stack/.env` 的
+`RIPPLE_ANONYMOUS_REALTIME_USER_ID`，重启 Gateway 后再次确认 `/ready`。无 Token
+账号仅适合本地产品验证；量产部署应改为经过认证的设备身份。
+
 ## 构建与烧录
+
+先按照乐鑫官方说明安装
+[ESP-IDF 5.5.3](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32c3/get-started/index.html)，
+然后在仓库根目录执行：
 
 ```bash
 source /path/to/esp-idf-v5.5.3/export.sh
@@ -48,6 +129,10 @@ idf.py set-target esp32c3
 idf.py build
 idf.py -p /dev/cu.usbmodemXXXX flash monitor
 ```
+
+macOS 常见串口是 `/dev/cu.usbmodem*`，Linux 常见串口是 `/dev/ttyACM*`。项目使用
+原生 USB Serial/JTAG；找不到端口时先更换确认支持数据传输的 USB 线，再参考上面的
+FoloToy 驱动与诊断文档。
 
 日常升级只执行 `flash`，这样不会清除 NVS 中的 Wi-Fi 和音量。只有明确需要恢复
 出厂状态时才执行 `idf.py erase-flash`。
@@ -84,6 +169,7 @@ sdkconfig.defaults     ESP32-C3 / LVGL 默认配置
 - [完整使用与故障排查](docs/USER_GUIDE.zh_CN.md)
 - [实时协议约定](docs/PROTOCOL.md)
 - [硬件与开发说明](docs/DEVELOPMENT.md)
+- [FoloToy 官方 AI Passport 开发基线](https://github.com/FoloToy/ai-passport)
 
 ## 重新生成精灵资源
 
