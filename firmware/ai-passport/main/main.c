@@ -9,9 +9,103 @@
 #include "bsp_i2c.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "nvs.h"
 #include "nvs_flash.h"
+#include <stdio.h>
 
 static const char *TAG = "passport";
+static const char *CONTROL_NAMESPACE = "ripple_ui";
+static QueueHandle_t s_control_actions;
+
+typedef enum {
+    ACTION_VOLUME_UP = 1,
+    ACTION_VOLUME_DOWN,
+    ACTION_SHOW_STATUS,
+    ACTION_RESET_WIFI,
+} control_action_t;
+
+static uint8_t load_volume(void)
+{
+    nvs_handle_t nvs;
+    uint8_t volume = 70;
+    if (nvs_open(CONTROL_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        if (nvs_get_u8(nvs, "volume", &volume) != ESP_OK || volume > 100) volume = 70;
+        nvs_close(nvs);
+    }
+    return volume;
+}
+
+static void save_volume(uint8_t volume)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(CONTROL_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_u8(nvs, "volume", volume);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+static void show_device_status(void)
+{
+    int battery = bsp_battery_soc();
+    int millivolts = bsp_battery_mv();
+    int rssi = passport_wifi_rssi();
+    char detail[80];
+    if (battery >= 0 && millivolts >= 0) {
+        if (rssi) {
+            snprintf(detail, sizeof(detail), "BAT %d%%  %dmV\nWIFI %ddBm  AI %s",
+                     battery, millivolts, rssi,
+                     passport_realtime_is_ready() ? "READY" : "OFFLINE");
+        } else {
+            snprintf(detail, sizeof(detail), "BAT %d%%  %dmV\nWIFI OFFLINE  AI %s",
+                     battery, millivolts,
+                     passport_realtime_is_ready() ? "READY" : "OFFLINE");
+        }
+    } else {
+        if (rssi) {
+            snprintf(detail, sizeof(detail), "BAT N/A\nWIFI %ddBm  AI %s", rssi,
+                     passport_realtime_is_ready() ? "READY" : "OFFLINE");
+        } else {
+            snprintf(detail, sizeof(detail), "BAT N/A\nWIFI OFFLINE  AI %s",
+                     passport_realtime_is_ready() ? "READY" : "OFFLINE");
+        }
+    }
+    passport_ui_notice("DEVICE STATUS", detail, 3000);
+    ESP_LOGI(TAG, "status: battery=%d%% voltage=%dmV rssi=%ddBm ai=%s",
+             battery, millivolts, rssi,
+             passport_realtime_is_ready() ? "ready" : "offline");
+}
+
+static void control_task(void *arg)
+{
+    (void)arg;
+    control_action_t action;
+    for (;;) {
+        if (xQueueReceive(s_control_actions, &action, portMAX_DELAY) != pdTRUE) continue;
+        if (action == ACTION_VOLUME_UP || action == ACTION_VOLUME_DOWN) {
+            int volume = passport_realtime_get_volume();
+            volume += action == ACTION_VOLUME_UP ? 10 : -10;
+            if (volume < 0) volume = 0;
+            if (volume > 100) volume = 100;
+            passport_realtime_set_volume((uint8_t)volume);
+            save_volume((uint8_t)volume);
+            char detail[16];
+            snprintf(detail, sizeof(detail), "%d%%", volume);
+            passport_ui_notice("VOLUME", detail, 1200);
+            ESP_LOGI(TAG, "volume set to %d%%", volume);
+        } else if (action == ACTION_SHOW_STATUS) {
+            show_device_status();
+        } else if (action == ACTION_RESET_WIFI) {
+            passport_ui_notice("WIFI RESET", "Clearing configuration...", 1500);
+            vTaskDelay(pdMS_TO_TICKS(1200));
+            passport_wifi_clear_config();
+            esp_restart();
+        }
+    }
+}
 
 static void on_key(bsp_btn_t button, bsp_btn_ev_t event, void *user)
 {
@@ -20,9 +114,18 @@ static void on_key(bsp_btn_t button, bsp_btn_ev_t event, void *user)
         passport_realtime_ptt_press();
     } else if (button == BSP_BTN_OK && event == BSP_BTN_RELEASE) {
         passport_realtime_ptt_release();
+    } else if (button == BSP_BTN_UP && event == BSP_BTN_CLICK) {
+        control_action_t action = ACTION_VOLUME_UP;
+        xQueueSend(s_control_actions, &action, 0);
+    } else if (button == BSP_BTN_DOWN && event == BSP_BTN_CLICK) {
+        control_action_t action = ACTION_VOLUME_DOWN;
+        xQueueSend(s_control_actions, &action, 0);
     } else if (button == BSP_BTN_UP && event == BSP_BTN_LONG) {
-        passport_wifi_clear_config();
-        esp_restart();
+        control_action_t action = ACTION_RESET_WIFI;
+        xQueueSend(s_control_actions, &action, 0);
+    } else if (button == BSP_BTN_DOWN && event == BSP_BTN_LONG) {
+        control_action_t action = ACTION_SHOW_STATUS;
+        xQueueSend(s_control_actions, &action, 0);
     }
 }
 
@@ -37,6 +140,7 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    passport_realtime_set_volume(load_volume());
 
     ESP_ERROR_CHECK(bsp_i2c_init());
     ESP_ERROR_CHECK(bsp_display_init());
@@ -52,9 +156,15 @@ void app_main(void)
     }
     passport_ui_set(PASSPORT_UI_BOOTING, "Starting hardware");
 
+    s_control_actions = xQueueCreate(8, sizeof(control_action_t));
+    if (!s_control_actions ||
+        xTaskCreate(control_task, "controls", 4096, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "control task initialization failed");
+        return;
+    }
     ESP_ERROR_CHECK(bsp_button_init(on_key, NULL));
     ESP_ERROR_CHECK(bsp_audio_init());
-    bsp_audio_set_volume(70);
+    bsp_audio_set_volume(passport_realtime_get_volume());
     if (bsp_battery_init() != ESP_OK) {
         ESP_LOGW(TAG, "battery gauge unavailable");
     }

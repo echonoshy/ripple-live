@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 typedef enum {
     PASSPORT_UI_BOOTING = 0,
     PASSPORT_UI_SETUP,
@@ -13,3 +15,4 @@ typedef enum {
 
 void passport_ui_init(void);
 void passport_ui_set(passport_ui_state_t state, const char *detail);
+void passport_ui_notice(const char *title, const char *detail, uint32_t duration_ms);

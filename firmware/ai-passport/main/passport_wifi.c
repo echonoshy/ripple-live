@@ -230,3 +230,9 @@ void passport_wifi_clear_config(void)
         nvs_close(nvs);
     }
 }
+
+int passport_wifi_rssi(void)
+{
+    wifi_ap_record_t access_point = {0};
+    return esp_wifi_sta_get_ap_info(&access_point) == ESP_OK ? access_point.rssi : 0;
+}

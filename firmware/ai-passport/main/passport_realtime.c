@@ -41,6 +41,7 @@ static QueueHandle_t s_controls;
 static QueueHandle_t s_audio;
 static SemaphoreHandle_t s_audio_lock;
 static volatile bool s_accept_audio;
+static volatile uint8_t s_volume = 70;
 static char *s_message;
 static size_t s_message_size;
 
@@ -185,7 +186,7 @@ static void playback_task(void *arg)
                 xSemaphoreTake(s_audio_lock, portMAX_DELAY);
                 if (!format_ready) {
                     format_ready = bsp_audio_set_format(24000, 16, 1) == ESP_OK;
-                    bsp_audio_set_volume(70);
+                    bsp_audio_set_volume(s_volume);
                 }
                 if (format_ready) {
                     passport_ui_set(PASSPORT_UI_SPEAKING, "Hold OK to interrupt");
@@ -359,4 +360,24 @@ void passport_realtime_ptt_release(void)
     if (!s_controls) return;
     control_event_t event = CONTROL_RELEASE;
     xQueueSend(s_controls, &event, 0);
+}
+
+void passport_realtime_set_volume(uint8_t percent)
+{
+    s_volume = percent > 100 ? 100 : percent;
+    if (!s_audio_lock || (s_flags && (xEventGroupGetBits(s_flags) & RECORDING))) return;
+    if (xSemaphoreTake(s_audio_lock, pdMS_TO_TICKS(200)) == pdTRUE) {
+        bsp_audio_set_volume(s_volume);
+        xSemaphoreGive(s_audio_lock);
+    }
+}
+
+uint8_t passport_realtime_get_volume(void)
+{
+    return s_volume;
+}
+
+bool passport_realtime_is_ready(void)
+{
+    return websocket_ready();
 }
