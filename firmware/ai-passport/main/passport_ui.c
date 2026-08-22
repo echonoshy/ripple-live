@@ -46,8 +46,7 @@ static void poll_events(lv_timer_t *timer)
     while (s_events && xQueueReceive(s_events, &event, 0) == pdTRUE) {
         lv_label_set_text(s_status, state_text(event.state));
         lv_label_set_text(s_detail, event.detail);
-        lv_obj_set_style_bg_color(s_orb, lv_color_hex(state_color(event.state)), 0);
-        lv_obj_set_style_shadow_color(s_orb, lv_color_hex(state_color(event.state)), 0);
+        lv_obj_set_style_border_color(s_orb, lv_color_hex(state_color(event.state)), 0);
         passport_pet_set_state(event.state);
     }
 }
@@ -70,11 +69,10 @@ void passport_ui_init(void)
     s_orb = lv_obj_create(screen);
     lv_obj_set_size(s_orb, 174, 174);
     lv_obj_set_style_radius(s_orb, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(s_orb, 0, 0);
+    lv_obj_set_style_border_width(s_orb, 1, 0);
+    lv_obj_set_style_border_color(s_orb, lv_color_hex(0x8B5CF6), 0);
+    lv_obj_set_style_border_opa(s_orb, LV_OPA_50, 0);
     lv_obj_set_style_bg_color(s_orb, lv_color_hex(0x15121C), 0);
-    lv_obj_set_style_shadow_width(s_orb, 24, 0);
-    lv_obj_set_style_shadow_opa(s_orb, LV_OPA_30, 0);
-    lv_obj_set_style_shadow_color(s_orb, lv_color_hex(0x8B5CF6), 0);
     lv_obj_align(s_orb, LV_ALIGN_CENTER, 0, -24);
 
     passport_pet_init(screen);
