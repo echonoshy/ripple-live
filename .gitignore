@@ -2,7 +2,6 @@ build/
 sdkconfig
 sdkconfig.old
 managed_components/
-dependencies.lock
 .vscode/
 .DS_Store
 __pycache__/

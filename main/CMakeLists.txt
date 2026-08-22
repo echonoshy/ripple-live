@@ -4,7 +4,9 @@ idf_component_register(
     SRCS "main.c"
          "passport_ui.c"
          "passport_pet.c"
+         "passport_policy.c"
          "passport_wifi.c"
+         "passport_storage.c"
          "passport_realtime.c"
          ${PET_ASSET_SRCS}
     INCLUDE_DIRS "."

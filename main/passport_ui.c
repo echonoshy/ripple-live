@@ -1,6 +1,7 @@
 #include "passport_ui.h"
 #include "passport_pet.h"
 
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "lvgl.h"
@@ -15,7 +16,9 @@ typedef struct {
     char detail[80];
 } ui_event_t;
 
-static QueueHandle_t s_events;
+static const char *TAG = "passport_ui";
+static QueueHandle_t s_state_events;
+static QueueHandle_t s_notice_events;
 static lv_obj_t *s_status;
 static lv_obj_t *s_detail;
 static lv_obj_t *s_orb;
@@ -40,39 +43,29 @@ static const char *state_text(passport_ui_state_t state)
     }
 }
 
-static uint32_t state_color(passport_ui_state_t state)
-{
-    switch (state) {
-    case PASSPORT_UI_ERROR: return 0xE45454;
-    default: return 0x8B5CF6;
-    }
-}
-
 static void render_current_state(void)
 {
     lv_label_set_text(s_status, state_text(s_current_state));
     lv_label_set_text(s_detail, s_current_detail);
-    lv_obj_set_style_border_color(s_orb, lv_color_hex(state_color(s_current_state)), 0);
+    lv_obj_set_style_border_color(s_orb, lv_color_hex(0x8B5CF6), 0);
 }
 
 static void poll_events(lv_timer_t *timer)
 {
     (void)timer;
     ui_event_t event;
-    while (s_events && xQueueReceive(s_events, &event, 0) == pdTRUE) {
-        if (event.notice) {
-            lv_label_set_text(s_status, event.title);
-            lv_label_set_text(s_detail, event.detail);
-            s_notice_active = true;
-            s_notice_started = lv_tick_get();
-            s_notice_duration = event.duration_ms;
-        } else {
-            s_current_state = event.state;
-            snprintf(s_current_detail, sizeof(s_current_detail), "%s", event.detail);
-            passport_pet_set_state(event.state);
-            lv_obj_set_style_border_color(s_orb, lv_color_hex(state_color(event.state)), 0);
-            if (!s_notice_active) render_current_state();
-        }
+    if (s_state_events && xQueueReceive(s_state_events, &event, 0) == pdTRUE) {
+        s_current_state = event.state;
+        snprintf(s_current_detail, sizeof(s_current_detail), "%s", event.detail);
+        passport_pet_set_state(event.state);
+        if (!s_notice_active) render_current_state();
+    }
+    if (s_notice_events && xQueueReceive(s_notice_events, &event, 0) == pdTRUE) {
+        lv_label_set_text(s_status, event.title);
+        lv_label_set_text(s_detail, event.detail);
+        s_notice_active = true;
+        s_notice_started = lv_tick_get();
+        s_notice_duration = event.duration_ms;
     }
     if (s_notice_active && lv_tick_elaps(s_notice_started) >= s_notice_duration) {
         s_notice_active = false;
@@ -82,7 +75,13 @@ static void poll_events(lv_timer_t *timer)
 
 void passport_ui_init(void)
 {
-    s_events = xQueueCreate(8, sizeof(ui_event_t));
+    // Each queue stores the latest value. Critical states can no longer disappear
+    // behind a burst of transient updates, and the newest notice remains visible.
+    s_state_events = xQueueCreate(1, sizeof(ui_event_t));
+    s_notice_events = xQueueCreate(1, sizeof(ui_event_t));
+    if (!s_state_events || !s_notice_events) {
+        ESP_LOGE(TAG, "UI event queue allocation failed");
+    }
 
     lv_obj_t *screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x08080A), 0);
@@ -128,17 +127,17 @@ void passport_ui_init(void)
 
 void passport_ui_set(passport_ui_state_t state, const char *detail)
 {
-    if (!s_events) return;
+    if (!s_state_events) return;
     ui_event_t event = {.notice = false, .state = state};
     snprintf(event.detail, sizeof(event.detail), "%s", detail ? detail : "");
-    xQueueSend(s_events, &event, 0);
+    xQueueOverwrite(s_state_events, &event);
 }
 
 void passport_ui_notice(const char *title, const char *detail, uint32_t duration_ms)
 {
-    if (!s_events) return;
+    if (!s_notice_events) return;
     ui_event_t event = {.notice = true, .duration_ms = duration_ms};
     snprintf(event.title, sizeof(event.title), "%s", title ? title : "RIPPLE");
     snprintf(event.detail, sizeof(event.detail), "%s", detail ? detail : "");
-    xQueueSend(s_events, &event, 0);
+    xQueueOverwrite(s_notice_events, &event);
 }

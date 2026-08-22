@@ -1,4 +1,5 @@
 #include "passport_realtime.h"
+#include "passport_storage.h"
 #include "passport_ui.h"
 #include "passport_wifi.h"
 
@@ -12,12 +13,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "nvs.h"
-#include "nvs_flash.h"
 #include <stdio.h>
 
 static const char *TAG = "passport";
-static const char *CONTROL_NAMESPACE = "ripple_ui";
 static QueueHandle_t s_control_actions;
 
 typedef enum {
@@ -26,27 +24,6 @@ typedef enum {
     ACTION_SHOW_STATUS,
     ACTION_RESET_WIFI,
 } control_action_t;
-
-static uint8_t load_volume(void)
-{
-    nvs_handle_t nvs;
-    uint8_t volume = 70;
-    if (nvs_open(CONTROL_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
-        if (nvs_get_u8(nvs, "volume", &volume) != ESP_OK || volume > 100) volume = 70;
-        nvs_close(nvs);
-    }
-    return volume;
-}
-
-static void save_volume(uint8_t volume)
-{
-    nvs_handle_t nvs;
-    if (nvs_open(CONTROL_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
-        nvs_set_u8(nvs, "volume", volume);
-        nvs_commit(nvs);
-        nvs_close(nvs);
-    }
-}
 
 static void show_device_status(void)
 {
@@ -91,7 +68,10 @@ static void control_task(void *arg)
             if (volume < 0) volume = 0;
             if (volume > 100) volume = 100;
             passport_realtime_set_volume((uint8_t)volume);
-            save_volume((uint8_t)volume);
+            esp_err_t err = passport_storage_save_volume((uint8_t)volume);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "volume persistence failed: %s", esp_err_to_name(err));
+            }
             char detail[16];
             snprintf(detail, sizeof(detail), "%d%%", volume);
             passport_ui_notice("VOLUME", detail, 1200);
@@ -134,13 +114,9 @@ void app_main(void)
     ESP_LOGI(TAG, "Ripple Passport starting (free heap: %lu)",
              (unsigned long)esp_get_free_heap_size());
 
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
+    esp_err_t err = passport_storage_init();
     ESP_ERROR_CHECK(err);
-    passport_realtime_set_volume(load_volume());
+    passport_realtime_set_volume(passport_storage_load_volume(70));
 
     ESP_ERROR_CHECK(bsp_i2c_init());
     ESP_ERROR_CHECK(bsp_display_init());
@@ -178,11 +154,14 @@ void app_main(void)
         return;
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Wi-Fi failed: %s", esp_err_to_name(err));
-        passport_ui_set(PASSPORT_UI_ERROR, "Wi-Fi connection failed");
+        ESP_LOGE(TAG, "Wi-Fi initialization failed: %s", esp_err_to_name(err));
+        passport_ui_set(PASSPORT_UI_ERROR, "Wi-Fi initialization failed");
         return;
     }
-
     passport_ui_set(PASSPORT_UI_CONNECTING, "Connecting to Ripple");
-    ESP_ERROR_CHECK(passport_realtime_start(gateway));
+    err = passport_realtime_start(gateway);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Realtime initialization failed: %s", esp_err_to_name(err));
+        passport_ui_set(PASSPORT_UI_ERROR, "Realtime initialization failed");
+    }
 }

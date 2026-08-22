@@ -32,6 +32,7 @@ app_main
   └─ realtime client
        ├─ WebSocket event task
        ├─ recording task
+       ├─ bounded upload/network task
        └─ playback task
 ```
 
@@ -48,7 +49,9 @@ duplicated outside `bsp_pins.h`.
   the codec.
 - LVGL is accessed by its task. Other tasks use `passport_ui_set` or
   `passport_ui_notice`, which enqueue bounded UI events.
-- Wi-Fi callbacks only update event bits and schedule reconnection/UI state.
+- Wi-Fi callbacks only update connection state and schedule reconnection/UI state.
+- Recording publishes fixed 40 ms PCM blocks to the bounded upload queue; it
+  never performs WebSocket encoding or sends while holding the audio mutex.
 - Cancelling a response must stop accepting audio and free queued PCM blocks.
 - Do not create another ADC1 oneshot unit or I2C0 master bus.
 
@@ -64,8 +67,8 @@ ES8311 -> PCM16 16 kHz mono -> 640 samples / 40 ms
 Output:
 
 ```text
-WebSocket -> Float32 little-endian 24 kHz mono -> PCM16
-          -> 8-block queue -> 4-block (~400 ms) prebuffer -> ES8311
+WebSocket -> validated Float32 little-endian 24 kHz mono -> PCM16
+          -> 8-block queue -> sample-counted (~400 ms) prebuffer -> ES8311
 ```
 
 The Gateway normally emits 100 ms blocks. Queue capacity is 800 ms; the target
@@ -108,14 +111,17 @@ validates dimensions, counts, and durations.
 
 ## Persistence
 
-NVS uses two namespaces:
+Configuration is mirrored across the default NVS partition and a dedicated
+64 KB `ripple_backup` NVS partition. Valid primary values are mirrored on boot;
+if either partition needs recovery, values are restored from the other one.
+Both partitions use two namespaces:
 
 | Namespace | Data | Reset behavior |
 | --- | --- | --- |
 | `ripple` | SSID, password, Gateway host/port | Cleared by holding `UP` |
 | `ripple_ui` | Volume | Preserved when Wi-Fi is reset |
 
-Ordinary `idf.py flash` preserves both. `idf.py erase-flash` removes both.
+Ordinary `idf.py flash` preserves both partitions. `idf.py erase-flash` removes both.
 
 ## Build
 

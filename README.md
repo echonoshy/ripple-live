@@ -35,13 +35,13 @@ binary (`build/Ripple-AI-Passport.bin`) to `0x0`.
 
 ## Product behavior
 
-- 16 kHz mono microphone input streamed over WebSocket.
-- 24 kHz mono response playback with a 400 ms jitter buffer.
+- 16 kHz mono microphone input streamed through a bounded upload queue.
+- 24 kHz mono response playback with a sample-counted 400 ms jitter buffer.
 - Press-to-talk interruption: pressing `OK` during playback cancels the current
   response and starts a new recording.
 - Original Ripple pet animations for connecting, listening, thinking, ready,
   setup, and error states.
-- Browser-based 2.4 GHz Wi-Fi provisioning.
+- Browser-based 2.4 GHz Wi-Fi provisioning with captive-portal detection.
 - Persistent local volume control and transient battery/network diagnostics.
 
 ### Buttons
@@ -149,10 +149,12 @@ The project uses native USB Serial/JTAG; if no port appears, try another USB
 data cable and consult the FoloToy driver/diagnostic documentation above.
 
 Use `flash`, not `erase-flash`, for ordinary updates. It preserves Wi-Fi and
-volume data in NVS. Use `idf.py erase-flash` only when a full factory reset is
-intended.
+volume data in both NVS copies. Configuration is mirrored into a dedicated
+`ripple_backup` partition and restored if either copy needs recovery. Use
+`idf.py erase-flash` only when a full factory reset is intended.
 
-The current image is about 2.18 MB in a 7 MB factory partition. The ESP32-C3
+The current image is about 2.18 MB in a 7 MB factory partition, with a separate
+64 KB backup NVS partition. The ESP32-C3
 has no PSRAM; changes to image assets, task stacks, LVGL buffers, or audio
 queues must be checked against internal RAM.
 
@@ -214,5 +216,8 @@ cropping or redrawing the character.
 - Volume changes survive a restart.
 - The status shortcut reports plausible battery and RSSI values.
 - Ten consecutive turns do not continuously reduce minimum free heap.
+- Slow Wi-Fi, an unresponsive Gateway handshake, and a stalled response time
+  out and recover without a reboot.
+- Two rapid interruptions cannot let an old `response_id` affect the new turn.
 
 See the user guide for detailed troubleshooting and acceptance steps.

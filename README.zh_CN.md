@@ -29,11 +29,11 @@ Ripple AI Passport 是独立的应用固件，不使用 FoloToy 原厂 MQTT / Se
 
 ## 已实现功能
 
-- 麦克风以 16 kHz 单声道采集并通过 WebSocket 流式上传。
-- 回复以 24 kHz 单声道播放，使用约 400 ms 抗抖动缓冲。
+- 麦克风以 16 kHz 单声道采集，通过独立有界上传队列流式发送。
+- 回复以 24 kHz 单声道播放，按实际样本数累计约 400 ms 抗抖动缓冲。
 - 播放中按下 `OK` 可取消当前回复并立即开始新一轮录音。
 - 使用 Ripple 原始精灵动画显示连接、聆听、思考、待机、配网和异常状态。
-- 使用浏览器完成 2.4 GHz Wi-Fi 与 Gateway 地址配置。
+- 使用带 captive portal 探测的浏览器页面完成 2.4 GHz Wi-Fi 与 Gateway 地址配置。
 - 音量掉电保存；可临时查看电量、Wi-Fi 信号和后端连接状态。
 
 ### 按键说明
@@ -134,10 +134,11 @@ macOS 常见串口是 `/dev/cu.usbmodem*`，Linux 常见串口是 `/dev/ttyACM*`
 原生 USB Serial/JTAG；找不到端口时先更换确认支持数据传输的 USB 线，再参考上面的
 FoloToy 驱动与诊断文档。
 
-日常升级只执行 `flash`，这样不会清除 NVS 中的 Wi-Fi 和音量。只有明确需要恢复
+日常升级只执行 `flash`，这样不会清除主、备 NVS 中的 Wi-Fi 和音量。配置会镜像到
+独立的 `ripple_backup` 分区，并在任一分区异常时从另一份恢复。只有明确需要恢复
 出厂状态时才执行 `idf.py erase-flash`。
 
-当前固件约 2.18 MB，Factory App 分区为 7 MB。ESP32-C3 没有 PSRAM，调整图片、
+当前固件约 2.18 MB，Factory App 分区为 7 MB，另有 64 KB 备份 NVS。ESP32-C3 没有 PSRAM，调整图片、
 任务栈、LVGL buffer 或音频队列后必须重新检查内部 RAM。
 
 ## 首次使用
@@ -193,5 +194,7 @@ python tools/generate_pet_assets.py
 - 音量调整后重启仍然保留。
 - 状态快捷键显示合理的电量和 RSSI。
 - 连续十轮对话后 minimum free heap 没有持续下降。
+- Wi-Fi 慢连接、Gateway 握手无响应和回复中途断流都能超时并自动恢复。
+- 快速打断两次时，旧 `response_id` 的音频和终止事件不会影响新一轮。
 
 更完整的配网、操作、升级和故障处理见使用指南。
