@@ -22,7 +22,10 @@
 #define RECORDING BIT1
 #define RESPONSE_DONE BIT2
 #define INPUT_SAMPLES 640
-#define PLAYBACK_PREBUFFER_CHUNKS 2
+#define PLAYBACK_CHUNK_MS 100
+#define PLAYBACK_PREBUFFER_MS 400
+#define PLAYBACK_PREBUFFER_CHUNKS (PLAYBACK_PREBUFFER_MS / PLAYBACK_CHUNK_MS)
+#define PLAYBACK_QUEUE_CHUNKS 8
 
 typedef enum { CONTROL_PRESS = 1, CONTROL_RELEASE = 2 } control_event_t;
 
@@ -163,7 +166,7 @@ static void playback_task(void *arg)
                 (queued >= PLAYBACK_PREBUFFER_CHUNKS || (response_finished && queued > 0))) {
                 buffering = false;
                 ESP_LOGI(TAG, "playback started with %lu ms buffered",
-                         (unsigned long)queued * 100UL);
+                         (unsigned long)queued * PLAYBACK_CHUNK_MS);
             } else {
                 if (response_finished && queued == 0) {
                     xEventGroupClearBits(s_flags, RESPONSE_DONE);
@@ -319,7 +322,7 @@ esp_err_t passport_realtime_start(const char *gateway)
     if (!gateway || !gateway[0]) return ESP_ERR_INVALID_ARG;
     s_flags = xEventGroupCreate();
     s_controls = xQueueCreate(8, sizeof(control_event_t));
-    s_audio = xQueueCreate(4, sizeof(audio_chunk_t));
+    s_audio = xQueueCreate(PLAYBACK_QUEUE_CHUNKS, sizeof(audio_chunk_t));
     s_audio_lock = xSemaphoreCreateMutex();
     if (!s_flags || !s_controls || !s_audio || !s_audio_lock) return ESP_ERR_NO_MEM;
 
