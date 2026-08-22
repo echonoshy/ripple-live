@@ -7,3 +7,12 @@ dependencies.lock
 .DS_Store
 __pycache__/
 .venv/
+
+# Runtime remnants that may remain when switching from the Ripple Live monorepo.
+/.cache/
+/apps/
+/deploy/
+/output/
+/runtime-data/
+/services/
+/tools/ripple-tool/
