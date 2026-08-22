@@ -88,6 +88,7 @@ export type LiveCallScreenProps = {
   onRippleSignalsConsumed(signalId: RippleSignalId): void
   userText: string
   assistantText: string
+  captionsEnabled: boolean
   toolStatus: string
   errorMessage: string
   artifacts: ResponseArtifact[]
@@ -122,6 +123,7 @@ export function LiveCallScreen({
   onRippleSignalsConsumed,
   userText,
   assistantText,
+  captionsEnabled,
   toolStatus,
   errorMessage,
   artifacts,
@@ -222,12 +224,12 @@ export function LiveCallScreen({
               <span className="live-camera-label">{labels.camera}</span>
             )}
           </div>
-          {!meetingMode && assistantText && (
+          {!meetingMode && captionsEnabled && assistantText && (
             <p className="live-assistant-caption" aria-live="polite">
               {assistantText}
             </p>
           )}
-          {!meetingMode ? (
+          {!meetingMode && captionsEnabled ? (
             <LiveCaption
               userText={userText}
               assistantText={assistantText}

@@ -2,7 +2,9 @@ import {
   ArrowLeft,
   Brain,
   BriefcaseBusiness,
+  FileText,
   Heart,
+  List,
   LoaderCircle,
   Plus,
   RefreshCw,
@@ -44,6 +46,15 @@ type EditorState = {
   summary: string
 }
 
+type MemoryView = 'all' | 'preference' | 'relationship' | 'context'
+
+const MEMORY_FILTERS: Array<{ value: MemoryView; label: string }> = [
+  { value: 'all', label: '全部' },
+  { value: 'preference', label: '偏好' },
+  { value: 'relationship', label: '人物' },
+  { value: 'context', label: '计划' },
+]
+
 function formatMemoryTime(timestamp: number) {
   return new Intl.DateTimeFormat('zh-CN', {
     month: 'short',
@@ -62,6 +73,7 @@ export function AssistantMemoryScreen({
 }) {
   const [items, setItems] = useState<MemoryFact[]>([])
   const [query, setQuery] = useState('')
+  const [view, setView] = useState<MemoryView>('all')
   const [busy, setBusy] = useState(true)
   const [error, setError] = useState('')
   const [editor, setEditor] = useState<EditorState | null>(null)
@@ -91,11 +103,11 @@ export function AssistantMemoryScreen({
 
   const visibleItems = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase('zh-CN')
-    if (!normalized) return items
-    return items.filter((item) =>
-      item.summary.toLocaleLowerCase('zh-CN').includes(normalized),
-    )
-  }, [items, query])
+    return items.filter((item) => {
+      if (view !== 'all' && item.kind !== view) return false
+      return !normalized || item.summary.toLocaleLowerCase('zh-CN').includes(normalized)
+    })
+  }, [items, query, view])
 
   const groupedItems = useMemo(
     () => CATEGORIES.map((category) => ({
@@ -161,29 +173,40 @@ export function AssistantMemoryScreen({
     <section className="assistant-memory-screen">
       <header className="assistant-memory-header">
         <button type="button" aria-label="返回首页" onClick={onBack}><ArrowLeft /></button>
-        <div><small>RIPPLE MEMORY</small><h1>记忆</h1></div>
+        <div className="assistant-memory-path" aria-label={`长期记忆，共 ${items.length} 项`}>
+          <span>MEMORY</span><i>/</i><strong>{String(items.length).padStart(2, '0')}</strong>
+        </div>
         <button type="button" aria-label="添加记忆" onClick={openCreate}><Plus /></button>
       </header>
 
       <main className="assistant-memory-content">
-        <section className="assistant-memory-intro">
-          <span><Brain /></span>
-          <div>
-            <h2>Ripple 记得这些</h2>
-            <p>只保存你明确要求记住的事实。你可以随时修改或删除。</p>
-          </div>
-          <strong>{items.length}</strong>
-        </section>
+        <div className="assistant-memory-title">
+          <h1>记忆</h1>
+          <span>MEMORY / {String(items.length).padStart(2, '0')}</span>
+        </div>
 
-        <label className="assistant-memory-search">
-          <Search aria-hidden="true" />
-          <input
-            aria-label="搜索记忆"
-            value={query}
-            placeholder="搜索 Ripple 记住的内容"
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </label>
+        <div className="assistant-memory-toolbar">
+          <label className="assistant-memory-search">
+            <Search aria-hidden="true" />
+            <input
+              aria-label="搜索记忆"
+              value={query}
+              placeholder="搜索记忆"
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          <nav className="assistant-memory-filters" aria-label="记忆分类">
+            {MEMORY_FILTERS.map((filter) => (
+              <button key={filter.value} className={view === filter.value ? 'is-active' : ''} type="button" onClick={() => setView(filter.value)}>{filter.label}</button>
+            ))}
+          </nav>
+        </div>
+
+        <div className={`assistant-memory-status${error ? ' is-error' : ''}`}>
+          <RefreshCw aria-hidden="true" />
+          <span>{busy ? 'SYNCING' : error ? 'SYNC ERROR' : 'SYNCED'} · {visibleItems.length} ITEMS</span>
+          <List aria-hidden="true" />
+        </div>
 
         {busy ? (
           <div className="assistant-memory-loading"><LoaderCircle /><span>正在读取记忆</span></div>
@@ -196,10 +219,10 @@ export function AssistantMemoryScreen({
         ) : null}
         {!busy && !error && visibleItems.length === 0 ? (
           <section className="assistant-memory-empty">
-            <Brain />
+            <FileText />
             <h2>{query ? '没有找到相关记忆' : '还没有长期记忆'}</h2>
-            <p>{query ? '换一个更短的关键词试试。' : '你可以手动添加，或在语音对话中说“记住……”。'}</p>
-            {!query ? <button type="button" onClick={openCreate}><Plus />告诉 Ripple 一件事</button> : null}
+            <p>{query ? '换一个更短的关键词试试。' : 'Ripple 会在相处中记住稳定的信息。'}</p>
+            {!query ? <button type="button" onClick={openCreate}><Plus />添加记忆</button> : null}
           </section>
         ) : null}
 

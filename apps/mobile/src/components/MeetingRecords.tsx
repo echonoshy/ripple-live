@@ -12,6 +12,7 @@ import {
   Video,
 } from 'lucide-react'
 import type { MeetingDetail, MeetingRecord } from '../api'
+import './MeetingRecords.css'
 
 function durationLabel(seconds: number | null) {
   if (seconds === null) return '时长计算中'
@@ -145,33 +146,36 @@ export function MeetingRecords({
   }
 
   return (
-    <section className="meeting-screen">
+    <section className="meeting-screen meeting-list-screen">
       <header className="meeting-screen-header">
         <button type="button" aria-label="返回首页" onClick={onBack}><ArrowLeft /></button>
-        <div><small>RECORDS / {items.length}</small><h1>会议记录</h1></div>
-        <span />
+        <div className="meeting-screen-path" aria-label={`会议记录，共 ${items.length} 项`}>
+          <span>RECORDS</span><i>/</i><strong>{String(items.length).padStart(2, '0')}</strong>
+        </div>
+        <button type="button" aria-label="开始会议" onClick={onStart}><Plus /></button>
       </header>
       <main className="meeting-list-content">
+        <div className="meeting-list-title">
+          <h1>会议记录</h1>
+          <span>RECORDS / {String(items.length).padStart(2, '0')}</span>
+        </div>
         <button className="meeting-start-button" type="button" onClick={onStart}>
-          <span><Mic /></span>
-          <span>
-            <strong>开始会议记录</strong>
-            <small>只记录和整理，Ripple 不会回答</small>
-          </span>
-          <Plus />
+          <i aria-hidden="true" />
+          <strong>开始会议</strong>
+          <small>NEW SESSION</small>
         </button>
         {busy ? <div className="meeting-list-loading"><LoaderCircle /><span>读取会议记录</span></div> : null}
         {error ? <div className="meeting-list-error">{error}</div> : null}
         {!busy && !error && items.length === 0 ? (
           <div className="meeting-list-empty">
-            <CalendarDays />
-            <small>MEETING / EMPTY</small>
-            <h2>还没有会议记录</h2>
-            <p>开始一次独立会议记录，结束后会自动生成标题、摘要和行动项。</p>
+            <Mic />
+            <h2>暂无会议记录</h2>
+            <p>开始会议后，逐字稿和摘要会保存在这里。</p>
           </div>
         ) : null}
-        <div className="meeting-record-list">
-          {items.map((meeting) => (
+        {items.length > 0 ? (
+          <div className="meeting-record-list">
+            {items.map((meeting) => (
             <button type="button" key={meeting.id} onClick={() => onOpen(meeting.id)}>
               <span className="meeting-record-icon">{meeting.mode === 'video' ? <Video /> : <Mic />}</span>
               <span className="meeting-record-copy">
@@ -182,8 +186,9 @@ export function MeetingRecords({
               </span>
               <ChevronRight />
             </button>
-          ))}
-        </div>
+            ))}
+          </div>
+        ) : null}
       </main>
     </section>
   )

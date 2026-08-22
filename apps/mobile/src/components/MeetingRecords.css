@@ -1,0 +1,190 @@
+.meeting-screen.meeting-list-screen {
+  position: relative;
+  overflow: hidden;
+  background: #030303;
+}
+
+.meeting-list-screen::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 260px;
+  background-image:
+    linear-gradient(rgb(244 241 237 / 3.5%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(244 241 237 / 3.5%) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: linear-gradient(#000 0%, rgb(0 0 0 / 60%) 62%, transparent 100%);
+  pointer-events: none;
+  content: '';
+}
+
+.meeting-list-screen > * {
+  position: relative;
+  z-index: 1;
+}
+
+.meeting-list-screen .meeting-screen-header {
+  position: relative;
+  top: auto;
+  display: grid;
+  min-height: 64px;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  gap: 12px;
+  padding: max(10px, env(safe-area-inset-top)) 20px 8px;
+  border: 0;
+  background: transparent;
+  backdrop-filter: none;
+}
+
+.meeting-list-screen .meeting-screen-header > button {
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgb(244 241 237 / 22%);
+  border-radius: 4px;
+  background: #09090a;
+  color: #aaa5ad;
+}
+
+.meeting-list-screen .meeting-screen-header > button:last-child {
+  border-color: rgb(155 77 255 / 55%);
+  color: #bf83ff;
+}
+
+.meeting-screen-path {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  color: #74717a;
+  font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .1em;
+  text-align: left;
+}
+
+.meeting-screen-path i {
+  color: rgb(244 241 237 / 28%);
+  font-style: normal;
+}
+
+.meeting-screen-path strong {
+  color: #aaa5ad;
+  font-weight: 600;
+}
+
+.meeting-list-screen .meeting-list-content {
+  padding: 28px 20px max(36px, env(safe-area-inset-bottom));
+}
+
+.meeting-list-title {
+  display: grid;
+  gap: 18px;
+  margin: 10px 0 34px;
+}
+
+.meeting-list-title h1 {
+  margin: 0;
+  color: #f4f1ed;
+  font-size: clamp(38px, 10vw, 52px);
+  font-weight: 700;
+  letter-spacing: -.07em;
+  line-height: 1;
+}
+
+.meeting-list-title span {
+  color: #74717a;
+  font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .1em;
+}
+
+.meeting-list-screen .meeting-start-button {
+  display: grid;
+  width: 100%;
+  min-height: 52px;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin: 0 0 16px;
+  padding: 0 18px;
+  border: 1px solid rgb(244 241 237 / 22%);
+  border-radius: 4px;
+  background: #070708;
+  color: #f4f1ed;
+  box-shadow: none;
+}
+
+.meeting-list-screen .meeting-start-button > i {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #9b4dff;
+}
+
+.meeting-list-screen .meeting-start-button > strong {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.meeting-list-screen .meeting-start-button > small {
+  color: #74717a;
+  font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .1em;
+}
+
+.meeting-list-screen .meeting-list-empty {
+  display: grid;
+  min-height: 232px;
+  place-items: center;
+  align-content: center;
+  padding: 24px;
+  border: 1px solid rgb(244 241 237 / 22%);
+  border-radius: 4px;
+  background-color: #070708;
+  background-image:
+    linear-gradient(rgb(244 241 237 / 3.5%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(244 241 237 / 3.5%) 1px, transparent 1px);
+  background-size: 28px 28px;
+  text-align: center;
+}
+
+.meeting-list-screen .meeting-list-empty > svg {
+  width: 28px;
+  height: 28px;
+  margin-bottom: 14px;
+  color: #9b4dff;
+  stroke-width: 1.5;
+}
+
+.meeting-list-screen .meeting-list-empty h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.meeting-list-screen .meeting-list-empty p {
+  max-width: 320px;
+  margin: 0;
+  color: #aaa5ad;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.meeting-list-screen .meeting-record-list {
+  border-radius: 4px;
+}
+
+.meeting-list-screen .meeting-record-icon {
+  border-radius: 4px;
+}
+
+@media (max-width: 380px) {
+  .meeting-list-screen .meeting-screen-header,
+  .meeting-list-screen .meeting-list-content {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .meeting-list-screen .meeting-start-button > small {
+    font-size: 10px;
+  }
+}

@@ -10,13 +10,11 @@ import {
   Mic as Microphone,
   MoreVertical as DotsThreeVertical,
   Pin as PushPin,
-  LogOut as SignOut,
   SquarePen as NotePencil,
   Plus,
   Search,
   Trash2 as Trash,
   Ticket,
-  ChevronRight,
   Video,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
@@ -42,7 +40,6 @@ import {
   meeting,
   meetings,
   memories,
-  memory,
   memoryMutation,
   project as getProject,
   projectConversations,
@@ -91,7 +88,7 @@ import { ProjectDetailScreen } from './components/projects/ProjectDetailScreen'
 import { hasProjectConversationContent } from './components/projects/projectDraft'
 import { ProjectEditorSheet } from './components/projects/ProjectEditorSheet'
 import { ProjectListScreen } from './components/projects/ProjectListScreen'
-import { UserAvatar } from './components/UserAvatar'
+import { SettingsScreen } from './components/SettingsScreen'
 import {
   groupLibraryItems,
   libraryOptionsForView,
@@ -138,6 +135,7 @@ import { parseLiveResult } from './realtime/toolResults'
 const DEFAULT_SERVER = '140.143.229.103:8700'
 const DEFAULT_VIEWPORT = 'width=device-width, initial-scale=1.0'
 const ZOOM_LOCKED_VIEWPORT = `${DEFAULT_VIEWPORT}, maximum-scale=1.0, user-scalable=no`
+const LIVE_CAPTIONS_KEY = 'ripple-live-captions-enabled'
 
 type Screen =
   | 'home'
@@ -257,28 +255,11 @@ function todoDueLabel(dueAt: number | null) {
   return `提醒：${formatHistoryTime(dueAt)}`
 }
 
-function todoSummaryLabel(summary: string) {
-  return summary
-    .replace(/[，,]\s*当前时间为\d{4}-\d{2}-\d{2}T[^。]+。?$/u, '。')
-    .replace(/。{2,}$/u, '。')
-}
-
 function todoDateInputValue(dueAt: number | null) {
   if (!dueAt) return ''
   const date = new Date(dueAt * 1000)
   const pad = (value: number) => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
-
-function notificationPermissionLabel() {
-  try {
-    if (typeof Notification === 'undefined') return '当前环境不可查询'
-    if (Notification.permission === 'granted') return '已允许'
-    if (Notification.permission === 'denied') return '已拒绝'
-    return '尚未询问'
-  } catch {
-    return '当前环境不可查询'
-  }
 }
 
 export default function App() {
@@ -296,6 +277,9 @@ export default function App() {
   const [frameRequestActive, setFrameRequestActive] = useState(false)
   const [assistantText, setAssistantText] = useState('')
   const [userText, setUserText] = useState('')
+  const [captionsEnabled, setCaptionsEnabled] = useState(
+    () => localStorage.getItem(LIVE_CAPTIONS_KEY) !== 'false',
+  )
   const [toolStatus, setToolStatus] = useState('')
   const [muted, setMuted] = useState(false)
   const [inputLevel, setInputLevel] = useState(0)
@@ -388,7 +372,6 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const appShellRef = useRef<HTMLElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const avatarInputRef = useRef<HTMLInputElement>(null)
   const sessionRef = useRef<RealtimeSession | null>(null)
   const mediaRef = useRef<LiveMedia | null>(null)
   const cameraOrchestratorRef = useRef<ReturnType<
@@ -1452,31 +1435,9 @@ export default function App() {
     openCall('audio', undefined, 'meeting')
   }
 
-  const openConversationMemory = async (targetId: string) => {
-    const routeOwner = navigateTo('memories')
-    actionMemoryTargetRef.current = targetId
-    setMemoryScope('all')
-    setMemoryQuery('')
-    setSelectedMemoryId(null)
-    setMemoryBusy(true)
-    setMemoryError('')
-    try {
-      const target = await memory(server, accessToken, targetId)
-      if (!navigationGuardRef.current.owns(routeOwner)) return
-      setMemoryItems((items) => [
-        target,
-        ...items.filter((item) => item.id !== target.id),
-      ])
-      setSelectedMemoryId(target.id)
-    } catch (error) {
-      if (!navigationGuardRef.current.owns(routeOwner)) return
-      actionMemoryTargetRef.current = null
-      setMemoryError(
-        error instanceof Error ? error.message : '该记忆已不存在或无法打开',
-      )
-    } finally {
-      if (navigationGuardRef.current.owns(routeOwner)) setMemoryBusy(false)
-    }
+  const openConversationMemory = (_targetId: string) => {
+    actionMemoryTargetRef.current = null
+    navigateTo('assistant-memory')
   }
 
   const openConversationTodo = (targetId: string) => {
@@ -2496,9 +2457,10 @@ export default function App() {
             <button className="icon-button" type="button" aria-label="返回首页" onClick={() => navigateTo('home')}>
               <ArrowLeft />
             </button>
-            <div className="todo-heading">
-              <h1>待办</h1>
-              <p>{todoView === 'active' ? `${visibleTodos.length} 项待处理` : `${visibleTodos.length} 项已完成`}</p>
+            <div className="todo-command-label" aria-hidden="true">
+              <span>TODO</span>
+              <i>/</i>
+              <strong>{todoView === 'active' ? 'ACTIVE' : 'DONE'}</strong>
             </div>
             <button
               className="icon-button todo-add-button"
@@ -2509,6 +2471,13 @@ export default function App() {
               <Plus />
             </button>
           </header>
+          <div className="todo-heading">
+            <h1>待办</h1>
+            <p>
+              {String(visibleTodos.length).padStart(2, '0')}
+              <span>{todoView === 'active' ? 'OPEN' : 'DONE'}</span>
+            </p>
+          </div>
           <div className="todo-toolbar">
             <div className="todo-view-switch" role="tablist" aria-label="待办状态">
               <button
@@ -2561,7 +2530,7 @@ export default function App() {
           )}
           {!todoBusy && visibleTodos.length > 0 && (
             <div className="todo-list">
-              {visibleTodos.map((todo) => (
+              {visibleTodos.map((todo, index) => (
                 <article
                   id={`todo-action-${encodeURIComponent(todo.id)}`}
                   tabIndex={-1}
@@ -2573,9 +2542,6 @@ export default function App() {
                   onPointerUp={endTodoGesture}
                   onPointerCancel={cancelTodoGesture}
                 >
-                  <button className="todo-swipe-delete danger-action" type="button" aria-label={`删除：${todo.title}`} onClick={() => setDeleteRequest({ kind: 'todo', ids: [todo.id] })}>
-                    <Trash aria-hidden="true" /> 删除
-                  </button>
                   <div className={`todo-card todo-card-surface ${todoView === 'completed' ? 'is-completed' : ''}`}>
                     <button
                       className="todo-complete"
@@ -2588,21 +2554,34 @@ export default function App() {
                     >
                       {todoView === 'active' ? <Circle /> : <ArrowCounterClockwise />}
                     </button>
-                    <button
-                      className="todo-copy"
-                      type="button"
-                      aria-label={`编辑：${todo.title}`}
-                      onClick={() => {
-                        if (consumeSuppressedTodoClick()) return
-                        setTodoEditor({ todo, title: todo.title, dueAt: todoDateInputValue(todo.due_at) })
-                      }}
-                    >
+                    <span className="todo-index" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+                    <div className="todo-copy">
                       <strong>{todo.title}</strong>
-                      {todo.visual_summary && <p>{todoSummaryLabel(todo.visual_summary)}</p>}
                       <time className={todo.due_at && todo.due_at < Date.now() / 1000 && todoView === 'active' ? 'is-overdue' : ''}>
                         {todoView === 'completed' && todo.completed_at ? `完成：${formatHistoryTime(todo.completed_at)}` : todoDueLabel(todo.due_at)}
                       </time>
-                    </button>
+                    </div>
+                    <div className="todo-row-actions">
+                      <button
+                        className="todo-row-action"
+                        type="button"
+                        aria-label={`编辑：${todo.title}`}
+                        onClick={() => {
+                          if (consumeSuppressedTodoClick()) return
+                          setTodoEditor({ todo, title: todo.title, dueAt: todoDateInputValue(todo.due_at) })
+                        }}
+                      >
+                        <NotePencil aria-hidden="true" />
+                      </button>
+                      <button
+                        className="todo-row-action is-danger"
+                        type="button"
+                        aria-label={`删除：${todo.title}`}
+                        onClick={() => setDeleteRequest({ kind: 'todo', ids: [todo.id] })}
+                      >
+                        <Trash aria-hidden="true" />
+                      </button>
+                    </div>
                   </div>
                 </article>
               ))}
@@ -2910,99 +2889,25 @@ export default function App() {
       )}
 
       {screen === 'settings' && (
-        <section className="settings-screen profile-screen">
-          <header className="screen-header">
-            <button className="icon-button" type="button" aria-label="返回首页" onClick={() => navigateTo('home')}>
-              <ArrowLeft />
-            </button>
-            <h1>设置</h1>
-            <span className="header-spacer" />
-          </header>
-
-          <div className="profile-groups">
-            <div className="profile-identity">
-              <button
-                className="profile-avatar-button"
-                type="button"
-                aria-label="选择并更换头像"
-                onClick={() => avatarInputRef.current?.click()}
-              >
-                <UserAvatar
-                  server={server}
-                  token={accessToken}
-                  email={user.email}
-                  avatarUrl={user.avatar_url}
-                />
-                <span className="profile-avatar-edit" aria-hidden="true"><ImagesSquare /></span>
-              </button>
-              <input
-                ref={avatarInputRef}
-                className="avatar-file-input"
-                type="file"
-                accept="image/jpeg,image/png,image/webp"
-                aria-label="选择头像图片"
-                onChange={selectAvatarFile}
-              />
-              <div>
-                <strong>{user.email}</strong>
-                <small>点击头像更换</small>
-              </div>
-            </div>
-            {avatarNotice ? <p className="avatar-notice" role="status">{avatarNotice}</p> : null}
-            <section className="profile-section" aria-labelledby="profile-account-heading">
-              <h2 id="profile-account-heading">系统状态</h2>
-              <dl className="profile-info-list">
-                <div className="profile-info-row">
-                  <dt>通知权限</dt>
-                  <dd>{notificationPermissionLabel()}</dd>
-                </div>
-              </dl>
-            </section>
-
-            <section className="profile-section" aria-labelledby="profile-experience-heading">
-              <h2 id="profile-experience-heading">通话体验</h2>
-              <div className="profile-copy-row">
-                <strong>实时字幕</strong>
-                <p>通话时自动显示你和 Ripple 正在说的内容。</p>
-              </div>
-              <button className="profile-navigation-row" type="button" onClick={() => navigateTo('memories')}>
-                <span>
-                  <strong>视觉记忆</strong>
-                  <small>查看通话中保存的画面与备注</small>
-                </span>
-                <ChevronRight aria-hidden="true" />
-              </button>
-            </section>
-
-            <section className="profile-section" aria-labelledby="profile-privacy-heading">
-              <h2 id="profile-privacy-heading">数据使用</h2>
-              <div className="profile-copy-row">
-                <strong>麦克风与相机</strong>
-                <p>麦克风音频仅用于实时对话；相机画面只在你开启视频或 Ripple 请求画面时发送到已连接服务。</p>
-              </div>
-            </section>
-
-            <button className="profile-logout" type="button" onClick={() => void signOut()}>
-              <SignOut aria-hidden="true" />
-              退出登录
-            </button>
-          </div>
-        </section>
+        <SettingsScreen
+          server={server}
+          token={accessToken}
+          email={user.email}
+          avatarUrl={user.avatar_url}
+          avatarNotice={avatarNotice}
+          captionsEnabled={captionsEnabled}
+          onBack={() => navigateTo('home')}
+          onAvatarChange={selectAvatarFile}
+          onCaptionsChange={(enabled) => {
+            setCaptionsEnabled(enabled)
+            localStorage.setItem(LIVE_CAPTIONS_KEY, String(enabled))
+          }}
+          onSignOut={() => void signOut()}
+        />
       )}
 
       {screen === 'personalization' && (
-        <section className="settings-screen profile-screen personalization-screen">
-          <header className="screen-header">
-            <button className="icon-button" type="button" aria-label="返回首页" onClick={() => navigateTo('home')}>
-              <ArrowLeft />
-            </button>
-            <h1>个性化</h1>
-            <span className="header-spacer" />
-          </header>
-          <div className="profile-groups">
-            <PersonalizationSection server={server} token={accessToken} />
-          </div>
-        </section>
+        <PersonalizationSection server={server} token={accessToken} onBack={() => navigateTo('home')} />
       )}
 
       {screen === 'meetings' && (
@@ -3088,6 +2993,7 @@ export default function App() {
           onRippleSignalsConsumed={onRippleSignalsConsumed}
           userText={userText}
           assistantText={assistantText}
+          captionsEnabled={captionsEnabled}
           toolStatus={toolStatus}
           errorMessage={visibleCallError(errorMessage, cameraErrorMessage)}
           artifacts={liveArtifacts}

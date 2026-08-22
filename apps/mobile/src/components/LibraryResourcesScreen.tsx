@@ -46,10 +46,9 @@ type EditorState = {
 
 const FILTERS: Array<{ value: ResourceView; label: string }> = [
   { value: 'all', label: '全部' },
-  { value: 'file', label: '文件' },
-  { value: 'link', label: '网页' },
+  { value: 'link', label: '链接' },
   { value: 'note', label: '笔记' },
-  { value: 'archived', label: '已归档' },
+  { value: 'file', label: '文件' },
 ]
 
 const RESOURCE_META: Record<LibraryResourceType, {
@@ -331,26 +330,31 @@ export function LibraryResourcesScreen({
     <section className="resource-library-screen">
       <header className="resource-library-header">
         <button type="button" aria-label="返回首页" onClick={onBack}><ArrowLeft /></button>
-        <div><h1>资料库</h1><p>{items.length} 项资料</p></div>
+        <div className="resource-library-path" aria-label={`资料库，共 ${items.length} 项资料`}>
+          <span>LIBRARY</span><i>/</i><strong>{String(items.length).padStart(2, '0')}</strong>
+        </div>
         <button type="button" aria-label="添加资料" onClick={() => setAddMenuOpen(true)}><Plus /></button>
       </header>
 
       <main className="resource-library-content">
-        <section className="resource-library-lead">
-          <div><FolderOpen /></div>
-          <span><h2>可信资料来源</h2><p>保存文件、网页和笔记，让 Ripple 在需要时引用。</p></span>
-        </section>
+        <div className="resource-library-title">
+          <h1>资料库</h1>
+          <span>/ {String(items.length).padStart(2, '0')}</span>
+        </div>
 
-        <label className="resource-library-search">
-          <Search aria-hidden="true" />
-          <input aria-label="搜索资料" value={query} placeholder="搜索标题或正文" onChange={(event) => setQuery(event.target.value)} />
-        </label>
+        <div className="resource-library-toolbar">
+          <label className="resource-library-search">
+            <Search aria-hidden="true" />
+            <input aria-label="搜索资料" value={query} placeholder="搜索资料" onChange={(event) => setQuery(event.target.value)} />
+          </label>
 
-        <nav className="resource-library-filters" aria-label="资料类型">
-          {FILTERS.map((filter) => (
-            <button key={filter.value} className={view === filter.value ? 'is-active' : ''} type="button" onClick={() => setView(filter.value)}>{filter.label}</button>
-          ))}
-        </nav>
+          <nav className="resource-library-filters" aria-label="资料类型">
+            {FILTERS.map((filter) => (
+              <button key={filter.value} className={view === filter.value ? 'is-active' : ''} type="button" onClick={() => setView(filter.value)}>{filter.label}</button>
+            ))}
+            <button className={`resource-library-archive-filter${view === 'archived' ? ' is-active' : ''}`} type="button" aria-label="查看已归档资料" title="已归档" onClick={() => setView('archived')}><Archive /></button>
+          </nav>
+        </div>
 
         {busy ? <div className="resource-library-state"><LoaderCircle /><span>正在读取资料</span></div> : null}
         {error ? (
@@ -359,28 +363,30 @@ export function LibraryResourcesScreen({
         {!busy && !error && visibleItems.length === 0 ? (
           <section className="resource-library-empty">
             <FolderOpen />
-            <h2>{query ? '没有找到相关资料' : view === 'archived' ? '没有已归档资料' : '资料库还是空的'}</h2>
-            <p>{query ? '换一个更短的关键词试试。' : '从一份笔记、网页或文件开始。'}</p>
-            {!query && view !== 'archived' ? <button type="button" onClick={() => setAddMenuOpen(true)}><Plus />添加第一项资料</button> : null}
+            <h2>{query ? '没有找到相关资料' : view === 'archived' ? '没有已归档资料' : '暂无资料'}</h2>
+            <p>{query ? '换一个更短的关键词试试。' : view === 'archived' ? '归档后的资料会显示在这里。' : '添加可信资料，让 Ripple 在对话中引用。'}</p>
+            {!query && view !== 'archived' ? <button type="button" onClick={() => setAddMenuOpen(true)}><Plus />添加资料</button> : null}
           </section>
         ) : null}
 
-        <div className="resource-library-list">
-          {visibleItems.map((resource) => {
-            const Icon = resourceIcon(resource.resource_type)
-            return (
-              <button key={resource.id} type="button" onClick={() => void openResource(resource)}>
-                <span className={`resource-library-type is-${resource.resource_type}`}><Icon /></span>
-                <span className="resource-library-row-copy">
-                  <strong>{resource.title}</strong>
-                  <small>{resource.content || resource.source_url || (resource.status === 'stored' ? '文件已保存，等待正文解析' : '暂无摘要')}</small>
-                  <em>{RESOURCE_META[resource.resource_type].label.replace('上传', '').replace('保存', '').replace('新建', '')}{resource.project_name ? ` · ${resource.project_name}` : ' · 个人资料'} · {formatResourceDate(resource.updated_at)}</em>
-                </span>
-                <MoreHorizontal />
-              </button>
-            )
-          })}
-        </div>
+        {visibleItems.length > 0 ? (
+          <div className="resource-library-list">
+            {visibleItems.map((resource) => {
+              const Icon = resourceIcon(resource.resource_type)
+              return (
+                <button key={resource.id} type="button" onClick={() => void openResource(resource)}>
+                  <span className={`resource-library-type is-${resource.resource_type}`}><Icon /></span>
+                  <span className="resource-library-row-copy">
+                    <strong>{resource.title}</strong>
+                    <small>{resource.content || resource.source_url || (resource.status === 'stored' ? '文件已保存，等待正文解析' : '暂无摘要')}</small>
+                    <em>{RESOURCE_META[resource.resource_type].label.replace('上传', '').replace('保存', '').replace('新建', '')}{resource.project_name ? ` · ${resource.project_name}` : ' · 个人资料'} · {formatResourceDate(resource.updated_at)}</em>
+                  </span>
+                  <MoreHorizontal />
+                </button>
+              )
+            })}
+          </div>
+        ) : null}
       </main>
 
       {addMenuOpen ? (

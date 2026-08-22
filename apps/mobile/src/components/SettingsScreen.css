@@ -1,0 +1,373 @@
+.settings-workspace {
+  --settings-bg: #030303;
+  --settings-surface: #0a090c;
+  --settings-line: rgb(244 241 237 / 20%);
+  --settings-line-soft: rgb(244 241 237 / 10%);
+  --settings-text: #f4f1ed;
+  --settings-muted: #8d8994;
+  --settings-accent: #9b4dff;
+  position: relative;
+  width: min(100%, 560px);
+  min-height: 100dvh;
+  margin: 0 auto;
+  overflow: hidden;
+  background: var(--settings-bg);
+  color: var(--settings-text);
+}
+
+.settings-workspace::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 290px;
+  background-image:
+    linear-gradient(rgb(244 241 237 / 3.5%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(244 241 237 / 3.5%) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: linear-gradient(#000, transparent);
+  pointer-events: none;
+  content: '';
+}
+
+.settings-workspace > * {
+  position: relative;
+}
+
+.settings-workspace button {
+  font: inherit;
+}
+
+.settings-workspace-header {
+  display: flex;
+  height: 64px;
+  align-items: center;
+  gap: 22px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--settings-line-soft);
+}
+
+.settings-workspace-header > button {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid var(--settings-line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--settings-muted);
+}
+
+.settings-workspace-header > button svg {
+  width: 20px;
+  height: 20px;
+}
+
+.settings-workspace-header > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--settings-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  letter-spacing: 0.13em;
+}
+
+.settings-workspace-header i {
+  color: #4c4851;
+  font-style: normal;
+}
+
+.settings-workspace-header strong {
+  color: #bcb6c2;
+  font-weight: 600;
+}
+
+.settings-workspace-main {
+  display: grid;
+  gap: 16px;
+  padding: 28px 20px max(30px, env(safe-area-inset-bottom));
+}
+
+.settings-workspace-title {
+  margin-bottom: 4px;
+}
+
+.settings-workspace-title h1 {
+  margin: 0;
+  color: var(--settings-text);
+  font-size: clamp(36px, 10vw, 46px);
+  font-weight: 760;
+  letter-spacing: -0.07em;
+  line-height: 1;
+}
+
+.settings-workspace-title span {
+  display: block;
+  margin-top: 12px;
+  color: var(--settings-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  letter-spacing: 0.13em;
+}
+
+.settings-account {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--settings-line);
+  border-radius: 4px;
+  background: var(--settings-surface);
+}
+
+.settings-avatar-button {
+  position: relative;
+  flex: 0 0 auto;
+  width: 58px;
+  height: 58px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #151219;
+  color: var(--settings-text);
+}
+
+.settings-avatar-button > .user-avatar {
+  width: 58px;
+  height: 58px;
+  overflow: hidden;
+  border: 1px solid var(--settings-line);
+  border-radius: 50%;
+}
+
+.settings-avatar-button > span {
+  position: absolute;
+  right: -2px;
+  bottom: -1px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 2px solid var(--settings-surface);
+  border-radius: 50%;
+  background: var(--settings-accent);
+  color: #fff;
+}
+
+.settings-avatar-button > span svg {
+  width: 11px;
+  height: 11px;
+}
+
+.settings-avatar-input {
+  display: none;
+}
+
+.settings-account-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.settings-account-copy small,
+.settings-row-copy small,
+.settings-signout small {
+  color: var(--settings-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.settings-account-copy > small,
+.settings-signout small {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  letter-spacing: 0.12em;
+}
+
+.settings-account-copy strong {
+  overflow: hidden;
+  color: var(--settings-text);
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-account-copy button {
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #b980ff;
+  font-size: 12px;
+  text-align: left;
+}
+
+.settings-notice {
+  margin: -8px 0 0;
+  color: #b980ff;
+  font-size: 12px;
+}
+
+.settings-group {
+  overflow: hidden;
+  border: 1px solid var(--settings-line);
+  border-radius: 4px;
+  background: var(--settings-surface);
+}
+
+.settings-group > h2 {
+  margin: 0;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--settings-line-soft);
+  color: var(--settings-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+}
+
+.settings-action-row {
+  display: grid;
+  min-height: 68px;
+  align-items: center;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.settings-row-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid var(--settings-line-soft);
+  border-radius: 3px;
+  color: #aaa4af;
+}
+
+.settings-row-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-row-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.settings-row-copy strong {
+  color: var(--settings-text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.settings-permission-button {
+  display: grid;
+  min-width: 82px;
+  gap: 2px;
+  padding: 7px 9px;
+  border: 1px solid rgb(155 77 255 / 55%);
+  border-radius: 3px;
+  background: rgb(155 77 255 / 8%);
+  color: #c79dff;
+  font-size: 11px;
+}
+
+.settings-permission-button span {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 8px;
+  letter-spacing: 0.09em;
+}
+
+.settings-permission-button:disabled {
+  border-color: var(--settings-line-soft);
+  background: transparent;
+  color: var(--settings-muted);
+}
+
+.settings-switch {
+  position: relative;
+  width: 46px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--settings-line);
+  border-radius: 3px;
+  background: #141116;
+}
+
+.settings-switch span {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 2px;
+  background: #77717d;
+  transition: transform 160ms ease, background 160ms ease;
+}
+
+.settings-switch.is-active {
+  border-color: rgb(155 77 255 / 70%);
+  background: rgb(155 77 255 / 12%);
+}
+
+.settings-switch.is-active span {
+  background: var(--settings-accent);
+  transform: translateX(20px);
+}
+
+.settings-signout {
+  display: grid;
+  min-height: 52px;
+  align-items: center;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  gap: 10px;
+  margin-top: 4px;
+  padding: 0 14px;
+  border: 1px solid rgb(255 111 139 / 28%);
+  border-radius: 4px;
+  background: rgb(255 111 139 / 6%);
+  color: #ff8fa6;
+  text-align: left;
+}
+
+.settings-signout svg {
+  width: 18px;
+  height: 18px;
+}
+
+.settings-signout span {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.settings-signout small {
+  color: #b66d7b;
+}
+
+.settings-workspace button:focus-visible {
+  outline: 2px solid rgb(181 118 255 / 74%);
+  outline-offset: 2px;
+}
+
+@media (max-width: 380px) {
+  .settings-workspace-header,
+  .settings-workspace-main {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .settings-action-row {
+    gap: 9px;
+  }
+
+  .settings-row-copy small {
+    font-size: 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-switch span {
+    transition: none;
+  }
+}

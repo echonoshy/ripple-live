@@ -1,0 +1,347 @@
+.personalization-workspace {
+  position: relative;
+  width: min(100%, 560px);
+  min-height: 100dvh;
+  margin: 0 auto;
+  overflow: hidden;
+  background: #030303;
+  color: #f4f1ed;
+}
+
+.personalization-workspace::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 260px;
+  background-image:
+    linear-gradient(rgb(244 241 237 / 3.5%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(244 241 237 / 3.5%) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: linear-gradient(#000 0%, rgb(0 0 0 / 60%) 62%, transparent 100%);
+  pointer-events: none;
+  content: '';
+}
+
+.personalization-workspace > * {
+  position: relative;
+  z-index: 1;
+}
+
+.personalization-header {
+  display: grid;
+  min-height: 64px;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 12px;
+  padding: max(10px, env(safe-area-inset-top)) 20px 8px;
+}
+
+.personalization-header > button {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgb(244 241 237 / 22%);
+  border-radius: 4px;
+  background: #09090a;
+  color: #aaa5ad;
+}
+
+.personalization-header > button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.personalization-path {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  color: #74717a;
+  font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .1em;
+}
+
+.personalization-path i {
+  color: rgb(244 241 237 / 28%);
+  font-style: normal;
+}
+
+.personalization-path strong {
+  overflow: hidden;
+  color: #aaa5ad;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.personalization-content {
+  padding: 28px 20px max(96px, calc(72px + env(safe-area-inset-bottom)));
+}
+
+.personalization-content > h1 {
+  margin: 10px 0 32px;
+  color: #f4f1ed;
+  font-size: clamp(38px, 10vw, 52px);
+  font-weight: 700;
+  letter-spacing: -.07em;
+  line-height: 1;
+}
+
+.personalization-current-v2 {
+  margin-bottom: 24px;
+}
+
+.personalization-current-v2 > h2,
+.personalization-form-v2 label > span,
+.personalization-basic summary strong {
+  display: block;
+  margin: 0 0 9px;
+  color: #d9d6db;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.personalization-current-v2 > button {
+  display: grid;
+  width: 100%;
+  min-height: 56px;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border: 1px solid rgb(244 241 237 / 22%);
+  border-radius: 4px;
+  background: #070708;
+  color: #f4f1ed;
+  text-align: left;
+}
+
+.personalization-current-v2 > button span {
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.personalization-current-v2 > button svg,
+.personalization-basic summary svg {
+  width: 18px;
+  height: 18px;
+  color: #aaa5ad;
+  transition: transform 160ms cubic-bezier(.2, .8, .2, 1);
+}
+
+.personalization-current-v2 > button[aria-expanded='true'] svg {
+  transform: rotate(90deg);
+}
+
+.personalization-current-detail {
+  padding: 12px 14px;
+  border: 1px solid rgb(244 241 237 / 14%);
+  border-top: 0;
+  background: #09090a;
+}
+
+.personalization-current-detail dl {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.personalization-current-detail dl > div {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.personalization-current-detail dt,
+.personalization-current-detail dd {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.personalization-current-detail dt {
+  color: #74717a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.personalization-current-detail dd {
+  color: #aaa5ad;
+  overflow-wrap: anywhere;
+}
+
+.personalization-current-detail p {
+  margin: 12px 0 0;
+  color: #74717a;
+  font-size: 10px;
+}
+
+.personalization-form-v2 {
+  display: grid;
+  gap: 16px;
+}
+
+.personalization-form-v2 label {
+  display: grid;
+}
+
+.personalization-form-v2 input,
+.personalization-form-v2 textarea {
+  width: 100%;
+  min-height: 48px;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  resize: vertical;
+  border: 1px solid rgb(244 241 237 / 22%);
+  border-radius: 4px;
+  outline: 0;
+  background: #070708;
+  color: #f4f1ed;
+  font: 400 16px/1.5 var(--font-ui);
+}
+
+.personalization-form-v2 textarea {
+  min-height: 72px;
+}
+
+.personalization-form-v2 input::placeholder,
+.personalization-form-v2 textarea::placeholder {
+  color: #74717a;
+}
+
+.personalization-form-v2 input:focus,
+.personalization-form-v2 textarea:focus {
+  border-color: rgb(155 77 255 / 65%);
+  box-shadow: 0 0 0 3px rgb(155 77 255 / 10%);
+}
+
+.personalization-basic {
+  border: 1px solid rgb(244 241 237 / 22%);
+  border-radius: 4px;
+  background: #070708;
+}
+
+.personalization-basic summary {
+  display: grid;
+  min-height: 58px;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.personalization-basic summary::-webkit-details-marker {
+  display: none;
+}
+
+.personalization-basic summary strong {
+  margin-bottom: 3px;
+}
+
+.personalization-basic summary small {
+  display: block;
+  color: #74717a;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.personalization-basic[open] summary {
+  border-bottom: 1px solid rgb(244 241 237 / 14%);
+}
+
+.personalization-basic[open] summary svg {
+  transform: rotate(90deg);
+}
+
+.personalization-basic > label {
+  padding: 12px;
+}
+
+.personalization-feedback-v2 {
+  margin: -4px 0 0;
+  color: #bf83ff;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.personalization-feedback-v2.is-error {
+  color: #ef6f84;
+}
+
+.personalization-actions-v2 {
+  position: fixed;
+  z-index: 20;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: grid;
+  width: min(100%, 560px);
+  min-height: 72px;
+  grid-template-columns: 1fr 1.25fr;
+  align-items: center;
+  gap: 12px;
+  margin: 0 auto;
+  padding: 10px 20px max(10px, env(safe-area-inset-bottom));
+  border-top: 1px solid rgb(244 241 237 / 14%);
+  background: rgb(3 3 3 / 96%);
+}
+
+.personalization-actions-v2 button {
+  min-height: 48px;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.personalization-restore-v2 {
+  border: 1px solid rgb(244 241 237 / 22%);
+  background: #070708;
+  color: #bf83ff;
+}
+
+.personalization-save-v2 {
+  border: 1px solid #9b4dff;
+  background: #9b4dff;
+  color: #030303;
+}
+
+.personalization-actions-v2 button:disabled {
+  cursor: wait;
+  opacity: .48;
+}
+
+.personalization-workspace .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+@media (max-width: 380px) {
+  .personalization-header,
+  .personalization-content,
+  .personalization-actions-v2 {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .personalization-current-v2 > button svg,
+  .personalization-basic summary svg {
+    transition: none;
+  }
+}

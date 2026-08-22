@@ -4,6 +4,7 @@
   --font-ui: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Segoe UI", sans-serif;
   --font-display: "SF Pro Display", "PingFang SC", "Noto Sans SC", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-brand: ui-serif, "Songti SC", "Noto Serif SC", Georgia, serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
   --weight-regular: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
@@ -16,6 +17,7 @@
   --danger: #ef6f84;
   --success: #69c69c;
   --line: rgb(244 241 237 / 14%);
+  --line-strong: rgb(244 241 237 / 26%);
   --text-secondary: #aaa5ad;
   --text-tertiary: #74717a;
   --orb-deep: #7135bf;
@@ -36,6 +38,17 @@
   --accent: #9b4dff;
   --accent-strong: #bf83ff;
   --accent-soft: rgb(155 77 255 / 12%);
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --control-height: 44px;
+  --header-height: 64px;
 }
 
 * {
@@ -5169,4 +5182,583 @@ button:disabled {
 .app-drawer-account > .user-avatar {
   background: linear-gradient(145deg, #8d3ff0, #b66eff);
   color: #fff;
+}
+
+/* Kiro-style todo command center. Keep this final so the task surface is
+   insulated from older shared library-screen cascades above. */
+.todo-screen {
+  position: relative;
+  width: min(100%, 720px);
+  padding: 0 20px max(34px, env(safe-area-inset-bottom));
+  background: #030303;
+  overflow: hidden;
+}
+
+.todo-screen::before {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 330px;
+  background-image:
+    linear-gradient(rgb(244 241 237 / 3.5%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(244 241 237 / 3.5%) 1px, transparent 1px),
+    radial-gradient(circle at 78% 12%, rgb(155 77 255 / 8%), transparent 34%);
+  background-size: 32px 32px, 32px 32px, auto;
+  mask-image: linear-gradient(#000 0%, rgb(0 0 0 / 72%) 55%, transparent 100%);
+  pointer-events: none;
+  content: '';
+}
+
+.todo-screen > * {
+  position: relative;
+  z-index: 1;
+}
+
+.todo-screen .todo-header {
+  position: relative;
+  top: auto;
+  min-height: 84px;
+  margin: 0 -20px;
+  padding: max(16px, env(safe-area-inset-top)) 20px 14px;
+  border-bottom: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.todo-screen .todo-header > .icon-button {
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgb(13 11 16 / 88%);
+  color: var(--text-secondary);
+}
+
+.todo-screen .todo-header > .icon-button:hover,
+.todo-screen .todo-header > .icon-button:focus-visible {
+  border-color: rgb(181 118 255 / 52%);
+  color: var(--accent-strong);
+}
+
+.todo-screen .todo-header > .todo-add-button {
+  border-color: rgb(181 118 255 / 58%);
+  color: var(--accent-strong);
+}
+
+.todo-command-label {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 11px;
+  padding: 0 18px;
+  color: var(--text-tertiary);
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  letter-spacing: 0.11em;
+}
+
+.todo-command-label i {
+  color: rgb(244 241 237 / 28%);
+  font-style: normal;
+}
+
+.todo-command-label strong {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.todo-screen > .todo-heading {
+  display: block;
+  margin: 28px 0 36px;
+}
+
+.todo-screen > .todo-heading h1 {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, "PingFang SC", monospace;
+  font-size: clamp(40px, 11vw, 56px);
+  font-weight: 690;
+  letter-spacing: -0.08em;
+  line-height: 1;
+}
+
+.todo-screen > .todo-heading p {
+  display: flex;
+  gap: 10px;
+  margin: 22px 0 0 2px;
+  color: var(--text-secondary);
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  letter-spacing: 0.1em;
+}
+
+.todo-screen > .todo-heading p span {
+  color: var(--text-tertiary);
+}
+
+.todo-screen .todo-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 0.82fr);
+  gap: 0;
+  min-height: 58px;
+  margin: 0 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgb(8 7 10 / 88%);
+  overflow: hidden;
+}
+
+.todo-screen .todo-toolbar .todo-view-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.todo-screen .todo-view-switch button {
+  position: relative;
+  min-width: 0;
+  min-height: 56px;
+  padding: 0 12px;
+  border-radius: 0;
+  color: var(--text-secondary);
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, "PingFang SC", monospace;
+  font-size: 12px;
+  font-weight: 540;
+}
+
+.todo-screen .todo-view-switch button.is-active {
+  background: transparent;
+  color: var(--accent-strong);
+  box-shadow: none;
+}
+
+.todo-screen .todo-view-switch button.is-active::after {
+  position: absolute;
+  right: 12px;
+  bottom: 0;
+  left: 12px;
+  height: 2px;
+  background: var(--accent);
+  content: '';
+}
+
+.todo-screen .todo-search {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  order: 0;
+}
+
+.todo-screen .todo-search > svg {
+  position: absolute;
+  z-index: 1;
+  left: 15px;
+  width: 17px;
+  height: 17px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+.todo-screen .todo-search input {
+  width: 100%;
+  min-height: 56px;
+  padding: 0 12px 0 42px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, "PingFang SC", monospace;
+  font-size: 12px;
+}
+
+.todo-screen .todo-search:focus-within {
+  border: 0;
+  box-shadow: inset 0 0 0 1px rgb(181 118 255 / 55%);
+}
+
+.todo-screen .todo-list {
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgb(8 7 10 / 78%);
+  overflow: hidden;
+}
+
+.todo-screen .todo-swipe-shell {
+  border: 0;
+  border-radius: 0;
+  background: #09080b;
+}
+
+.todo-screen .todo-swipe-shell + .todo-swipe-shell {
+  border-top: 1px solid var(--line);
+}
+
+.todo-screen .todo-swipe-shell.is-revealed {
+  background: var(--danger);
+}
+
+.todo-screen .todo-card,
+.todo-screen .todo-card.todo-card-surface {
+  display: grid;
+  grid-template-columns: 52px 44px minmax(0, 1fr);
+  gap: 0;
+  min-height: 86px;
+  padding: 0;
+  background: #09080b;
+}
+
+.todo-screen .todo-card .todo-complete {
+  display: grid;
+  width: 52px;
+  height: 100%;
+  min-height: 86px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  place-items: center;
+}
+
+.todo-screen .todo-card .todo-complete > svg {
+  width: 26px;
+  height: 26px;
+  stroke-width: 1.35;
+}
+
+.todo-screen .todo-card .todo-complete::before {
+  content: none;
+}
+
+.todo-screen .todo-card .todo-complete:hover,
+.todo-screen .todo-card .todo-complete:focus-visible {
+  color: var(--accent-strong);
+  box-shadow: inset 0 0 0 1px rgb(181 118 255 / 45%);
+}
+
+.todo-index {
+  display: grid;
+  align-self: stretch;
+  border-right: 1px solid var(--line);
+  color: var(--text-tertiary);
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  place-items: center;
+}
+
+.todo-screen .todo-copy {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 12px;
+  min-width: 0;
+  min-height: 86px;
+  align-content: center;
+  justify-items: stretch;
+  padding: 14px 46px 13px 18px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.todo-screen .todo-copy:hover,
+.todo-screen .todo-copy:focus-visible {
+  background: rgb(155 77 255 / 5%);
+  outline: 0;
+}
+
+.todo-screen .todo-copy strong {
+  display: -webkit-box;
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 620;
+  line-height: 1.35;
+  letter-spacing: -0.015em;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.todo-screen .todo-copy p {
+  display: -webkit-box;
+  grid-column: 1;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+  margin: 6px 0 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.todo-screen .todo-copy time {
+  grid-column: 2;
+  align-self: end;
+  justify-self: end;
+  margin-top: 8px;
+  color: var(--text-tertiary);
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, "PingFang SC", monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.025em;
+  white-space: nowrap;
+}
+
+.todo-screen .todo-copy time.is-overdue {
+  color: var(--danger);
+  font-weight: 570;
+}
+
+.todo-edit-glyph {
+  position: absolute;
+  top: 50%;
+  right: 16px;
+  width: 17px;
+  height: 17px;
+  color: var(--text-tertiary);
+  stroke-width: 1.45;
+  transform: translateY(-50%);
+}
+
+.todo-screen .todo-copy:hover .todo-edit-glyph,
+.todo-screen .todo-copy:focus-visible .todo-edit-glyph {
+  color: var(--accent-strong);
+}
+
+.todo-screen .todo-card.is-completed {
+  opacity: 0.58;
+}
+
+.todo-screen .history-empty,
+.todo-screen .history-error,
+.todo-screen .history-skeleton {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #09080b;
+}
+
+.todo-editor {
+  border-radius: 14px;
+  background: #0d0b10;
+  box-shadow: 0 26px 80px rgb(0 0 0 / 62%);
+}
+
+.todo-editor h2,
+.todo-editor label,
+.todo-editor-actions button {
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, "PingFang SC", monospace;
+}
+
+@media (max-width: 460px) {
+  .todo-screen {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .todo-screen .todo-header {
+    margin-right: -18px;
+    margin-left: -18px;
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .todo-screen > .todo-heading {
+    margin-top: 24px;
+    margin-bottom: 32px;
+  }
+
+  .todo-screen .todo-toolbar {
+    grid-template-columns: minmax(0, 1.1fr) minmax(126px, 0.9fr);
+  }
+
+  .todo-screen .todo-search input {
+    font-size: 16px;
+    letter-spacing: -0.025em;
+  }
+
+  .todo-screen .todo-card,
+  .todo-screen .todo-card.todo-card-surface {
+    grid-template-columns: 48px 38px minmax(0, 1fr);
+  }
+
+  .todo-screen .todo-card .todo-complete {
+    width: 48px;
+  }
+
+  .todo-screen .todo-copy {
+    padding-right: 40px;
+    padding-left: 14px;
+  }
+
+  .todo-command-label {
+    padding: 0 14px;
+  }
+}
+
+/* Reference-aligned todo rows: title + due time only, with explicit actions. */
+.todo-screen .todo-header > .icon-button {
+  border-radius: 4px;
+}
+
+.todo-screen .todo-toolbar {
+  grid-template-columns: 42% 58%;
+  border-radius: 4px;
+}
+
+.todo-screen .todo-search {
+  margin: 7px 10px;
+  border: 1px solid rgb(244 241 237 / 4%);
+  background: #0d0b10;
+}
+
+.todo-screen .todo-search input {
+  min-height: 40px;
+}
+
+.todo-screen .todo-card,
+.todo-screen .todo-card.todo-card-surface {
+  grid-template-columns: 52px 48px minmax(0, 1fr) auto;
+  min-height: 82px;
+}
+
+.todo-screen .todo-card .todo-complete {
+  min-height: 82px;
+}
+
+.todo-screen .todo-list {
+  border-radius: 4px;
+}
+
+.todo-screen .todo-copy {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 82px;
+  align-content: center;
+  gap: 7px;
+  padding: 13px 14px 12px 18px;
+}
+
+.todo-screen .todo-copy strong,
+.todo-screen .todo-copy time {
+  grid-column: 1;
+}
+
+.todo-screen .todo-copy strong {
+  -webkit-line-clamp: 1;
+}
+
+.todo-screen .todo-copy time {
+  align-self: auto;
+  justify-self: start;
+  margin: 0;
+}
+
+.todo-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px 0 4px;
+}
+
+.todo-row-action {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  padding: 0;
+  border: 1px solid rgb(244 241 237 / 20%);
+  border-radius: 5px;
+  background: #0a090c;
+  color: var(--text-secondary);
+  place-items: center;
+}
+
+.todo-row-action > svg {
+  width: 19px;
+  height: 19px;
+  stroke-width: 1.55;
+}
+
+.todo-row-action:hover,
+.todo-row-action:focus-visible {
+  border-color: rgb(181 118 255 / 55%);
+  color: var(--accent-strong);
+  outline: 0;
+}
+
+.todo-row-action.is-danger {
+  color: var(--danger);
+}
+
+.todo-row-action.is-danger:hover,
+.todo-row-action.is-danger:focus-visible {
+  border-color: rgb(239 111 132 / 55%);
+  background: rgb(239 111 132 / 7%);
+  color: #ff8296;
+}
+
+.todo-screen .todo-swipe-shell.is-revealed .todo-card-surface,
+.todo-screen .todo-swipe-shell.is-dragging .todo-card-surface {
+  transform: none;
+}
+
+.todo-screen .todo-card.todo-card-surface:hover,
+.todo-screen .todo-card.todo-card-surface:active {
+  background: #09080b;
+}
+
+.todo-screen .todo-copy:hover,
+.todo-screen .todo-copy:focus-visible {
+  background: transparent;
+}
+
+@media (max-width: 460px) {
+  .todo-screen .todo-card,
+  .todo-screen .todo-card.todo-card-surface {
+    grid-template-columns: 48px 42px minmax(0, 1fr) auto;
+    min-height: 92px;
+  }
+
+  .todo-screen .todo-card .todo-complete,
+  .todo-screen .todo-copy {
+    min-height: 92px;
+  }
+
+  .todo-screen .todo-copy {
+    padding-right: 10px;
+    padding-left: 14px;
+  }
+
+  .todo-screen .todo-copy strong {
+    font-size: 14px;
+    -webkit-line-clamp: 2;
+  }
+
+  .todo-row-actions {
+    gap: 6px;
+    padding-right: 10px;
+  }
+
+  .todo-row-action {
+    width: 38px;
+    height: 38px;
+    flex-basis: 38px;
+  }
 }
