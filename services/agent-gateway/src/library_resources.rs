@@ -84,7 +84,7 @@ impl LibraryResourceService {
                     LEFT(r.extracted_text, 400) AS content, r.metadata, r.status,
                     r.created_at, r.updated_at, r.archived_at
              FROM library_resources r
-             LEFT JOIN projects p ON p.id = r.project_id AND p.user_id = r.user_id
+             LEFT JOIN projects p ON p.id = r.project_id AND p.owner_user_id = r.user_id
              WHERE r.user_id = $1
                AND (($2 = TRUE AND r.archived_at IS NOT NULL)
                     OR ($2 = FALSE AND r.archived_at IS NULL))
@@ -115,7 +115,7 @@ impl LibraryResourceService {
                     r.extracted_text AS content, r.metadata, r.status,
                     r.created_at, r.updated_at, r.archived_at
              FROM library_resources r
-             LEFT JOIN projects p ON p.id = r.project_id AND p.user_id = r.user_id
+             LEFT JOIN projects p ON p.id = r.project_id AND p.owner_user_id = r.user_id
              WHERE r.id = $1 AND r.user_id = $2",
         )
         .bind(resource_id)
@@ -376,7 +376,7 @@ impl LibraryResourceService {
 
     async fn ensure_project(&self, user_id: &str, project_id: &str) -> anyhow::Result<()> {
         let exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = $1 AND user_id = $2 AND archived_at IS NULL)",
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = $1 AND owner_user_id = $2 AND archived_at IS NULL)",
         )
         .bind(project_id)
         .bind(user_id)
