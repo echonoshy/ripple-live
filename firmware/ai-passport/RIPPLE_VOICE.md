@@ -5,6 +5,7 @@
 该固件把 FoloToy AI Passport 收敛成一个无登录、无历史列表的语音入口：
 
 - 主界面只显示连接与会话状态。
+- 主界面显示 Ripple 固定精灵，并随连接、聆听、思考和异常状态切换原有动画。
 - 按住 `OK` 录音，松开后立即提交。
 - 回复以 24 kHz 单声道 PCM 流式播放。
 - 回复播放时再次按住 `OK` 可打断并开始新一轮讲话。
@@ -46,6 +47,20 @@ Wi-Fi 和 Gateway 地址保存在 NVS。要更换网络，长按 `UP` 清除配�
 UI 更新通过队列交给 LVGL 定时器处理，按键回调只投递事件；录制与播放分别在
 工作任务中执行，不在 UI 或按键任务中做阻塞 I/O。
 
+精灵直接复用移动端 `starry-avatar-*.gif` 的原始帧、顺序和逐帧时长，不重绘、
+不裁切，也不改变角色外观。构建资源按原比例从 384×416 缩放为 144×156，转换为
+LVGL I8 索引色以适配无 PSRAM 的 ESP32-C3。状态映射如下：
+
+- `BOOTING`、`CONNECTING`、`LISTENING`：waiting
+- `THINKING`：running
+- `READY`、`SPEAKING`：idle
+- `SETUP`：waving（播放一次）
+- `ERROR`：failed（播放一次）
+
+如移动端的固定资源有意更新，先安装 Pillow、pypng、lz4 和 pngquant，再运行
+`python tools/generate_pet_assets.py`。脚本会校验画布、帧数和逐帧时长，避免静默
+改变精灵动画。
+
 ## 构建与烧录
 
 使用 ESP-IDF 5.5.3：
@@ -54,12 +69,12 @@ UI 更新通过队列交给 LVGL 定时器处理，按键回调只投递事件�
 source /Users/lake/esp/esp-idf-v5.5.3/export.sh
 idf.py set-target esp32c3
 idf.py build
-idf.py -p /dev/cu.usbmodem21201 erase-flash
 idf.py -p /dev/cu.usbmodem21201 flash monitor
 ```
 
 分区针对实机 8 MB Flash：NVS 24 KB、PHY 4 KB、Factory App 7 MB。当前镜像约
-1.46 MB。ESP32-C3 没有 PSRAM，因此录音以 40 ms 小块上传，播放队列限制为
+2.17 MB，应用分区仍有约 70% 空间。普通 `flash` 不会擦除保存 Wi-Fi 的 NVS；
+只有需要恢复出厂配网时才执行 `erase-flash`。ESP32-C3 没有 PSRAM，因此录音以 40 ms 小块上传，播放队列限制为
 4 块，并在打断时立即释放。播放会先积累两块后启动，对应约 200 ms 的首播与
 断粮重缓冲窗口，在响应速度和网络抖动容忍度之间取平衡。
 
@@ -67,6 +82,7 @@ idf.py -p /dev/cu.usbmodem21201 flash monitor
 
 - 串口启动无崩溃、看门狗或重启循环。
 - ST7789 屏幕方向、边缘、颜色和背光正常。
+- 精灵完整显示且无裁切，waiting/running/idle 状态切换自然、帧序正确。
 - 配网热点与 `192.168.4.1` 页面可访问，保存后能加入目标 Wi-Fi。
 - 屏幕进入 `READY`，串口出现 `websocket connected` 与 `session ready`。
 - 按住 `OK` 时进入 `LISTENING`，松开进入 `THINKING`。
