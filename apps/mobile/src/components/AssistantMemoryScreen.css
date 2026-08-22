@@ -1,0 +1,64 @@
+.assistant-memory-screen { width: min(100%, 680px); min-height: 100dvh; margin: 0 auto; background: #030303; color: #f4f1ed; }
+.assistant-memory-header { position: sticky; z-index: 10; top: 0; display: grid; min-height: 84px; grid-template-columns: 42px 1fr 42px; align-items: center; gap: 12px; padding: max(14px, env(safe-area-inset-top)) 18px 12px; border-bottom: 1px solid #242127; background: rgb(3 3 3 / 92%); backdrop-filter: blur(20px); }
+.assistant-memory-header > button { display: grid; width: 40px; height: 40px; place-items: center; padding: 0; border: 1px solid #302c34; border-radius: 12px; background: #0a090b; color: #f4f1ed; }
+.assistant-memory-header > button:last-child { border-color: rgb(155 77 255 / 45%); background: rgb(155 77 255 / 12%); color: #ae6cff; }
+.assistant-memory-header svg { width: 18px; height: 18px; }
+.assistant-memory-header > div { min-width: 0; text-align: center; }
+.assistant-memory-header small, .assistant-memory-editor header small { color: #9b4dff; font: 700 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; }
+.assistant-memory-header h1 { margin: 3px 0 0; font-size: 17px; font-weight: 750; }
+.assistant-memory-content { display: grid; gap: 18px; padding: 22px 18px max(36px, env(safe-area-inset-bottom)); }
+.assistant-memory-intro { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 17px; border: 1px solid rgb(155 77 255 / 32%); border-radius: 16px; background: linear-gradient(135deg, rgb(155 77 255 / 13%), rgb(155 77 255 / 3%)); }
+.assistant-memory-intro > span { display: grid; width: 46px; height: 46px; place-items: center; border: 1px solid rgb(155 77 255 / 35%); border-radius: 14px; background: rgb(155 77 255 / 13%); color: #ae6cff; }
+.assistant-memory-intro svg { width: 21px; height: 21px; }
+.assistant-memory-intro h2 { margin: 0 0 5px; font-size: 16px; }
+.assistant-memory-intro p { margin: 0; color: #918d95; font-size: 11px; line-height: 1.5; }
+.assistant-memory-intro > strong { color: #ae6cff; font: 700 20px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.assistant-memory-search { display: grid; grid-template-columns: 18px 1fr; align-items: center; gap: 9px; min-height: 46px; padding: 0 13px; border: 1px solid #302c34; border-radius: 13px; background: #09090a; color: #6f6a72; }
+.assistant-memory-search svg { width: 17px; height: 17px; }
+.assistant-memory-search input { min-width: 0; padding: 0; border: 0; outline: 0; background: transparent; color: #f4f1ed; font: inherit; font-size: 13px; }
+.assistant-memory-search input::placeholder { color: #6f6a72; }
+.assistant-memory-loading, .assistant-memory-error { display: flex; min-height: 120px; align-items: center; justify-content: center; gap: 10px; color: #918d95; font-size: 12px; }
+.assistant-memory-loading svg { width: 18px; height: 18px; animation: assistant-memory-spin 1s linear infinite; }
+.assistant-memory-error { flex-direction: column; color: #ff8989; }
+.assistant-memory-error button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 11px; border: 1px solid #4a454e; border-radius: 9px; background: #0a090b; color: #f4f1ed; }
+.assistant-memory-error button svg { width: 14px; height: 14px; }
+.assistant-memory-empty { display: grid; min-height: 340px; place-items: center; align-content: center; padding: 28px; border: 1px solid #242127; border-radius: 17px; background: linear-gradient(rgb(155 77 255 / 4%) 1px, transparent 1px), linear-gradient(90deg, rgb(155 77 255 / 4%) 1px, transparent 1px), #070708; background-size: 28px 28px; text-align: center; }
+.assistant-memory-empty > svg { width: 36px; height: 36px; margin-bottom: 16px; color: #9b4dff; }
+.assistant-memory-empty h2 { margin: 0 0 8px; font-size: 20px; }
+.assistant-memory-empty p { max-width: 310px; margin: 0; color: #918d95; font-size: 12px; line-height: 1.65; }
+.assistant-memory-empty button { display: inline-flex; align-items: center; gap: 7px; margin-top: 18px; padding: 10px 14px; border: 1px solid #9b4dff; border-radius: 10px; background: #9b4dff; color: #070608; font-size: 12px; font-weight: 750; }
+.assistant-memory-empty button svg { width: 15px; height: 15px; }
+.assistant-memory-groups { display: grid; gap: 20px; }
+.assistant-memory-group { content-visibility: auto; contain-intrinsic-size: 180px; }
+.assistant-memory-group > header { display: grid; grid-template-columns: 32px 1fr auto; align-items: center; gap: 10px; margin-bottom: 9px; padding: 0 4px; }
+.assistant-memory-group > header > svg { width: 17px; height: 17px; color: #9b4dff; }
+.assistant-memory-group > header h2 { margin: 0; font-size: 13px; }
+.assistant-memory-group > header p { margin: 2px 0 0; color: #6f6a72; font-size: 10px; }
+.assistant-memory-group > header > span { color: #6f6a72; font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.assistant-memory-list { display: grid; overflow: hidden; border: 1px solid #242127; border-radius: 14px; background: #242127; gap: 1px; }
+.assistant-memory-list > button { display: grid; gap: 6px; padding: 15px 16px; border: 0; background: #09090a; color: #f4f1ed; text-align: left; }
+.assistant-memory-list > button:active { background: #111013; }
+.assistant-memory-list > button > span { font-size: 13px; line-height: 1.55; }
+.assistant-memory-list > button > small { color: #6f6a72; font: 600 9px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.assistant-memory-editor-layer { position: fixed; z-index: 80; inset: 0; display: grid; align-items: end; justify-items: center; }
+.assistant-memory-editor-backdrop { position: absolute; inset: 0; width: 100%; border: 0; background: rgb(0 0 0 / 74%); backdrop-filter: blur(7px); }
+.assistant-memory-editor { position: relative; width: min(100%, 680px); padding: 20px 18px max(22px, env(safe-area-inset-bottom)); border: 1px solid #302c34; border-bottom: 0; border-radius: 20px 20px 0 0; background: #080809; box-shadow: 0 -22px 70px rgb(0 0 0 / 55%); }
+.assistant-memory-editor > header { display: grid; grid-template-columns: 1fr 40px; align-items: center; margin-bottom: 20px; }
+.assistant-memory-editor h2 { margin: 4px 0 0; font-size: 19px; }
+.assistant-memory-editor > header > button { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid #302c34; border-radius: 11px; background: #0d0c0e; color: #aaa5ae; }
+.assistant-memory-editor > header svg { width: 17px; height: 17px; }
+.assistant-memory-editor > label { display: grid; gap: 8px; margin-top: 15px; color: #c5c1c8; font-size: 12px; }
+.assistant-memory-editor select, .assistant-memory-editor textarea { width: 100%; box-sizing: border-box; border: 1px solid #302c34; border-radius: 12px; outline: 0; background: #0d0c0e; color: #f4f1ed; font: inherit; }
+.assistant-memory-editor select { min-height: 44px; padding: 0 12px; }
+.assistant-memory-editor textarea { resize: none; padding: 12px; font-size: 14px; line-height: 1.6; }
+.assistant-memory-editor textarea:focus, .assistant-memory-editor select:focus { border-color: #9b4dff; box-shadow: 0 0 0 3px rgb(155 77 255 / 12%); }
+.assistant-memory-editor > label > small { justify-self: end; color: #6f6a72; font-size: 10px; }
+.assistant-memory-editor-error { margin: 12px 0 0; color: #ff8989; font-size: 11px; }
+.assistant-memory-editor > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; }
+.assistant-memory-editor > footer button { min-height: 42px; padding: 0 16px; border-radius: 11px; font-size: 12px; font-weight: 750; }
+.assistant-memory-editor .is-primary { border: 1px solid #9b4dff; background: #9b4dff; color: #070608; }
+.assistant-memory-editor .is-quiet { border: 1px solid #302c34; background: transparent; color: #918d95; }
+.assistant-memory-editor .is-delete { border: 1px solid rgb(255 92 92 / 48%); background: rgb(255 92 92 / 10%); color: #ff8989; }
+@keyframes assistant-memory-spin { to { transform: rotate(360deg); } }
+@media (min-width: 700px) { .assistant-memory-editor { bottom: 24px; border-bottom: 1px solid #302c34; border-radius: 20px; } }
+@media (prefers-reduced-motion: reduce) { .assistant-memory-loading svg { animation: none; } }

@@ -1140,6 +1140,56 @@ impl ContextStore {
             })
             .collect())
     }
+
+    pub async fn relevant_memory_facts(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        query: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "WITH current_scope AS (
+                SELECT project_id FROM conversations
+                WHERE id = $1 AND user_id = $2
+             )
+             SELECT f.summary, f.scope_type,
+                    similarity(f.summary, $3) AS score
+             FROM memory_facts f
+             CROSS JOIN current_scope s
+             WHERE f.user_id = $2 AND f.activation_status = 'active'
+               AND (
+                    (s.project_id IS NULL AND f.scope_type = 'personal')
+                    OR (s.project_id IS NOT NULL AND
+                        (f.scope_type = 'personal' OR f.project_id = s.project_id))
+               )
+             ORDER BY f.explicit DESC, f.salience DESC, score DESC, f.updated_at DESC
+             LIMIT $4",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(query)
+        .bind(limit.clamp(1, 20))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let summary: String = row.get("summary");
+                let scope: String = row.get("scope_type");
+                let label = if scope == "project" {
+                    "项目记忆"
+                } else {
+                    "个人记忆"
+                };
+                format!("[{label}] {summary}")
+            })
+            .collect())
+    }
 }
 
 fn validate_library_ids(ids: &[String]) -> anyhow::Result<()> {

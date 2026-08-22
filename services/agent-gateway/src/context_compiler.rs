@@ -34,10 +34,22 @@ impl ContextCompiler {
         current_query: &str,
     ) -> anyhow::Result<CompiledContext> {
         let profile = self.store.user_profile(user_id).await?;
-        let memories = self
+        let mut memories = self
             .store
-            .relevant_explicit_memories(user_id, session_id, current_query, 5)
+            .relevant_memory_facts(user_id, session_id, current_query, 5)
             .await?;
+        if memories.len() < 5 {
+            let legacy_memories = self
+                .store
+                .relevant_explicit_memories(
+                    user_id,
+                    session_id,
+                    current_query,
+                    5 - memories.len() as i64,
+                )
+                .await?;
+            memories.extend(legacy_memories);
+        }
         let project = self
             .store
             .project_for_conversation(user_id, session_id)

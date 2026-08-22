@@ -91,6 +91,30 @@ export type VisualMemory = {
   archived_at: number | null
 }
 
+export type MemoryFactKind =
+  | 'identity'
+  | 'preference'
+  | 'relationship'
+  | 'habit'
+  | 'context'
+  | 'other'
+
+export type MemoryFact = {
+  id: string
+  kind: MemoryFactKind
+  summary: string
+  scope_type: 'personal' | 'project'
+  project_id: string | null
+  source: 'manual' | 'conversation'
+  created_at: number
+  updated_at: number
+}
+
+export type MemoryFactPatch = {
+  kind?: MemoryFactKind
+  summary?: string
+}
+
 export type TodoItem = {
   id: string
   memory_id: string | null
@@ -798,6 +822,64 @@ export function deleteMemory(
   return request<void>(
     server,
     `/v1/memories/${encodeURIComponent(memoryId)}`,
+    { method: 'DELETE' },
+    token,
+  )
+}
+
+export async function memoryFacts(
+  server: string,
+  token: string,
+  query = '',
+) {
+  const params = new URLSearchParams({ query, limit: '100' })
+  const payload = await request<{ data: MemoryFact[] }>(
+    server,
+    `/v1/memory-facts?${params}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function createMemoryFact(
+  server: string,
+  token: string,
+  kind: MemoryFactKind,
+  summary: string,
+) {
+  const payload = await request<{ data: MemoryFact }>(
+    server,
+    '/v1/memory-facts',
+    { method: 'POST', body: JSON.stringify({ kind, summary }) },
+    token,
+  )
+  return payload.data
+}
+
+export async function updateMemoryFact(
+  server: string,
+  token: string,
+  factId: string,
+  patch: MemoryFactPatch,
+) {
+  const payload = await request<{ data: MemoryFact }>(
+    server,
+    `/v1/memory-facts/${encodeURIComponent(factId)}`,
+    { method: 'PATCH', body: JSON.stringify(patch) },
+    token,
+  )
+  return payload.data
+}
+
+export function deleteMemoryFact(
+  server: string,
+  token: string,
+  factId: string,
+) {
+  return request<void>(
+    server,
+    `/v1/memory-facts/${encodeURIComponent(factId)}`,
     { method: 'DELETE' },
     token,
   )

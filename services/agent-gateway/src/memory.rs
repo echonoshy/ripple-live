@@ -61,6 +61,18 @@ pub struct MemorySearchResult {
     pub assets: Vec<MemoryArtifact>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct MemoryFactRecord {
+    pub id: String,
+    pub kind: String,
+    pub summary: String,
+    pub scope_type: String,
+    pub project_id: Option<String>,
+    pub source: String,
+    pub created_at: f64,
+    pub updated_at: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct CreateTodoRequest {
     pub user_id: String,
@@ -109,6 +121,209 @@ impl MemoryService {
             context,
             assets: AssetStore::new(assets_dir).await?,
         })
+    }
+
+    pub async fn list_facts(
+        &self,
+        user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryFactRecord>> {
+        let query = query.trim();
+        let rows = sqlx::query(
+            "SELECT f.id, f.kind, f.summary, f.scope_type, f.project_id,
+                    f.created_at, f.updated_at,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM memory_evidence e
+                        WHERE e.fact_id = f.id AND e.turn_id IS NOT NULL
+                    ) THEN 'conversation' ELSE 'manual' END AS source
+             FROM memory_facts f
+             WHERE f.user_id = $1 AND f.activation_status = 'active'
+               AND ($2 = '' OR f.summary ILIKE '%' || $2 || '%')
+             ORDER BY f.salience DESC, f.updated_at DESC
+             LIMIT $3",
+        )
+        .bind(user_id)
+        .bind(query)
+        .bind(limit.clamp(1, 100) as i64)
+        .fetch_all(self.context.pool())
+        .await?;
+        Ok(rows.into_iter().map(memory_fact_from_row).collect())
+    }
+
+    pub async fn create_manual_fact(
+        &self,
+        user_id: &str,
+        kind: &str,
+        summary: &str,
+    ) -> anyhow::Result<MemoryFactRecord> {
+        self.upsert_explicit_fact(user_id, None, kind, summary, None, None)
+            .await
+    }
+
+    pub async fn remember_fact_from_memory(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        source_turn_id: i64,
+        memory_item_id: &str,
+        kind: &str,
+        summary: &str,
+    ) -> anyhow::Result<MemoryFactRecord> {
+        let project_id = self
+            .context
+            .conversation_project_id(user_id, conversation_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("对话不存在"))?;
+        self.upsert_explicit_fact(
+            user_id,
+            project_id.as_deref(),
+            kind,
+            summary,
+            Some(source_turn_id),
+            Some(memory_item_id),
+        )
+        .await
+    }
+
+    pub async fn update_fact(
+        &self,
+        user_id: &str,
+        fact_id: &str,
+        kind: Option<&str>,
+        summary: Option<&str>,
+    ) -> anyhow::Result<Option<MemoryFactRecord>> {
+        let Some(current) = self.get_fact(user_id, fact_id).await? else {
+            return Ok(None);
+        };
+        let next_kind = kind.unwrap_or(&current.kind);
+        let next_summary = summary.unwrap_or(&current.summary);
+        validate_fact(next_kind, next_summary)?;
+        sqlx::query(
+            "UPDATE memory_facts
+             SET kind = $1, summary = $2, canonical_key = $3, updated_at = $4
+             WHERE id = $5 AND user_id = $6 AND activation_status = 'active'",
+        )
+        .bind(next_kind)
+        .bind(next_summary.trim())
+        .bind(canonical_fact_key(next_summary))
+        .bind(unix_time())
+        .bind(fact_id)
+        .bind(user_id)
+        .execute(self.context.pool())
+        .await?;
+        self.get_fact(user_id, fact_id).await
+    }
+
+    pub async fn delete_fact(&self, user_id: &str, fact_id: &str) -> anyhow::Result<bool> {
+        Ok(
+            sqlx::query("DELETE FROM memory_facts WHERE id = $1 AND user_id = $2")
+                .bind(fact_id)
+                .bind(user_id)
+                .execute(self.context.pool())
+                .await?
+                .rows_affected()
+                > 0,
+        )
+    }
+
+    async fn upsert_explicit_fact(
+        &self,
+        user_id: &str,
+        project_id: Option<&str>,
+        kind: &str,
+        summary: &str,
+        source_turn_id: Option<i64>,
+        memory_item_id: Option<&str>,
+    ) -> anyhow::Result<MemoryFactRecord> {
+        validate_fact(kind, summary)?;
+        let summary = summary.trim();
+        let canonical_key = canonical_fact_key(summary);
+        let scope_type = if project_id.is_some() {
+            "project"
+        } else {
+            "personal"
+        };
+        let now = unix_time();
+        let mut transaction = self.context.pool().begin().await?;
+        let existing = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM memory_facts
+             WHERE user_id = $1 AND scope_type = $2
+               AND project_id IS NOT DISTINCT FROM $3
+               AND canonical_key = $4 AND activation_status = 'active'
+             ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(scope_type)
+        .bind(project_id)
+        .bind(&canonical_key)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let fact_id = existing.unwrap_or_else(|| format!("fact_{}", Uuid::new_v4().simple()));
+        sqlx::query(
+            "INSERT INTO memory_facts(
+                id, user_id, scope_type, project_id, kind, canonical_key,
+                summary, salience, confidence, explicit, activation_status,
+                created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1.0, 1.0, 1, 'active', $8, $8)
+             ON CONFLICT(id) DO UPDATE SET
+                kind = EXCLUDED.kind, summary = EXCLUDED.summary,
+                salience = 1.0, confidence = 1.0, explicit = 1,
+                activation_status = 'active', updated_at = EXCLUDED.updated_at",
+        )
+        .bind(&fact_id)
+        .bind(user_id)
+        .bind(scope_type)
+        .bind(project_id)
+        .bind(kind)
+        .bind(&canonical_key)
+        .bind(summary)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        if source_turn_id.is_some() || memory_item_id.is_some() {
+            sqlx::query(
+                "INSERT INTO memory_evidence(fact_id, turn_id, memory_item_id)
+                 SELECT $1, $2, $3
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM memory_evidence
+                    WHERE fact_id = $1
+                      AND turn_id IS NOT DISTINCT FROM $2
+                      AND memory_item_id IS NOT DISTINCT FROM $3
+                 )",
+            )
+            .bind(&fact_id)
+            .bind(source_turn_id)
+            .bind(memory_item_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        self.get_fact(user_id, &fact_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("创建后的记忆不存在"))
+    }
+
+    async fn get_fact(
+        &self,
+        user_id: &str,
+        fact_id: &str,
+    ) -> anyhow::Result<Option<MemoryFactRecord>> {
+        let row = sqlx::query(
+            "SELECT f.id, f.kind, f.summary, f.scope_type, f.project_id,
+                    f.created_at, f.updated_at,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM memory_evidence e
+                        WHERE e.fact_id = f.id AND e.turn_id IS NOT NULL
+                    ) THEN 'conversation' ELSE 'manual' END AS source
+             FROM memory_facts f
+             WHERE f.id = $1 AND f.user_id = $2 AND f.activation_status = 'active'",
+        )
+        .bind(fact_id)
+        .bind(user_id)
+        .fetch_optional(self.context.pool())
+        .await?;
+        Ok(row.map(memory_fact_from_row))
     }
 
     pub async fn set_avatar(&self, user_id: &str, bytes: &[u8]) -> anyhow::Result<String> {
@@ -1019,6 +1234,41 @@ fn todo_artifact(id: String, todo_id: &str, caption: &str) -> MemoryArtifact {
     }
 }
 
+fn memory_fact_from_row(row: sqlx::postgres::PgRow) -> MemoryFactRecord {
+    MemoryFactRecord {
+        id: row.get("id"),
+        kind: row.get("kind"),
+        summary: row.get("summary"),
+        scope_type: row.get("scope_type"),
+        project_id: row.get("project_id"),
+        source: row.get("source"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn validate_fact(kind: &str, summary: &str) -> anyhow::Result<()> {
+    if !matches!(
+        kind,
+        "identity" | "preference" | "relationship" | "habit" | "context" | "other"
+    ) {
+        anyhow::bail!("不支持的记忆类别");
+    }
+    let length = summary.trim().chars().count();
+    if length == 0 || length > 500 {
+        anyhow::bail!("记忆内容不能为空且不能超过 500 个字符");
+    }
+    Ok(())
+}
+
+fn canonical_fact_key(summary: &str) -> String {
+    summary
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 fn relevance(query: &str, candidate: &str) -> f64 {
     let normalized_query = query.trim().to_lowercase();
     if normalized_query.is_empty() {
@@ -1507,5 +1757,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(project_results.len(), 2);
+    }
+
+    #[test]
+    fn fact_validation_keeps_categories_and_content_bounded() {
+        assert!(validate_fact("preference", "用户喜欢先听结论").is_ok());
+        assert!(validate_fact("unknown", "用户喜欢先听结论").is_err());
+        assert!(validate_fact("other", "   ").is_err());
+        assert!(validate_fact("other", &"记".repeat(501)).is_err());
+    }
+
+    #[test]
+    fn canonical_fact_keys_ignore_outer_and_repeated_whitespace() {
+        assert_eq!(
+            canonical_fact_key("  Likes   Oolong Tea "),
+            "likes oolong tea"
+        );
     }
 }

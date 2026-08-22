@@ -66,6 +66,7 @@ import {
 } from './api'
 import { LibraryActions } from './components/LibraryActions'
 import { AvatarEditor } from './components/AvatarEditor'
+import { AssistantMemoryScreen } from './components/AssistantMemoryScreen'
 import { AppDrawer, type AppDestination } from './components/AppDrawer'
 import { ConversationHome } from './components/ConversationHome'
 import {
@@ -137,6 +138,7 @@ type Screen =
   | 'materials'
   | 'conversation'
   | 'memories'
+  | 'assistant-memory'
   | 'todos'
   | 'personalization'
 
@@ -155,6 +157,7 @@ function destinationForScreen(screen: Screen): AppDestination {
     case 'materials':
       return 'materials'
     case 'memories':
+    case 'assistant-memory':
       return 'memories'
     case 'todos':
       return 'todos'
@@ -1387,7 +1390,7 @@ export default function App() {
         break
       case 'memories':
         actionMemoryTargetRef.current = null
-        navigateTo('memories')
+        navigateTo('assistant-memory')
         break
       case 'todos':
         actionTodoTargetRef.current = null
@@ -2374,6 +2377,14 @@ export default function App() {
             </div>
           </section>
         </div>
+      )}
+
+      {screen === 'assistant-memory' && (
+        <AssistantMemoryScreen
+          server={server}
+          token={accessToken}
+          onBack={() => navigateTo('home')}
+        />
       )}
 
       {screen === 'memories' && (

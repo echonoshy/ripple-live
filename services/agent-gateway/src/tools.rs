@@ -54,6 +54,11 @@ fn builtin_schemas() -> Vec<Value> {
                     "type": "object",
                     "properties": {
                         "content": {"type": "string", "description": "用户希望记住的核心信息"},
+                        "kind": {
+                            "type": "string",
+                            "enum": ["identity", "preference", "relationship", "habit", "context", "other"],
+                            "description": "记忆类别；无法确定时使用 other"
+                        },
                         "visual_summary": {"type": "string", "description": "根据当前画面生成的客观、可检索描述；没有画面时留空"}
                     },
                     "required": ["content"],
@@ -336,6 +341,10 @@ impl ToolExecutor {
                     .get("visual_summary")
                     .and_then(Value::as_str)
                     .unwrap_or("");
+                let kind = payload
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("other");
                 let memory = self
                     .memories
                     .create(CreateMemoryRequest {
@@ -349,10 +358,22 @@ impl ToolExecutor {
                         frames: execution.frames.clone(),
                     })
                     .await?;
+                let fact = self
+                    .memories
+                    .remember_fact_from_memory(
+                        &execution.user_id,
+                        &execution.conversation_id,
+                        execution.user_turn_id,
+                        &memory.memory.id,
+                        kind,
+                        content,
+                    )
+                    .await?;
                 let artifacts = memory.memory.cover.clone().into_iter().collect::<Vec<_>>();
                 Ok(ToolOutcome {
                     value: json!({
                         "ok": true,
+                        "fact": fact,
                         "memory": memory.memory,
                         "saved_frame_count": memory.assets.len()
                     }),

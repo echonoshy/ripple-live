@@ -831,6 +831,14 @@ fn app(state: AppState) -> Router {
             "/v1/meetings/{meeting_id}/actions/{action_id}/todo",
             post(promote_meeting_action),
         )
+        .route(
+            "/v1/memory-facts",
+            get(list_memory_facts).post(create_memory_fact),
+        )
+        .route(
+            "/v1/memory-facts/{fact_id}",
+            axum::routing::patch(update_memory_fact).delete(delete_memory_fact),
+        )
         .route("/v1/memories", get(list_memories))
         .route("/v1/memories/batch", post(batch_memories))
         .route(
@@ -952,6 +960,25 @@ struct MemoryPatch {
     user_note: Option<String>,
     is_pinned: Option<bool>,
     archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryFactQuery {
+    #[serde(default)]
+    query: String,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryFactCreate {
+    kind: String,
+    summary: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryFactPatch {
+    kind: Option<String>,
+    summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1581,6 +1608,93 @@ fn spawn_meeting_generation(meetings: MeetingService, user_id: String, meeting_i
                 .await;
         }
     });
+}
+
+async fn list_memory_facts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<MemoryFactQuery>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .memories
+        .list_facts(
+            &user.id,
+            &query.query,
+            query.limit.unwrap_or(100).clamp(1, 100) as usize,
+        )
+        .await
+    {
+        Ok(facts) => Json(json!({"data": facts})).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn create_memory_fact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<MemoryFactCreate>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .memories
+        .create_manual_fact(&user.id, &request.kind, &request.summary)
+        .await
+    {
+        Ok(fact) => (StatusCode::CREATED, Json(json!({"data": fact}))).into_response(),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn update_memory_fact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(fact_id): Path<String>,
+    Json(request): Json<MemoryFactPatch>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    if request.kind.is_none() && request.summary.is_none() {
+        return api_error(StatusCode::BAD_REQUEST, "至少需要提供一个修改字段");
+    }
+    match state
+        .memories
+        .update_fact(
+            &user.id,
+            &fact_id,
+            request.kind.as_deref(),
+            request.summary.as_deref(),
+        )
+        .await
+    {
+        Ok(Some(fact)) => Json(json!({"data": fact})).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "记忆不存在"),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn delete_memory_fact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(fact_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.memories.delete_fact(&user.id, &fact_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "记忆不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
 }
 
 async fn list_memories(
