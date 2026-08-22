@@ -73,6 +73,7 @@ function AuthenticatedArtifact({
 
 export type LiveCallScreenProps = {
   purpose: SessionPurpose
+  contextLabel: string | null
   mode: RealtimeMode
   cameraPhase: CameraPhase
   cameraPreviewVisible: boolean
@@ -106,6 +107,7 @@ export type LiveCallScreenProps = {
 
 export function LiveCallScreen({
   purpose,
+  contextLabel,
   mode,
   cameraPhase,
   cameraPreviewVisible,
@@ -179,7 +181,9 @@ export function LiveCallScreen({
         </button>
         <div className="call-title">
           <strong><i aria-hidden="true" />{meetingMode ? '会议记录中' : '正在陪伴'}</strong>
-          <span aria-label={`通话时长 ${formatDuration(elapsed)}`}>{formatDuration(elapsed)}</span>
+          <span aria-label={`通话时长 ${formatDuration(elapsed)}`}>
+            {contextLabel && !meetingMode ? `PROJECT · ${contextLabel} · ` : ''}{formatDuration(elapsed)}
+          </span>
         </div>
         {!meetingMode && videoMode ? (
           <button

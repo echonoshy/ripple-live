@@ -4,7 +4,6 @@ import {
   MessageCircle as ChatCircleDots,
   Circle,
   Mail as EnvelopeSimple,
-  FolderKanban,
   Image as ImagesSquare,
   LockKeyhole as LockKey,
   ListTodo as ListChecks,
@@ -33,6 +32,8 @@ import {
   conversationMessages,
   conversationMutation,
   conversations,
+  createProject,
+  createProjectConversation,
   createTodo,
   currentUser,
   deleteTodo,
@@ -43,6 +44,9 @@ import {
   memories,
   memory,
   memoryMutation,
+  project as getProject,
+  projectConversations,
+  projects,
   renameConversation,
   regenerateMeeting,
   register,
@@ -51,8 +55,10 @@ import {
   promoteMeetingAction,
   uploadUserAvatar,
   updateMemory,
+  updateProject,
   todos,
   updateTodo,
+  archiveProject,
   type AuthUser,
   type ConversationAction,
   type ConversationMessage,
@@ -60,6 +66,8 @@ import {
   type MemoryArtifact,
   type MeetingDetail,
   type MeetingRecord,
+  type ProjectCreate,
+  type ProjectRecord,
   type TodoItem,
   type VisualMemory,
 } from './api'
@@ -79,7 +87,10 @@ import { LibraryToolbar } from './components/LibraryToolbar'
 import { MarkdownContent } from './components/MarkdownContent'
 import { MeetingRecords } from './components/MeetingRecords'
 import { PersonalizationSection } from './components/PersonalizationSection'
-import { SecondaryScaffold } from './components/SecondaryScaffold'
+import { ProjectDetailScreen } from './components/projects/ProjectDetailScreen'
+import { hasProjectConversationContent } from './components/projects/projectDraft'
+import { ProjectEditorSheet } from './components/projects/ProjectEditorSheet'
+import { ProjectListScreen } from './components/projects/ProjectListScreen'
 import { UserAvatar } from './components/UserAvatar'
 import {
   groupLibraryItems,
@@ -325,6 +336,22 @@ export default function App() {
   const [meetingError, setMeetingError] = useState('')
   const [liveTranscript, setLiveTranscript] = useState<LiveTranscriptTurn[]>([])
   const [meetingCaptureError, setMeetingCaptureError] = useState('')
+  const [projectItems, setProjectItems] = useState<ProjectRecord[]>([])
+  const [projectScope, setProjectScope] = useState<'active' | 'archived'>('active')
+  const [selectedProject, setSelectedProject] = useState<ProjectRecord | null>(null)
+  const [projectConversationItems, setProjectConversationItems] = useState<ConversationSummary[]>([])
+  const [projectListBusy, setProjectListBusy] = useState(false)
+  const [projectDetailBusy, setProjectDetailBusy] = useState(false)
+  const [projectListError, setProjectListError] = useState('')
+  const [projectDetailError, setProjectDetailError] = useState('')
+  const [projectEditor, setProjectEditor] = useState<{ project?: ProjectRecord } | null>(null)
+  const [projectEditorBusy, setProjectEditorBusy] = useState(false)
+  const [projectEditorError, setProjectEditorError] = useState('')
+  const [projectCallBusy, setProjectCallBusy] = useState(false)
+  const [projectListReload, setProjectListReload] = useState(0)
+  const [projectDetailReload, setProjectDetailReload] = useState(0)
+  const [conversationProjectId, setConversationProjectId] = useState<string | null>(null)
+  const [activeProjectContext, setActiveProjectContext] = useState<Pick<ProjectRecord, 'id' | 'name'> | null>(null)
   const [memoryItems, setMemoryItems] = useState<VisualMemory[]>([])
   const [memoryBusy, setMemoryBusy] = useState(false)
   const [memoryError, setMemoryError] = useState('')
@@ -356,6 +383,7 @@ export default function App() {
   const [liveArtifacts, setLiveArtifacts] = useState<ResponseArtifact[]>([])
   const [liveResults, dispatchLiveResults] = useReducer(liveResultsReducer, [])
   const [rippleSignals, setRippleSignals] = useState<readonly RippleSignal[]>([])
+  const selectedProjectId = selectedProject?.id ?? null
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const appShellRef = useRef<HTMLElement>(null)
@@ -477,7 +505,10 @@ export default function App() {
         setCameraControlReady(false)
         setFrameRequestActive(false)
         setActiveConversationIdState(null)
+        setActiveProjectContext(null)
         setSelectedConversation(null)
+        setConversationProjectId(null)
+        setSelectedProject(null)
         setAccessToken('')
         setUser(null)
       })
@@ -643,6 +674,65 @@ export default function App() {
   }, [accessToken, screen, selectedMeeting, server])
 
   useEffect(() => {
+    if (screen !== 'projects' || selectedProjectId || !accessToken) return
+    let active = true
+    setProjectListBusy(true)
+    setProjectListError('')
+    void projects(server, accessToken, {
+      scope: projectScope,
+      query: '',
+      limit: 100,
+    })
+      .then((items) => {
+        if (active) setProjectItems(items)
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setProjectListError(error instanceof Error ? error.message : '无法加载项目')
+        }
+      })
+      .finally(() => {
+        if (active) setProjectListBusy(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [accessToken, projectListReload, projectScope, screen, selectedProjectId, server])
+
+  useEffect(() => {
+    if (screen !== 'projects' || !selectedProjectId || !accessToken) return
+    let active = true
+    const projectId = selectedProjectId
+    setProjectDetailBusy(true)
+    setProjectDetailError('')
+    void Promise.all([
+      getProject(server, accessToken, projectId),
+      projectConversations(server, accessToken, projectId, {
+        scope: 'active',
+        query: '',
+        limit: 100,
+      }),
+    ])
+      .then(([nextProject, items]) => {
+        if (!active) return
+        setSelectedProject(nextProject)
+        setProjectItems((current) => current.map((item) => item.id === nextProject.id ? nextProject : item))
+        setProjectConversationItems(items.filter(hasProjectConversationContent))
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setProjectDetailError(error instanceof Error ? error.message : '无法加载项目内容')
+        }
+      })
+      .finally(() => {
+        if (active) setProjectDetailBusy(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [accessToken, projectDetailReload, screen, selectedProjectId, server])
+
+  useEffect(() => {
     if (
       screen !== 'meetings' ||
       !selectedMeeting ||
@@ -759,7 +849,8 @@ export default function App() {
       createSingleFlight(async () => {
         if (!callLifecycleRef.current.beginLeave()) return
         const conversationOwner = conversationOwnershipRef.current.current()
-        const routeOwner = navigateTo('home')
+        const projectContext = activeProjectContext
+        const routeOwner = navigateTo(projectContext ? 'projects' : 'home')
         const token = accessToken
         const meetingStart = meetingStartPromiseRef.current
         await closeCallBeforeDetachedRefresh({
@@ -779,6 +870,7 @@ export default function App() {
           finishClose: () => {
             callLifecycleRef.current.finishLeave()
             setSessionState('idle')
+            setActiveProjectContext(null)
           },
           refresh: async () => {
             const meetingId = await meetingStart
@@ -803,6 +895,32 @@ export default function App() {
                 setScreen('meetings')
                 return
               }
+            }
+            if (projectContext && token) {
+              try {
+                const [nextProject, items] = await Promise.all([
+                  getProject(server, token, projectContext.id),
+                  projectConversations(server, token, projectContext.id, {
+                    scope: 'active',
+                    query: '',
+                    limit: 100,
+                  }),
+                ])
+                if (!navigationGuardRef.current.owns(routeOwner)) return
+                setProjectDetailError('')
+                setSelectedProject(nextProject)
+                setProjectItems((current) => current.map((item) => item.id === nextProject.id ? nextProject : item))
+                setProjectConversationItems(items.filter(hasProjectConversationContent))
+                setConversationProjectId(null)
+                setScreen('projects')
+              } catch (error) {
+                if (!navigationGuardRef.current.owns(routeOwner)) return
+                setProjectDetailError(
+                  `通话已结束，但无法刷新项目：${error instanceof Error ? error.message : '请稍后重试'}`,
+                )
+                setScreen('projects')
+              }
+              return
             }
             if (!conversationOwner.conversationId || !token) return
             try {
@@ -843,10 +961,15 @@ export default function App() {
           },
         })
       }),
-    [accessToken, navigateTo, server, stopCall],
+    [accessToken, activeProjectContext, navigateTo, server, stopCall],
   )
 
   const handleEdgeSwipeBack = useCallback(() => {
+    if (projectEditor && !projectEditorBusy) {
+      setProjectEditor(null)
+      setProjectEditorError('')
+      return
+    }
     if (deleteRequest) {
       setDeleteRequest(null)
       return
@@ -890,21 +1013,33 @@ export default function App() {
       return
     }
     if (screen === 'conversation') {
-      navigateTo('history')
+      navigateTo(conversationProjectId && selectedProject ? 'projects' : 'history')
+      return
+    }
+    if (screen === 'projects' && selectedProject) {
+      setSelectedProject(null)
+      setProjectConversationItems([])
+      setProjectDetailError('')
+      setConversationProjectId(null)
+      window.requestAnimationFrame(() => window.scrollTo(0, 0))
       return
     }
     if (screen !== 'home') navigateTo('home')
   }, [
     deleteRequest,
+    conversationProjectId,
     historySelectionMode,
     leaveCall,
     memorySelectionMode,
     navigateTo,
+    projectEditor,
+    projectEditorBusy,
     renameRequest,
     revealedItem,
     revealedTodo,
     screen,
     selectedMemoryId,
+    selectedProject,
     todoEditor,
   ])
 
@@ -1255,15 +1390,16 @@ export default function App() {
     return () => window.cancelAnimationFrame(frame)
   }, [screen, startCall])
 
-  const openCall = (
+  const configureCall = (
     nextMode: RealtimeMode,
     conversationId?: string,
     purpose: SessionPurpose = 'conversation',
+    projectContext: Pick<ProjectRecord, 'id' | 'name'> | null = null,
   ) => {
-    if (!callLifecycleRef.current.requestOpen()) return
     const conversationOwner = conversationOwnershipRef.current.begin(conversationId)
     setActiveConversationIdState(conversationOwner.conversationId)
     setCallPurpose(purpose)
+    setActiveProjectContext(projectContext)
     if (!conversationOwner.conversationId) {
       setSelectedConversation(null)
       setHistoryMessages([])
@@ -1282,6 +1418,33 @@ export default function App() {
     dispatchLiveResults({ type: 'clear' })
     setRippleSignals([])
     navigateTo('call')
+  }
+
+  const openCall = (
+    nextMode: RealtimeMode,
+    conversationId?: string,
+    purpose: SessionPurpose = 'conversation',
+    projectContext: Pick<ProjectRecord, 'id' | 'name'> | null = null,
+  ) => {
+    if (!callLifecycleRef.current.requestOpen()) return false
+    configureCall(nextMode, conversationId, purpose, projectContext)
+    return true
+  }
+
+  const openProjectCall = async (nextMode: RealtimeMode) => {
+    if (!selectedProject || selectedProject.archived_at !== null || projectCallBusy) return
+    if (!callLifecycleRef.current.requestOpen()) return
+    setProjectCallBusy(true)
+    setProjectDetailError('')
+    try {
+      const created = await createProjectConversation(server, accessToken, selectedProject.id)
+      configureCall(nextMode, created.id, 'conversation', selectedProject)
+    } catch (error) {
+      callLifecycleRef.current.invalidate()
+      setProjectDetailError(error instanceof Error ? error.message : '无法开始项目对话')
+    } finally {
+      setProjectCallBusy(false)
+    }
   }
 
   const openMeetingCapture = () => {
@@ -1370,6 +1533,88 @@ export default function App() {
     }
   }
 
+  const openProject = (nextProject: ProjectRecord) => {
+    setSelectedProject(nextProject)
+    setProjectConversationItems([])
+    setProjectDetailError('')
+    navigateTo('projects')
+  }
+
+  const closeProject = () => {
+    setSelectedProject(null)
+    setProjectConversationItems([])
+    setProjectDetailError('')
+    setConversationProjectId(null)
+    window.requestAnimationFrame(() => window.scrollTo(0, 0))
+  }
+
+  const saveProjectEditor = async (input: ProjectCreate) => {
+    const editing = projectEditor?.project
+    setProjectEditorBusy(true)
+    setProjectEditorError('')
+    try {
+      const saved = editing
+        ? await updateProject(server, accessToken, editing.id, input)
+        : await createProject(server, accessToken, input)
+      setProjectItems((current) => [
+        saved,
+        ...current.filter((item) => item.id !== saved.id),
+      ])
+      setProjectScope('active')
+      setSelectedProject(saved)
+      if (!editing) setProjectConversationItems([])
+      setProjectEditor(null)
+      setProjectDetailError('')
+      navigateTo('projects')
+    } catch (error) {
+      setProjectEditorError(error instanceof Error ? error.message : '无法保存项目')
+    } finally {
+      setProjectEditorBusy(false)
+    }
+  }
+
+  const archiveSelectedProject = async () => {
+    if (!selectedProject || projectCallBusy) return
+    setProjectCallBusy(true)
+    setProjectDetailError('')
+    try {
+      await archiveProject(server, accessToken, selectedProject.id)
+      setProjectItems((current) => current.filter((item) => item.id !== selectedProject.id))
+      setSelectedProject(null)
+      setProjectConversationItems([])
+      setProjectListReload((value) => value + 1)
+    } catch (error) {
+      setProjectDetailError(error instanceof Error ? error.message : '无法归档项目')
+    } finally {
+      setProjectCallBusy(false)
+    }
+  }
+
+  const restoreSelectedProject = async () => {
+    if (!selectedProject || projectCallBusy) return
+    setProjectCallBusy(true)
+    setProjectDetailError('')
+    try {
+      const restored = await updateProject(server, accessToken, selectedProject.id, { archived: false })
+      setSelectedProject(restored)
+      setProjectItems((current) => current.filter((item) => item.id !== restored.id))
+      setProjectScope('active')
+      setProjectDetailReload((value) => value + 1)
+    } catch (error) {
+      setProjectDetailError(error instanceof Error ? error.message : '无法恢复项目')
+    } finally {
+      setProjectCallBusy(false)
+    }
+  }
+
+  const openProjectConversation = (item: ConversationSummary) => {
+    if (!selectedProject) return
+    setConversationProjectId(selectedProject.id)
+    preloadedConversationIdRef.current = null
+    setSelectedConversation(item)
+    navigateTo('conversation')
+  }
+
   const selectDestination = (destination: AppDestination) => {
     switch (destination) {
       case 'home':
@@ -1383,6 +1628,9 @@ export default function App() {
         navigateTo('meetings')
         break
       case 'projects':
+        setSelectedProject(null)
+        setProjectConversationItems([])
+        setProjectDetailError('')
         navigateTo('projects')
         break
       case 'materials':
@@ -1529,12 +1777,17 @@ export default function App() {
     setAvatarNotice('')
     conversationOwnershipRef.current.invalidate()
     setActiveConversationIdState(null)
+    setActiveProjectContext(null)
     setSelectedConversation(null)
+    setConversationProjectId(null)
+    setSelectedProject(null)
     navigateTo('home')
     setHistoryItems([])
     setHistoryMessages([])
     setMemoryItems([])
     setTodoItems([])
+    setProjectItems([])
+    setProjectConversationItems([])
     if (token) await logoutApi(server, token).catch(() => {})
   }
 
@@ -2204,6 +2457,7 @@ export default function App() {
                                 return
                               }
                               preloadedConversationIdRef.current = null
+                              setConversationProjectId(null)
                               setSelectedConversation(item)
                               navigateTo('conversation')
                             }}
@@ -2567,8 +2821,8 @@ export default function App() {
             <button
               className="icon-button"
               type="button"
-              aria-label="返回聊天历史"
-              onClick={() => navigateTo('history')}
+              aria-label={conversationProjectId ? '返回项目' : '返回聊天历史'}
+              onClick={() => navigateTo(conversationProjectId && selectedProject ? 'projects' : 'history')}
             >
               <ArrowLeft />
             </button>
@@ -2629,14 +2883,24 @@ export default function App() {
               className="continuation-video"
               type="button"
               aria-label="用视频继续"
-              onClick={() => openCall('video', selectedConversation.id)}
+              onClick={() => openCall(
+                'video',
+                selectedConversation.id,
+                'conversation',
+                conversationProjectId && selectedProject?.id === conversationProjectId ? selectedProject : null,
+              )}
             >
               <Video aria-hidden="true" />
             </button>
             <button
               className="continuation-compose"
               type="button"
-              onClick={() => openCall('audio', selectedConversation.id)}
+              onClick={() => openCall(
+                'audio',
+                selectedConversation.id,
+                'conversation',
+                conversationProjectId && selectedProject?.id === conversationProjectId ? selectedProject : null,
+              )}
             >
               <Microphone aria-hidden="true" />
               <span>继续语音对话</span>
@@ -2757,7 +3021,45 @@ export default function App() {
       )}
 
       {screen === 'projects' && (
-        <SecondaryScaffold title="项目" icon={FolderKanban} onBack={() => navigateTo('home')} />
+        selectedProject ? (
+          <ProjectDetailScreen
+            project={selectedProject}
+            conversations={projectConversationItems}
+            busy={projectDetailBusy}
+            callBusy={projectCallBusy}
+            error={projectDetailError}
+            onBack={closeProject}
+            onEdit={() => {
+              setProjectEditorError('')
+              setProjectEditor({ project: selectedProject })
+            }}
+            onArchive={() => void archiveSelectedProject()}
+            onRestore={() => void restoreSelectedProject()}
+            onStartAudio={() => void openProjectCall('audio')}
+            onStartVideo={() => void openProjectCall('video')}
+            onOpenConversation={openProjectConversation}
+            onRetry={() => setProjectDetailReload((value) => value + 1)}
+          />
+        ) : (
+          <ProjectListScreen
+            items={projectItems}
+            scope={projectScope}
+            busy={projectListBusy}
+            error={projectListError}
+            onBack={() => navigateTo('home')}
+            onScopeChange={(scope) => {
+              setProjectScope(scope)
+              setProjectItems([])
+              setProjectListError('')
+            }}
+            onCreate={() => {
+              setProjectEditorError('')
+              setProjectEditor({})
+            }}
+            onOpen={openProject}
+            onRetry={() => setProjectListReload((value) => value + 1)}
+          />
+        )
       )}
 
       {screen === 'materials' && (
@@ -2771,6 +3073,7 @@ export default function App() {
       {screen === 'call' && (
         <LiveCallScreen
           purpose={callPurpose}
+          contextLabel={activeProjectContext?.name ?? null}
           mode={mode}
           cameraPhase={cameraPhase}
           cameraPreviewVisible={cameraPreviewVisible}
@@ -2828,6 +3131,21 @@ export default function App() {
             setAvatarError('')
           }}
           onSave={saveAvatar}
+        />
+      ) : null}
+
+      {projectEditor ? (
+        <ProjectEditorSheet
+          key={projectEditor.project?.id ?? 'new-project'}
+          project={projectEditor.project}
+          busy={projectEditorBusy}
+          error={projectEditorError}
+          onCancel={() => {
+            if (projectEditorBusy) return
+            setProjectEditor(null)
+            setProjectEditorError('')
+          }}
+          onSave={(input) => void saveProjectEditor(input)}
         />
       ) : null}
 
