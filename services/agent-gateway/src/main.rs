@@ -1892,13 +1892,26 @@ async fn realtime(
     Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Response {
-    let Some(token) = query.get("access_token") else {
-        return api_error(StatusCode::UNAUTHORIZED, "需要登录");
-    };
-    let user = match state.context.authenticate(token).await {
-        Ok(Some(user)) => user,
-        Ok(None) => return api_error(StatusCode::UNAUTHORIZED, "登录已失效，请重新登录"),
-        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    let user = match query.get("access_token").filter(|token| !token.is_empty()) {
+        Some(token) => match state.context.authenticate(token).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return api_error(StatusCode::UNAUTHORIZED, "登录已失效，请重新登录"),
+            Err(error) => {
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        },
+        None if !state.settings.anonymous_realtime_user_id.is_empty() => {
+            warn!(
+                user_id = %state.settings.anonymous_realtime_user_id,
+                "accepting anonymous realtime device connection"
+            );
+            ripple_agent_gateway::auth::AuthUser {
+                id: state.settings.anonymous_realtime_user_id.clone(),
+                email: "passport-device@local".to_owned(),
+                avatar_url: None,
+            }
+        }
+        None => return api_error(StatusCode::UNAUTHORIZED, "需要登录"),
     };
     let conversation_id = match query.get("conversation_id").filter(|id| !id.is_empty()) {
         Some(id) => match state.context.conversation_belongs_to(id, &user.id).await {
