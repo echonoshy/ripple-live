@@ -109,6 +109,43 @@ export type TodoPatch = {
   completed?: boolean
 }
 
+export type MeetingRecord = {
+  id: string
+  conversation_id: string | null
+  mode: 'audio' | 'video'
+  status: 'recording' | 'processing' | 'ready' | 'failed'
+  started_at: number
+  ended_at: number | null
+  duration_seconds: number | null
+  title: string
+  summary: string
+  generated_at: number | null
+  last_error: string | null
+  transcript_count: number
+  action_count: number
+}
+
+export type MeetingTranscriptSegment = {
+  id: number
+  role: 'user' | 'assistant'
+  content: string
+  created_at: number
+  ordinal: number
+}
+
+export type MeetingActionItem = {
+  id: string
+  title: string
+  due_at: number | null
+  todo_id: string | null
+  ordinal: number
+}
+
+export type MeetingDetail = MeetingRecord & {
+  transcript: MeetingTranscriptSegment[]
+  action_items: MeetingActionItem[]
+}
+
 export type LibraryPatch = {
   title?: string
   is_pinned?: boolean
@@ -546,6 +583,79 @@ export async function conversationMessages(
     token,
   )
   return normalizeConversationMessages(payload.data)
+}
+
+export async function meetings(server: string, token: string, limit = 50) {
+  const payload = await request<{ data: MeetingRecord[] }>(
+    server,
+    `/v1/meetings?limit=${Math.max(1, Math.min(100, limit))}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function meeting(server: string, token: string, id: string) {
+  const payload = await request<{ data: MeetingDetail }>(
+    server,
+    `/v1/meetings/${encodeURIComponent(id)}`,
+    {},
+    token,
+  )
+  return payload.data
+}
+
+export async function startMeeting(
+  server: string,
+  token: string,
+  conversationId: string,
+  mode: 'audio' | 'video',
+) {
+  const payload = await request<{ data: MeetingRecord }>(
+    server,
+    '/v1/meetings',
+    {
+      method: 'POST',
+      body: JSON.stringify({ conversation_id: conversationId, mode }),
+    },
+    token,
+  )
+  return payload.data
+}
+
+export async function finishMeeting(server: string, token: string, id: string) {
+  const payload = await request<{ data: MeetingRecord }>(
+    server,
+    `/v1/meetings/${encodeURIComponent(id)}/finish`,
+    { method: 'POST' },
+    token,
+  )
+  return payload.data
+}
+
+export async function regenerateMeeting(server: string, token: string, id: string) {
+  const payload = await request<{ data: MeetingRecord }>(
+    server,
+    `/v1/meetings/${encodeURIComponent(id)}/generate`,
+    { method: 'POST' },
+    token,
+  )
+  return payload.data
+}
+
+export async function promoteMeetingAction(
+  server: string,
+  token: string,
+  meetingId: string,
+  actionId: string,
+) {
+  const payload = await request<{ data: MeetingActionItem }>(
+    server,
+    `/v1/meetings/${encodeURIComponent(meetingId)}/actions/${encodeURIComponent(actionId)}/todo`,
+    { method: 'POST' },
+    token,
+  )
+  return payload.data
 }
 
 export async function memories(

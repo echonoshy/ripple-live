@@ -1,7 +1,6 @@
 import {
   RotateCcw as ArrowCounterClockwise,
   ArrowLeft,
-  CalendarDays,
   MessageCircle as ChatCircleDots,
   Circle,
   Database,
@@ -40,11 +39,17 @@ import {
   deleteTodo,
   login,
   logout as logoutApi,
+  meeting,
+  meetings,
   memories,
   memory,
   memoryMutation,
   renameConversation,
+  regenerateMeeting,
   register,
+  startMeeting,
+  finishMeeting,
+  promoteMeetingAction,
   uploadUserAvatar,
   updateMemory,
   todos,
@@ -54,6 +59,8 @@ import {
   type ConversationMessage,
   type ConversationSummary,
   type MemoryArtifact,
+  type MeetingDetail,
+  type MeetingRecord,
   type TodoItem,
   type VisualMemory,
 } from './api'
@@ -69,6 +76,7 @@ import { LiveCallScreen } from './components/LiveCallScreen'
 import { LibrarySection } from './components/LibrarySection'
 import { LibraryToolbar } from './components/LibraryToolbar'
 import { MarkdownContent } from './components/MarkdownContent'
+import { MeetingRecords } from './components/MeetingRecords'
 import { PersonalizationSection } from './components/PersonalizationSection'
 import { SecondaryScaffold } from './components/SecondaryScaffold'
 import { UserAvatar } from './components/UserAvatar'
@@ -110,6 +118,7 @@ import {
   type ResponseArtifact,
   type RealtimeMode,
   type SessionState,
+  type LiveTranscriptTurn,
 } from './realtime/RealtimeSession'
 import { parseLiveResult } from './realtime/toolResults'
 
@@ -305,6 +314,12 @@ export default function App() {
   const [historySelectionMode, setHistorySelectionMode] = useState(false)
   const [selectedConversation, setSelectedConversation] = useState<ConversationSummary | null>(null)
   const [activeConversationId, setActiveConversationIdState] = useState<string | null>(null)
+  const [meetingItems, setMeetingItems] = useState<MeetingRecord[]>([])
+  const [selectedMeeting, setSelectedMeeting] = useState<MeetingDetail | null>(null)
+  const [meetingBusy, setMeetingBusy] = useState(false)
+  const [meetingError, setMeetingError] = useState('')
+  const [liveTranscript, setLiveTranscript] = useState<LiveTranscriptTurn[]>([])
+  const [meetingCaptureError, setMeetingCaptureError] = useState('')
   const [memoryItems, setMemoryItems] = useState<VisualMemory[]>([])
   const [memoryBusy, setMemoryBusy] = useState(false)
   const [memoryError, setMemoryError] = useState('')
@@ -352,6 +367,8 @@ export default function App() {
   const cameraControlReadyRef = useRef(false)
   const cameraActivationInvalidatorRef = useRef<(() => void) | null>(null)
   const initialCameraRequestRef = useRef(false)
+  const activeMeetingIdRef = useRef<string | null>(null)
+  const meetingStartPromiseRef = useRef<Promise<string | null> | null>(null)
   const cameraFlipGenerationRef = useRef(0)
   const callLifecycleRef = useRef(createCallLifecycleGuard())
   const conversationOwnershipRef = useRef(createConversationOwnership())
@@ -601,6 +618,50 @@ export default function App() {
   }, [accessToken, screen, server, todoView])
 
   useEffect(() => {
+    if (screen !== 'meetings' || selectedMeeting || !accessToken) return
+    let active = true
+    setMeetingBusy(true)
+    setMeetingError('')
+    void meetings(server, accessToken)
+      .then((items) => {
+        if (active) setMeetingItems(items)
+      })
+      .catch((error: unknown) => {
+        if (active) setMeetingError(error instanceof Error ? error.message : '无法读取会议记录')
+      })
+      .finally(() => {
+        if (active) setMeetingBusy(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [accessToken, screen, selectedMeeting, server])
+
+  useEffect(() => {
+    if (
+      screen !== 'meetings' ||
+      !selectedMeeting ||
+      (selectedMeeting.status !== 'processing' && selectedMeeting.status !== 'recording') ||
+      !accessToken
+    ) return
+    let active = true
+    const refresh = () => {
+      void meeting(server, accessToken, selectedMeeting.id)
+        .then((detail) => {
+          if (!active) return
+          setSelectedMeeting(detail)
+          setMeetingItems((items) => items.map((item) => item.id === detail.id ? detail : item))
+        })
+        .catch(() => {})
+    }
+    const timer = window.setInterval(refresh, 1_500)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [accessToken, screen, selectedMeeting, server])
+
+  useEffect(() => {
     const targetId = todoScrollTargetRef.current
     if (screen !== 'todos' || !targetId) return
     const frame = window.requestAnimationFrame(() => {
@@ -695,6 +756,7 @@ export default function App() {
         const conversationOwner = conversationOwnershipRef.current.current()
         const routeOwner = navigateTo('home')
         const token = accessToken
+        const meetingStart = meetingStartPromiseRef.current
         await closeCallBeforeDetachedRefresh({
           close: async () => {
             try {
@@ -714,6 +776,29 @@ export default function App() {
             setSessionState('idle')
           },
           refresh: async () => {
+            const meetingId = await meetingStart
+            activeMeetingIdRef.current = null
+            meetingStartPromiseRef.current = null
+            if (meetingId && token) {
+              try {
+                await finishMeeting(server, token, meetingId)
+                const detail = await meeting(server, token, meetingId)
+                if (!navigationGuardRef.current.owns(routeOwner)) return
+                setMeetingError('')
+                setSelectedMeeting(detail)
+                setMeetingItems((items) => [detail, ...items.filter((item) => item.id !== detail.id)])
+                setScreen('meetings')
+                return
+              } catch (error) {
+                if (!navigationGuardRef.current.owns(routeOwner)) return
+                setMeetingError(
+                  `通话已保存，但会议整理未启动：${error instanceof Error ? error.message : '请稍后重试'}`,
+                )
+                setSelectedMeeting(null)
+                setScreen('meetings')
+                return
+              }
+            }
             if (!conversationOwner.conversationId || !token) return
             try {
               const [summary, messages] = await Promise.all([
@@ -866,6 +951,7 @@ export default function App() {
         return
       }
 
+      const requestedMeetingMode: RealtimeMode = initialCameraRequestRef.current ? 'video' : 'audio'
       setMode('audio')
       setErrorMessage('')
       setCameraErrorMessage('')
@@ -875,6 +961,10 @@ export default function App() {
       setLiveArtifacts([])
       dispatchLiveResults({ type: 'clear' })
       setRippleSignals([])
+      setLiveTranscript([])
+      setMeetingCaptureError('')
+      activeMeetingIdRef.current = null
+      meetingStartPromiseRef.current = null
       setElapsed(0)
       setMuted(false)
       setInputLevel(0)
@@ -905,6 +995,28 @@ export default function App() {
           )
         if (confirmedConversationId) {
           setActiveConversationIdState(confirmedConversationId)
+          if (!meetingStartPromiseRef.current) {
+            const start = startMeeting(
+              server,
+              accessToken,
+              confirmedConversationId,
+              requestedMeetingMode,
+            )
+              .then((record) => {
+                if (!ownsSession()) return record.id
+                activeMeetingIdRef.current = record.id
+                return record.id
+              })
+              .catch((error: unknown) => {
+                if (ownsSession()) {
+                  setMeetingCaptureError(
+                    `会议记录未启动：${error instanceof Error ? error.message : '请稍后重试'}`,
+                  )
+                }
+                return null
+              })
+            meetingStartPromiseRef.current = start
+          }
         }
       }
       const media = new LiveMedia({
@@ -967,6 +1079,9 @@ export default function App() {
           setUserText(text)
           setLiveArtifacts([])
           dispatchLiveResults({ type: 'clear' })
+        },
+        onTranscriptTurn: (turn) => {
+          if (ownsSession()) setLiveTranscript((items) => [...items, turn].slice(-200))
         },
         onTool: (status) => {
           if (ownsSession()) setToolStatus(status)
@@ -1201,6 +1316,46 @@ export default function App() {
       openTodo: openConversationTodo,
     })
 
+  const openMeetingRecord = async (meetingId: string) => {
+    const routeOwner = navigateTo('meetings')
+    setMeetingBusy(true)
+    setMeetingError('')
+    try {
+      const detail = await meeting(server, accessToken, meetingId)
+      if (navigationGuardRef.current.owns(routeOwner)) setSelectedMeeting(detail)
+    } catch (error) {
+      if (navigationGuardRef.current.owns(routeOwner)) {
+        setMeetingError(error instanceof Error ? error.message : '无法打开会议记录')
+      }
+    } finally {
+      if (navigationGuardRef.current.owns(routeOwner)) setMeetingBusy(false)
+    }
+  }
+
+  const retryMeetingGeneration = async (meetingId: string) => {
+    setMeetingError('')
+    try {
+      await regenerateMeeting(server, accessToken, meetingId)
+      const detail = await meeting(server, accessToken, meetingId)
+      setSelectedMeeting(detail)
+    } catch (error) {
+      setMeetingError(error instanceof Error ? error.message : '无法重新生成会议记录')
+    }
+  }
+
+  const addMeetingActionToTodos = async (meetingId: string, actionId: string) => {
+    setMeetingError('')
+    try {
+      const action = await promoteMeetingAction(server, accessToken, meetingId, actionId)
+      setSelectedMeeting((current) => current && current.id === meetingId ? {
+        ...current,
+        action_items: current.action_items.map((item) => item.id === action.id ? action : item),
+      } : current)
+    } catch (error) {
+      setMeetingError(error instanceof Error ? error.message : '无法加入待办')
+    }
+  }
+
   const selectDestination = (destination: AppDestination) => {
     switch (destination) {
       case 'home':
@@ -1210,6 +1365,7 @@ export default function App() {
         navigateTo('history')
         break
       case 'meetings':
+        setSelectedMeeting(null)
         navigateTo('meetings')
         break
       case 'projects':
@@ -2564,7 +2720,17 @@ export default function App() {
       )}
 
       {screen === 'meetings' && (
-        <SecondaryScaffold title="会议记录" icon={CalendarDays} onBack={() => navigateTo('home')} />
+        <MeetingRecords
+          items={meetingItems}
+          detail={selectedMeeting}
+          busy={meetingBusy}
+          error={meetingError}
+          onBack={() => navigateTo('home')}
+          onOpen={(id) => void openMeetingRecord(id)}
+          onCloseDetail={() => setSelectedMeeting(null)}
+          onRetry={(id) => void retryMeetingGeneration(id)}
+          onPromoteAction={(meetingId, actionId) => void addMeetingActionToTodos(meetingId, actionId)}
+        />
       )}
 
       {screen === 'projects' && (
@@ -2595,6 +2761,8 @@ export default function App() {
           errorMessage={visibleCallError(errorMessage, cameraErrorMessage)}
           artifacts={liveArtifacts}
           results={liveResults}
+          transcript={liveTranscript}
+          transcriptError={meetingCaptureError}
           server={server}
           accessToken={accessToken}
           videoRef={videoRef}

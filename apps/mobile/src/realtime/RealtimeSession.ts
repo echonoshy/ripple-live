@@ -52,6 +52,12 @@ export type ResponseArtifact = {
   content_url: string
 }
 
+export type LiveTranscriptTurn = {
+  role: 'user' | 'assistant'
+  text: string
+  createdAt: number
+}
+
 type Transport = {
   send(message: string): Promise<void>
   close(): Promise<void>
@@ -94,6 +100,7 @@ export type SessionOptions = {
   onResponseFailed: (message: string) => void
   onAssistantText: (text: string) => void
   onUserText: (text: string) => void
+  onTranscriptTurn?: (turn: LiveTranscriptTurn) => void
   onTool: (label: string) => void
   onToolResult: (event: ToolCompletion) => void
   onAudio: (audio: Float32Array) => void
@@ -714,6 +721,13 @@ export class RealtimeSession {
       }
       case 'input.transcript.final':
         this.options.onUserText(event.text?.trim() ?? '')
+        if (event.text?.trim()) {
+          this.options.onTranscriptTurn?.({
+            role: 'user',
+            text: event.text.trim(),
+            createdAt: Date.now() / 1000,
+          })
+        }
         break
       case 'response.created':
         if (!isNonBlankString(event.response_id)) return
@@ -977,6 +991,14 @@ export class RealtimeSession {
     message?: string,
   ) {
     if (outcome === 'done') {
+      const finalText = this.assistantText.trim()
+      if (finalText) {
+        this.options.onTranscriptTurn?.({
+          role: 'assistant',
+          text: finalText,
+          createdAt: Date.now() / 1000,
+        })
+      }
       this.options.onAudioDone()
     } else {
       this.options.onInterrupted()

@@ -1,5 +1,7 @@
 import {
   ArrowLeft,
+  ChevronDown,
+  ChevronUp,
   SwitchCamera as CameraRotate,
   Mic as Microphone,
   MicOff as MicrophoneSlash,
@@ -18,6 +20,7 @@ import type {
   RealtimeMode,
   ResponseArtifact,
   SessionState,
+  LiveTranscriptTurn,
 } from '../realtime/RealtimeSession'
 import type { LiveResult } from '../realtime/toolResults'
 import '../live/LiveCall.css'
@@ -86,6 +89,8 @@ export type LiveCallScreenProps = {
   errorMessage: string
   artifacts: ResponseArtifact[]
   results: LiveResult[]
+  transcript: LiveTranscriptTurn[]
+  transcriptError: string
   server: string
   accessToken: string
   videoRef: RefObject<HTMLVideoElement | null>
@@ -116,6 +121,8 @@ export function LiveCallScreen({
   errorMessage,
   artifacts,
   results,
+  transcript,
+  transcriptError,
   server,
   accessToken,
   videoRef,
@@ -126,6 +133,7 @@ export function LiveCallScreen({
   onDismissResult,
   onLeave,
 }: LiveCallScreenProps) {
+  const [transcriptExpanded, setTranscriptExpanded] = useState(false)
   const videoMode = cameraPreviewVisible
   const cameraBusy = cameraPhase === 'opening' || cameraPhase === 'closing'
   const hasOutput = results.length > 0 || artifacts.length > 0
@@ -239,6 +247,30 @@ export function LiveCallScreen({
             </aside>
           )}
         </div>
+      )}
+
+      {(transcript.length > 0 || transcriptError) && (
+        <aside className={`live-transcript ${transcriptExpanded ? 'is-expanded' : ''}`} aria-label="会议逐字稿">
+          <button
+            className="live-transcript-heading"
+            type="button"
+            aria-expanded={transcriptExpanded}
+            onClick={() => setTranscriptExpanded((value) => !value)}
+          >
+            <span><i aria-hidden="true" />逐字稿</span>
+            <small>{transcript.length} 段</small>
+            {transcriptExpanded ? <ChevronDown aria-hidden="true" /> : <ChevronUp aria-hidden="true" />}
+          </button>
+          {transcriptError ? <p className="live-transcript-error">{transcriptError}</p> : null}
+          <div className="live-transcript-list">
+            {transcript.slice(transcriptExpanded ? 0 : -2).map((turn, index) => (
+              <p key={`${turn.createdAt}-${index}`}>
+                <strong>{turn.role === 'user' ? '我' : 'Ripple'}</strong>
+                <span>{turn.text}</span>
+              </p>
+            ))}
+          </div>
+        </aside>
       )}
 
       <footer className="call-controls">
