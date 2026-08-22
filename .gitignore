@@ -1,44 +1,9 @@
-# Runtime assets (kept locally, never committed)
-/.cache/
-/runtime-data/
-/.venv-qwen3-asr-1.7b/
-/.venv-qwen3.5-35b-a3b/
-/.venv-qwen3-tts-12hz-1.7b-customvoice/
-/services/agent-gateway/target/
-__pycache__/
-*.py[cod]
-
-# Mobile client dependencies, SDKs, and generated build output
-/apps/mobile/node_modules/
-/apps/mobile/dist/
-/apps/mobile/.android-sdk/
-/apps/mobile/src-tauri/target/
-/apps/mobile/src-tauri/gen/schemas/
-/apps/mobile/src-tauri/gen/android/.gradle/
-/apps/mobile/src-tauri/gen/android/build/
-/apps/mobile/src-tauri/gen/android/app/build/
-/apps/mobile/src-tauri/gen/android/local.properties
-
-# Service state
-/deploy/agent-stack/.env
-/deploy/agent-stack/data/
-/deploy/agent-stack/logs/
-/deploy/agent-stack/run/
-/deploy/agent-stack/samples/
-
-# Build artifacts
-*.apk
-*.aab
-
-# Local/editor files
-.DS_Store
-.idea/
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
 .vscode/
-*.log
-/.playwright-cli/
-/.superpowers/
-/.codex-tmp-*/
-/output/
-
-# Local Git worktrees
-.worktrees/
+.DS_Store
+__pycache__/
+.venv/

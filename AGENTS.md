@@ -1,42 +1,65 @@
-# Ripple Live 开发约定
+# Ripple AI Passport Development Rules
 
-## API 协议
+## Scope
 
-- Responses API 是唯一允许使用的 API 协议，不得使用其他协议。
+This branch is a standalone ESP-IDF firmware project for FoloToy AI Passport.
+Do not add the Ripple Live mobile app, Agent Gateway implementation, deployment
+stack, account UI, history, replay, meetings, memory, projects, or tool systems.
+The Gateway is an external service governed by `docs/PROTOCOL.md`.
 
-## 服务端
+## Product contract
 
-- 后端服务部署在 `140.143.229.103:8700`。
-- 使用 `ssh lake@140.143.229.103` 免密登录该主机。
-- 修改、部署或排查服务端内容时，请在该远程主机上执行。
+- Keep one primary interaction: hold `OK` to talk and release to send.
+- Responses API is the only permitted model orchestration protocol.
+- Preserve the current button mapping documented in the README unless the user
+  explicitly requests a product change.
+- Keep the UI minimal: near-black canvas, warm-white text, gray secondary text,
+  and one electric-purple accent.
+- Do not add a menu or bottom navigation.
 
-## Git 提交与服务端同步
+## Pet asset contract
 
-- 每次创建 Git 提交后，必须立即将该提交推送到当前 Git 远端分支，并将服务端 `/home/lake/workspace/ripple-live` 仓库快进到同一提交；未完成两处同步时，不得宣称提交完成。
-- 每次同步后，必须分别核对本地 `HEAD`、Git 远端当前分支和服务端 `HEAD` 的完整提交哈希，三者完全一致后才能继续下一次提交或向用户交付。
-- 如果服务端仓库存在未提交修改、分支不一致或无法 fast-forward，禁止使用 reset、强制推送或覆盖文件；必须保留现场并向用户说明阻塞原因。
-- 提交涉及后端代码、数据库迁移或服务配置时，除同步 Git 进度外，还必须在服务端完成构建、迁移（如有）、服务重启，并通过 `/health` 或 `/ready` 健康检查。
-- 仅涉及移动端或文档的提交无需重启后端服务，但仍必须完成 Git 远端与服务端仓库的提交同步和哈希核验。
+The pet is immutable. Do not redraw, replace, crop, recolor, regenerate with an
+image model, change frame order/timing, or alter its appearance. Only its
+surrounding container, spacing, and proportional display size may change.
+Canonical sources are in `assets/pet-gifs/`; generated LVGL frames are in
+`main/pet_assets/`.
 
-## 移动端应用
+## Architecture
 
-- Mobile App 在本机开发和调试。
-- 当前优先保证 Android APK 的功能与交付。
-- iOS 部分的代码保留但冻结；除非用户明确要求实现 iOS 功能，否则不得修改、扩展或实现 iOS 功能。
+- `main/`: product state, controls, provisioning, realtime protocol, UI, assets.
+- `components/bsp/`: reusable board access only.
+- `components/bsp/include/bsp_pins.h`: single source of truth for pins,
+  addresses, ADC windows, and display parameters.
+- `docs/PROTOCOL.md`: external Gateway contract.
+- `docs/DEVELOPMENT.md`: hardware and concurrency constraints.
 
-## 产品视觉与界面设计
+Button callbacks and Wi-Fi callbacks must remain non-blocking. Put NVS, I2C,
+audio, restart, and other slow operations in worker tasks. LVGL access must stay
+in its task or use the existing UI event API. Do not create a second ADC1 unit
+or I2C0 bus.
 
-- Ripple Live 采用 Kiro 风格的黑色技术界面：以近黑色画布、暖白文字、低对比灰色辅助信息和单一电光紫强调色为主。
-- 设计语言参考代码编辑器与终端界面，使用克制的网格、细边框、状态标签、等宽字体和清晰的信息层级；不得堆叠无意义的装饰、渐变或多套强调色。
-- 音频与视频聊天是首页主线功能，必须保持最高视觉优先级；记忆、资料、会议、项目、待办、设置等次级能力统一收束到菜单中。
-- 不使用底部主导航栏。次级页面通过菜单进入，并提供明确的返回首页路径。
-- 精灵是产品的固定核心形象。不得修改、替换、重绘、重新生成或裁切精灵资源，也不得改变其动画帧、状态动画和角色外观。
-- 调整界面时，只能修改精灵外围的容器、背景、间距和展示尺寸；如果需求可能影响精灵本身，必须先获得用户明确许可。
-- 新增或重构页面时应沿用现有 Kiro 风格设计令牌和组件语言，避免为单个页面另起一套配色、圆角或排版体系。
+## Build and validation
 
-## 当前开发阶段与安全边界
+Use ESP-IDF 5.5.x, validated with 5.5.3:
 
-- 当前处于快速开发和产品验证阶段，优先处理功能正确性、数据一致性、实时交互可靠性与 Android 交付。
-- TLS/WSS、Realtime 一次性票据、CORS 收敛、登录与注册限流、长期令牌存储等安全加固项纳入后续专项，不作为现阶段的功能缺陷或默认发布阻塞项。
-- 除非用户明确要求进行安全专项分析或实施安全加固，否则不要主动扩大到安全架构改造，也不要用后续安全项阻塞当前功能开发。
-- 已知安全项可以在分析中标注为“后续安全加固”，但不得与当前功能 Bug、数据丢失或协议错误混为同一缺陷优先级。
+```bash
+idf.py set-target esp32c3
+idf.py build size
+idf.py -p PORT flash monitor
+```
+
+Never claim hardware validation from a build alone. For device changes, report
+startup, display, buttons, audio, networking, heap, and any unverified physical
+checks separately. Ordinary flashing must preserve NVS; do not erase flash
+unless explicitly requested.
+
+The ESP32-C3 has no PSRAM. Evaluate image data, LVGL buffers, queue depth, task
+stacks, and temporary audio allocations against internal RAM. Avoid large LVGL
+software shadows because they can trigger the watchdog.
+
+## Style and commits
+
+Use four-space C indentation, K&R braces, `snake_case`, `s_` file-local state,
+and `BSP_*` hardware constants. Prefer focused Conventional Commit subjects.
+Do not edit generated dependencies under `managed_components/`.
