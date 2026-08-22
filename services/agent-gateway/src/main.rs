@@ -25,6 +25,7 @@ use ripple_agent_gateway::{
     config::Settings,
     context::{ContextStore, LibraryAction, LibraryScope},
     endpointing::{EndpointEvaluation, is_stop_command},
+    meetings::MeetingService,
     memory::{MemoryService, TodoUpdate},
     orchestrator::AgentOrchestrator,
     protocol::{ClientEvent, SessionMode, VideoFrame},
@@ -48,6 +49,7 @@ struct AppState {
     settings: Arc<Settings>,
     context: ContextStore,
     memories: MemoryService,
+    meetings: MeetingService,
     orchestrator: AgentOrchestrator,
 }
 
@@ -747,6 +749,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let adapters = ModelAdapters::new((*settings).clone())?;
     let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets")).await?;
+    let meetings = MeetingService::new(context.clone(), adapters.clone());
     let orchestrator = AgentOrchestrator::new(
         Arc::clone(&settings),
         context.clone(),
@@ -757,6 +760,7 @@ async fn main() -> anyhow::Result<()> {
         settings: Arc::clone(&settings),
         context,
         memories,
+        meetings,
         orchestrator,
     };
     let app = app(state);
@@ -815,6 +819,17 @@ fn app(state: AppState) -> Router {
         .route(
             "/v1/conversations/{conversation_id}/messages",
             get(conversation_messages),
+        )
+        .route("/v1/meetings", get(list_meetings).post(start_meeting))
+        .route("/v1/meetings/{meeting_id}", get(get_meeting))
+        .route("/v1/meetings/{meeting_id}/finish", post(finish_meeting))
+        .route(
+            "/v1/meetings/{meeting_id}/generate",
+            post(regenerate_meeting),
+        )
+        .route(
+            "/v1/meetings/{meeting_id}/actions/{action_id}/todo",
+            post(promote_meeting_action),
         )
         .route("/v1/memories", get(list_memories))
         .route("/v1/memories/batch", post(batch_memories))
@@ -882,6 +897,12 @@ struct TodoPatch {
 struct CreateTodoRequest {
     title: String,
     due_at: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct StartMeetingRequest {
+    conversation_id: String,
+    mode: String,
 }
 
 #[derive(Deserialize)]
@@ -1434,6 +1455,132 @@ async fn conversation_messages(
         Ok(None) => api_error(StatusCode::NOT_FOUND, "对话不存在"),
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
+}
+
+async fn list_meetings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .meetings
+        .list(&user.id, query.limit.unwrap_or(50))
+        .await
+    {
+        Ok(meetings) => Json(json!({"data": meetings})).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn get_meeting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(meeting_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.meetings.get(&user.id, &meeting_id).await {
+        Ok(Some(meeting)) => Json(json!({"data": meeting})).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn start_meeting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<StartMeetingRequest>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .meetings
+        .start(&user.id, &request.conversation_id, &request.mode)
+        .await
+    {
+        Ok(meeting) => (StatusCode::CREATED, Json(json!({"data": meeting}))).into_response(),
+        Err(error) if error.to_string().contains("不存在") => {
+            api_error(StatusCode::NOT_FOUND, &error.to_string())
+        }
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn finish_meeting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(meeting_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.meetings.finish(&user.id, &meeting_id).await {
+        Ok(Some(meeting)) => {
+            spawn_meeting_generation(state.meetings.clone(), user.id, meeting_id);
+            (StatusCode::ACCEPTED, Json(json!({"data": meeting}))).into_response()
+        }
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "会议记录不存在"),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn regenerate_meeting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(meeting_id): Path<String>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state.meetings.mark_processing(&user.id, &meeting_id).await {
+        Ok(Some(meeting)) => {
+            spawn_meeting_generation(state.meetings.clone(), user.id, meeting_id);
+            (StatusCode::ACCEPTED, Json(json!({"data": meeting}))).into_response()
+        }
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "会议记录不存在或尚未结束"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn promote_meeting_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((meeting_id, action_id)): Path<(String, String)>,
+) -> Response {
+    let user = match authenticated_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match state
+        .meetings
+        .promote_action(&user.id, &meeting_id, &action_id)
+        .await
+    {
+        Ok(Some(action)) => Json(json!({"data": action})).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "会议行动项不存在"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+fn spawn_meeting_generation(meetings: MeetingService, user_id: String, meeting_id: String) {
+    tokio::spawn(async move {
+        if let Err(error) = meetings.generate(&user_id, &meeting_id).await {
+            warn!(%meeting_id, %error, "meeting note generation failed");
+            meetings
+                .mark_failed(&user_id, &meeting_id, &error.to_string())
+                .await;
+        }
+    });
 }
 
 async fn list_memories(
@@ -3752,10 +3899,12 @@ mod tests {
         let memories = MemoryService::new(context.clone(), settings.data_dir.join("assets"))
             .await
             .unwrap();
+        let adapters = ModelAdapters::new((*settings).clone()).unwrap();
+        let meetings = MeetingService::new(context.clone(), adapters.clone());
         let orchestrator = AgentOrchestrator::new(
             Arc::clone(&settings),
             context.clone(),
-            ModelAdapters::new((*settings).clone()).unwrap(),
+            adapters,
             memories.clone(),
         )
         .unwrap();
@@ -3765,6 +3914,7 @@ mod tests {
                 settings,
                 context,
                 memories,
+                meetings,
                 orchestrator,
             },
             token,
